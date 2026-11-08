@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>动作规范性分析 · 台球 AI 教练</title>
+<style>
+  :root {
+    --bg: #141c26;
+    --stage-bg: radial-gradient(ellipse at 50% 50%, #22374d 0%, #172535 60%, #101a26 100%);
+    --panel: #182330;
+    --panel-card: rgba(28, 41, 56, 0.85);
+    --line: rgba(255, 255, 255, 0.12);
+    --text: #ffffff;
+    --text-secondary: #cbd5e1;
+    --muted: #94a3b8;
+
+    --grad-green: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    --grad-green-hover: linear-gradient(135deg, #34d399 0%, #10b981 100%);
+    --grad-blue: linear-gradient(135deg, #0ea5e9 0%, #2563eb 100%);
+    --grad-amber: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+    --grad-purple: linear-gradient(135deg, #a855f7 0%, #7c3aed 100%);
+    --grad-ruby: linear-gradient(135deg, #f43f5e 0%, #e11d48 100%);
+    --grad-spectrum: linear-gradient(90deg, #f59e0b 0%, #f97316 20%, #ef4444 40%, #a855f7 60%, #0ea5e9 80%, #10b981 100%);
+
+    --accent: #10b981;
+    --accent-light: #34d399;
+    --warn: #fbbf24;
+    --danger: #f87171;
+    --shadow-card: 0 6px 20px -2px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    --transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body {
+    margin: 0; height: 100%;
+    background: var(--bg); color: var(--text);
+    font: 14px/1.6 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+    overflow: hidden;
+  }
+  body { display: flex; flex-direction: column; }
+
+  /* 顶部导航 */
+  header {
+    height: 58px; padding: 0 20px;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, rgba(26, 38, 52, 0.96) 0%, rgba(20, 29, 41, 0.94) 100%);
+    backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+    display: flex; align-items: center; gap: 16px;
+    z-index: 100; flex-shrink: 0;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+    position: relative;
+  }
+  header::after {
+    content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 2px;
+    background: var(--grad-spectrum); opacity: 0.85;
+  }
+  .brand-group { display: flex; align-items: center; gap: 10px; }
+  .brand-logo {
+    font-size: 20px; width: 36px; height: 36px;
+    border-radius: 10px;
+    background: linear-gradient(135deg, #1e293b, #0f172a);
+    border: 2px solid rgba(255, 255, 255, 0.15);
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 700; letter-spacing: .4px; color: #fff; }
+  header .sub { color: var(--text-secondary); font-size: 12px; }
+  header nav { margin-left: auto; }
+  header nav a {
+    color: #fff; text-decoration: none; font-size: 12px; font-weight: 600;
+    padding: 6px 14px; border-radius: 8px;
+    background: var(--grad-blue);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    transition: var(--transition);
+    display: flex; align-items: center; gap: 4px;
+    box-shadow: 0 3px 10px rgba(14, 165, 233, 0.35);
+  }
+  header nav a:hover {
+    box-shadow: 0 4px 16px rgba(14, 165, 233, 0.55);
+    transform: translateY(-1px);
+  }
+
+  main { flex: 1; display: flex; min-height: 0; }
+  #stage {
+    flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 24px; min-width: 0; gap: 12px; position: relative;
+    background: var(--stage-bg);
+  }
+  #view {
+    max-width: 100%; max-height: 100%; border-radius: 12px;
+    background: #0f1722;
+    box-shadow: 0 24px 60px -5px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.1);
+  }
+  #empty {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    color: var(--text-secondary); font-size: 14px; text-align: center;
+    padding: 24px; line-height: 2; pointer-events: none;
+  }
+  #empty::before {
+    content: '📷'; font-size: 38px; margin-bottom: 12px; opacity: 0.85;
+  }
+
+  aside {
+    width: 390px; flex: none; border-left: 1px solid var(--line);
+    background: linear-gradient(180deg, #182330 0%, #131c26 100%);
+    padding: 16px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  aside::-webkit-scrollbar { width: 6px; }
+  aside::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.2); border-radius: 3px; }
+
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  button, label.btn {
+    background: linear-gradient(145deg, #243548 0%, #1c2a3a 100%);
+    color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 14px; font: inherit; font-size: 13px; font-weight: 500;
+    cursor: pointer; transition: var(--transition); display: inline-flex;
+    align-items: center; justify-content: center; gap: 6px;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  }
+  button:hover, label.btn:hover {
+    background: linear-gradient(145deg, #2d425a 0%, #223447 100%);
+    border-color: rgba(255, 255, 255, 0.25);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  }
+  button.primary, label.btn.primary {
+    background: var(--grad-green);
+    border-color: #6ee7b7; color: #ffffff; font-weight: 600;
+    box-shadow: 0 3px 14px rgba(16, 185, 129, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  }
+  button.primary:hover, label.btn.primary:hover {
+    background: var(--grad-green-hover);
+    box-shadow: 0 4px 20px rgba(16, 185, 129, 0.55);
+  }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+
+  .status {
+    font-size: 12px; color: var(--text-secondary); min-height: 20px;
+    padding: 7px 12px;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 6px; border: 1px solid var(--line);
+  }
+  .status.err { color: #fca5a5; background: rgba(244, 63, 94, 0.15); border-color: rgba(244, 63, 94, 0.4); }
+  .status.ok { color: #6ee7b7; background: rgba(16, 185, 129, 0.15); border-color: rgba(16, 185, 129, 0.4); }
+
+  .card {
+    background: var(--panel-card);
+    border: 1px solid var(--line);
+    border-radius: 10px; padding: 13px 14px; box-shadow: var(--shadow-card);
+  }
+  .card:hover {
+    background: rgba(35, 52, 72, 0.95);
+    border-color: rgba(255, 255, 255, 0.25);
+  }
+  .card h2 {
+    margin: 0 0 10px; font-size: 11px; font-weight: 700;
+    color: var(--muted); letter-spacing: 1.2px; text-transform: uppercase;
+  }
+
+  /* 综合总评分表：琥珀与翡翠渐变 */
+  .score-box {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 18px; border-radius: 10px;
+    background: linear-gradient(145deg, rgba(14, 165, 233, 0.15) 0%, rgba(20, 30, 42, 0.8) 100%);
+    border: 1px solid rgba(56, 189, 248, 0.3);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+    margin-bottom: 8px;
+  }
+  .scoreline { display: flex; align-items: baseline; gap: 12px; }
+  #score { font-size: 38px; font-weight: 750; line-height: 1; font-variant-numeric: tabular-nums; }
+  #grade { font-size: 15px; font-weight: 600; }
+  #score.s-good, #grade.s-good { color: #6ee7b7; text-shadow: 0 0 14px rgba(16, 185, 129, 0.5); }
+  #score.s-warn, #grade.s-warn { color: #fde68a; text-shadow: 0 0 14px rgba(245, 158, 11, 0.4); }
+  #score.s-bad, #grade.s-bad { color: #fca5a5; text-shadow: 0 0 14px rgba(244, 63, 94, 0.4); }
+  #score.s-none, #grade.s-none { color: var(--muted); }
+  .hint { color: var(--muted); font-size: 12px; line-height: 1.65; margin: 0; }
+  .hint b { color: var(--text-secondary); font-weight: 600; }
+
+  /* 诊断问题项：红橙暖色高亮 */
+  .issue {
+    border-left: 3px solid var(--line); padding: 7px 0 7px 12px; margin-bottom: 8px;
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 0 7px 7px 0;
+  }
+  .issue.bad { border-color: #f43f5e; background: rgba(244, 63, 94, 0.08); }
+  .issue.warn { border-color: #f59e0b; background: rgba(245, 158, 11, 0.08); }
+  .issue .t { font-size: 13px; font-weight: 600; }
+  .issue .d { font-size: 12px; color: var(--text-secondary); line-height: 1.65; margin-top: 2px; }
+
+  .grp { margin-bottom: 12px; }
+  .grp:last-child { margin-bottom: 0; }
+  .grp > .gt {
+    font-size: 11px; font-weight: 700; color: var(--muted); letter-spacing: 1px;
+    margin: 0 0 8px; display: flex; justify-content: space-between;
+  }
+  .chk {
+    display: grid; grid-template-columns: 12px 1fr auto; gap: 8px;
+    align-items: baseline; padding: 6px 0; border-top: 1px solid rgba(255, 255, 255, 0.06);
+  }
+  .chk:first-of-type { border-top: 0; }
+  .chk .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line); }
+  .chk.good .dot { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  .chk.warn .dot { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+  .chk.bad .dot { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
+  .chk.unknown .dot { background: #64748b; }
+  .chk .n { font-size: 13px; font-weight: 500; }
+  .chk .tag {
+    display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 4px;
+    font-size: 10px; line-height: 16px; color: #cbd5e1;
+    background: #243548; border: 1px solid var(--line); vertical-align: 1px;
+  }
+  .chk.unknown .tag { color: #fde68a; border-color: #854d0e; background: #2a1b08; }
+  .chk .v { font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .chk .d {
+    grid-column: 2 / -1; font-size: 12px; color: var(--muted); line-height: 1.65;
+    margin-top: 2px;
+  }
+  .chk.unknown .d { color: #64748b; font-style: italic; }
+
+  /* 逐帧进度条 */
+  input[type=range] {
+    width: 100%; margin: 6px 0; accent-color: var(--accent);
+    cursor: pointer;
+  }
+
+  details.card-collapsible {
+    background: var(--panel-card);
+    border: 1px solid var(--line);
+    border-radius: 10px; box-shadow: var(--shadow-card); overflow: hidden;
+  }
+  details.card-collapsible summary {
+    padding: 10px 14px; font-size: 11px; font-weight: 700;
+    color: var(--muted); letter-spacing: 1.2px; text-transform: uppercase;
+    cursor: pointer; list-style: none; display: flex; align-items: center; justify-content: space-between;
+    user-select: none;
+  }
+  details.card-collapsible summary::-webkit-details-marker { display: none; }
+  details.card-collapsible summary::after {
+    content: '▾'; font-size: 13px; color: var(--muted); transition: transform 0.2s ease;
+  }
+  details.card-collapsible[open] summary::after { transform: rotate(180deg); }
+  details.card-collapsible .details-body {
+    padding: 0 14px 12px; border-top: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  footer {
+    padding: 8px 20px; border-top: 1px solid var(--line);
+    color: var(--muted); font-size: 12px;
+    background: linear-gradient(180deg, #182330 0%, #111a24 100%);
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand-group">
+    <div class="brand-logo">🎱</div>
+    <h1>动作规范性分析</h1>
+  </div>
+  <span class="sub">上传照片或视频 · 全部在本机浏览器内计算，不上传任何文件</span>
+  <nav><a href="./index.html">← 回到击球求解</a></nav>
+</header>
+
+<main>
+  <div id="stage">
+    <canvas id="view" width="640" height="480"></canvas>
+    <div id="empty">还没有素材。<br>点右侧「选择图片」或「选择视频」开始。</div>
+    <video id="video" playsinline muted hidden></video>
+  </div>
+
+  <aside>
+    <div class="row">
+      <label class="btn primary" style="flex:1">📷 选择图片<input type="file" id="pickImage" accept="image/*" hidden></label>
+      <label class="btn" style="flex:1;background:var(--grad-blue);border-color:#38bdf8;color:#fff;font-weight:600">🎬 选择视频<input type="file" id="pickVideo" accept="video/*" hidden></label>
+    </div>
+    <div id="status" class="status">首次分析需要加载姿态模型（约 5 MB），之后会复用。</div>
+
+    <div class="card" id="scrubCard" hidden>
+      <h2>逐帧查看</h2>
+      <input type="range" id="scrub" min="0" max="0" value="0" step="1">
+      <div id="scrubInfo" class="hint"></div>
+    </div>
+
+    <div class="card">
+      <h2>综合规范性总评</h2>
+      <div class="score-box">
+        <div class="scoreline">
+          <span id="score" class="s-none">—</span>
+          <span id="grade" class="s-none"></span>
+        </div>
+      </div>
+      <div id="conf" class="hint"></div>
+    </div>
+
+    <div class="card">
+      <h2>最该改进的关键点</h2>
+      <div id="issues" class="empty">—</div>
+    </div>
+
+    <div class="card">
+      <h2>逐条检查详情</h2>
+      <div id="checks" class="empty">—</div>
+    </div>
+
+    <details class="card-collapsible">
+      <summary>怎么读这份报告</summary>
+      <div class="details-body">
+        <p class="hint" style="margin-top:8px">
+          每条检查都是<b>「测量值 → 参考区间 → 结论」</b>，参考区间来自公开的教练检查表，
+          不是拍脑袋定的。区间内是<b>规范</b>，边界外是<b>需要改</b>。
+        </p>
+        <p class="hint" style="margin-top:6px">
+          <b>测不出来的项会标成「测不了」，并且不计入总分</b>——不会当成 0 分，
+          也不会用猜测填补。被遮挡的关节、只拍到上半身的照片都会导致这种情况。
+        </p>
+        <p class="hint" style="margin-top:6px">
+          标着<b>「测不准」</b>的项，意思是量到的值离参考边界太近，而单目相机在这一项上的
+          实测波动比这个差距还大（比如「后手前臂垂直」的波动就有 ±19°）。这种情况不判，
+          因为判了也是猜的。标着<b>「单目易失真」</b>的项，是天生波动就大的指标，看个趋势就好。
+        </p>
+        <p class="hint" style="margin-top:6px">
+          照片只能看站姿（7 项）。出杆的 5 项需要视频：要看出杆直不直、掉不掉肘、
+          头晃不晃、送杆够不够、节奏稳不稳。<b>视频的站姿项会比照片准</b>——
+          准备阶段的几十帧会被平均，随机噪声按帧数平方根下降。
+        </p>
+        <p class="hint" style="margin-top:6px">
+          证据覆盖率低于 45% 时干脆不给总分，只报能测到的项。
+        </p>
+      </div>
+    </details>
+  </aside>
+</main>
+
+<footer>MediaPipe Pose Landmarker（Apache-2.0）· 判定规则为原创实现，思路参考公开教练检查表</footer>
+
+<script type="module" src="./pose.js"></script>
+</body>
+</html>

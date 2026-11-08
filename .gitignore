@@ -1,0 +1,21 @@
+# 依赖与构建产物（本项目零依赖，正常不会有 node_modules）
+node_modules/
+
+# 调研过程的原始数据：GitHub API 抓取结果、探针脚本、浏览器截图、CPU profile。
+# 结论已经写进 README 的「设计来源与许可证」和各个校准小节，这里是留档。
+_research/
+
+# WPA 规则 PDF 的抽取中间产物（extract 脚本 + 原文 PDF + 抽出的文本）
+.tmp_wpa/
+
+# DSH 会话记忆与每日日志，属于本机运行态，不是项目内容
+.deepseek-harness/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log

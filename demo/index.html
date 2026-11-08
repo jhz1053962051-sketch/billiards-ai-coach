@@ -1,0 +1,1226 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>台球 AI 教练 · 击球几何与物理仿真</title>
+<style>
+  :root {
+    /* 缤纷台球主题：明朗通透的竞技沙盘底色 + 真实 1-15 号球全谱渐变 */
+    --bg: #141c26;
+    --stage-bg: radial-gradient(ellipse at 50% 50%, #22374d 0%, #172535 60%, #101a26 100%);
+    --panel: #182330;
+    --panel-card: rgba(28, 41, 56, 0.85);
+    --panel-card-hover: rgba(35, 52, 72, 0.95);
+    --line: rgba(255, 255, 255, 0.12);
+    --line-light: rgba(255, 255, 255, 0.2);
+    --text: #ffffff;
+    --text-secondary: #cbd5e1;
+    --muted: #94a3b8;
+
+    /* 多彩台球色球渐变（黄、蓝、红、紫、橙、绿、酒红、曜石黑） */
+    --grad-green: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    --grad-green-hover: linear-gradient(135deg, #34d399 0%, #10b981 100%);
+    --grad-blue: linear-gradient(135deg, #0ea5e9 0%, #2563eb 100%);
+    --grad-blue-hover: linear-gradient(135deg, #38bdf8 0%, #0284c7 100%);
+    --grad-amber: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+    --grad-amber-hover: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%);
+    --grad-purple: linear-gradient(135deg, #a855f7 0%, #7c3aed 100%);
+    --grad-purple-hover: linear-gradient(135deg, #c084fc 0%, #9333ea 100%);
+    --grad-orange: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
+    --grad-ruby: linear-gradient(135deg, #f43f5e 0%, #e11d48 100%);
+    --grad-indigo: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
+
+    /* 台球全色系光谱彩带 */
+    --grad-spectrum: linear-gradient(90deg, #f59e0b 0%, #f97316 20%, #ef4444 40%, #a855f7 60%, #0ea5e9 80%, #10b981 100%);
+
+    --accent: #10b981;
+    --accent-light: #34d399;
+    --warn: #fbbf24;
+    --danger: #f87171;
+    --radius-sm: 6px;
+    --radius-md: 10px;
+    --radius-lg: 14px;
+    --shadow-card: 0 6px 20px -2px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    --transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%;
+    background: var(--bg); color: var(--text);
+    font: 14px/1.6 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+    overflow: hidden;
+  }
+  body { display: flex; flex-direction: column; }
+
+  /* 顶部导航栏：通透明朗，底部嵌台球全谱彩虹微光线条 */
+  header {
+    min-height: 58px; padding: 0 20px;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, rgba(26, 38, 52, 0.96) 0%, rgba(20, 29, 41, 0.94) 100%);
+    backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+    display: flex; align-items: center; gap: 16px;
+    z-index: 100; flex-shrink: 0;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+    position: relative;
+  }
+  header::after {
+    content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 2px;
+    background: var(--grad-spectrum); opacity: 0.85;
+  }
+
+  .brand-group { display: flex; align-items: center; gap: 10px; }
+  .brand-logo {
+    font-size: 20px; width: 36px; height: 36px;
+    border-radius: 10px;
+    background: linear-gradient(135deg, #1e293b, #0f172a);
+    border: 2px solid rgba(255, 255, 255, 0.15);
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  }
+  header h1 {
+    font-size: 15px; margin: 0; font-weight: 700;
+    letter-spacing: .4px; color: #fff;
+    display: flex; align-items: center; gap: 8px;
+    white-space: nowrap;
+  }
+  .badge-ai {
+    font-size: 10px; font-weight: 800; padding: 2px 7px; border-radius: 5px;
+    background: var(--grad-amber);
+    color: #1a0f00; letter-spacing: 0.5px;
+    box-shadow: 0 2px 6px rgba(245, 158, 11, 0.4);
+  }
+  .tabs {
+    display: flex; gap: 3px;
+    background: rgba(15, 23, 34, 0.65);
+    border: 1px solid var(--line); border-radius: 8px; padding: 3px;
+  }
+  .tabs button {
+    border: 0; background: transparent; color: var(--muted); padding: 6px 16px;
+    border-radius: 6px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+    transition: var(--transition);
+  }
+  .tabs button:hover { color: var(--text); }
+  .tabs button.on {
+    background: var(--grad-blue);
+    color: #ffffff; font-weight: 600;
+    box-shadow: 0 2px 10px rgba(14, 165, 233, 0.45);
+  }
+  .sub-pill {
+    display: flex; align-items: center; gap: 6px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--line);
+    border-radius: 20px; padding: 4px 14px;
+  }
+  header .sub {
+    color: var(--text-secondary); font-size: 12px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 440px;
+  }
+  header select {
+    background: linear-gradient(145deg, #243547 0%, #1a2735 100%);
+    color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 12px; font: inherit; font-size: 12px;
+    outline: none; cursor: pointer; transition: var(--transition);
+  }
+  header select:hover { border-color: rgba(14, 165, 233, 0.5); }
+  header nav { margin-left: auto; }
+  header nav a {
+    color: #fff; text-decoration: none; font-size: 12px; font-weight: 600;
+    padding: 6px 14px; border-radius: 8px;
+    background: var(--grad-purple);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    transition: var(--transition);
+    display: flex; align-items: center; gap: 4px;
+    box-shadow: 0 3px 10px rgba(168, 85, 247, 0.35);
+  }
+  header nav a:hover {
+    background: var(--grad-purple-hover);
+    box-shadow: 0 4px 16px rgba(168, 85, 247, 0.55);
+    transform: translateY(-1px);
+  }
+
+  /* 主体舞台区域：通透敞亮的现代球馆顶灯 */
+  main { flex: 1; display: flex; min-height: 0; position: relative; }
+  #stage {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    padding: 24px; min-width: 0; position: relative;
+    background: var(--stage-bg);
+    overflow: hidden;
+  }
+  .stage-controls {
+    position: absolute;
+    top: 20px;
+    right: 24px;
+    z-index: 20;
+    display: flex;
+    gap: 10px;
+    pointer-events: none;
+  }
+  .view-toggle-btn {
+    pointer-events: auto;
+    background: linear-gradient(135deg, rgba(26, 38, 52, 0.92) 0%, rgba(17, 26, 36, 0.92) 100%);
+    border: 1px solid rgba(255, 255, 255, 0.20);
+    border-radius: 20px;
+    padding: 6px 14px;
+    color: #ffffff;
+    font-size: 13px;
+    font-weight: 600;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    transition: var(--transition);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+  .view-toggle-btn:hover {
+    background: linear-gradient(135deg, rgba(38, 56, 76, 0.96) 0%, rgba(24, 38, 54, 0.96) 100%);
+    border-color: rgba(14, 165, 233, 0.65);
+    box-shadow: 0 6px 20px rgba(14, 165, 233, 0.4);
+    transform: translateY(-1px);
+  }
+  .view-toggle-btn.fpv {
+    background: linear-gradient(135deg, rgba(14, 165, 233, 0.35) 0%, rgba(16, 185, 129, 0.25) 100%);
+    border-color: #38bdf8;
+    box-shadow: 0 0 18px rgba(14, 165, 233, 0.45), inset 0 0 4px #38bdf8;
+  }
+  .view-toggle-btn kbd {
+    font-size: 11px;
+    padding: 1px 6px;
+    background: rgba(255, 255, 255, 0.12);
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    border-radius: 4px;
+    color: #38bdf8;
+  }
+  canvas {
+    max-width: 100%; max-height: 100%; touch-action: none; cursor: grab;
+    border-radius: 12px;
+    box-shadow: 0 24px 60px -5px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.1), 0 0 45px rgba(14, 165, 233, 0.12);
+    transition: transform 0.15s ease;
+  }
+  canvas.dragging { cursor: grabbing; }
+  canvas.placing { cursor: crosshair; }
+
+  /* 侧边操作栏：明朗清爽的卡片布局 */
+  aside {
+    width: 386px; flex: none; border-left: 1px solid var(--line);
+    background: linear-gradient(180deg, #182330 0%, #131c26 100%);
+    padding: 16px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 13px;
+  }
+  aside::-webkit-scrollbar { width: 6px; }
+  aside::-webkit-scrollbar-track { background: transparent; }
+  aside::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.2); border-radius: 3px; }
+  aside::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.35); }
+
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  button {
+    background: linear-gradient(145deg, #243548 0%, #1c2a3a 100%);
+    color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 13px; font: inherit; font-size: 13px; font-weight: 500;
+    cursor: pointer; transition: var(--transition);
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  }
+  button:hover {
+    background: linear-gradient(145deg, #2d425a 0%, #223447 100%);
+    border-color: var(--line-light);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  }
+  button:active { transform: translateY(0); }
+  button.primary {
+    background: var(--grad-green);
+    border-color: #6ee7b7; color: #ffffff; font-weight: 600;
+    box-shadow: 0 3px 14px rgba(16, 185, 129, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  }
+  button.primary:hover {
+    background: var(--grad-green-hover);
+    box-shadow: 0 4px 20px rgba(16, 185, 129, 0.55);
+    border-color: #a7f3d0;
+  }
+  button:disabled { opacity: .45; cursor: not-allowed; transform: none !important; box-shadow: none !important; }
+
+  select {
+    background: linear-gradient(145deg, #243548 0%, #1c2a3a 100%);
+    color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 10px; font: inherit; font-size: 13px;
+    outline: none; transition: var(--transition);
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.2);
+  }
+  select:hover { border-color: rgba(255, 255, 255, 0.25); }
+
+  /* 卡片：不同功能模块拥有辨识度极高彩色发光边框 */
+  .card {
+    background: var(--panel-card);
+    border: 1px solid var(--line);
+    border-radius: 10px; padding: 13px 14px; box-shadow: var(--shadow-card);
+    transition: border-color .15s, box-shadow .15s, background .15s;
+  }
+  .card:hover {
+    background: var(--panel-card-hover);
+    border-color: rgba(255, 255, 255, 0.25);
+    box-shadow: 0 8px 24px -2px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  }
+  .card h2 {
+    margin: 0 0 10px; font-size: 11px; font-weight: 700;
+    color: var(--muted); letter-spacing: 1.2px; text-transform: uppercase;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+
+  /* AI 战术核心卡：翡翠绿主题 */
+  .card.hero {
+    border-left: 3px solid #10b981;
+    background: linear-gradient(155deg, rgba(16, 185, 129, 0.15) 0%, rgba(28, 41, 56, 0.9) 60%);
+    box-shadow: 0 6px 22px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(16, 185, 129, 0.3);
+  }
+  /* 备选方案卡：晴空蓝主题 */
+  .card.alts-card {
+    border-left: 3px solid #0ea5e9;
+    background: linear-gradient(155deg, rgba(14, 165, 233, 0.12) 0%, rgba(28, 41, 56, 0.9) 60%);
+  }
+  /* 手打微调卡：琥珀橙金主题 */
+  .card.tune-card {
+    border-left: 3px solid #f59e0b;
+    background: linear-gradient(155deg, rgba(245, 158, 11, 0.12) 0%, rgba(28, 41, 56, 0.9) 60%);
+  }
+  /* 摆球卡：罗兰紫主题 */
+  .card.rack-card {
+    border-left: 3px solid #a855f7;
+    background: linear-gradient(155deg, rgba(168, 85, 247, 0.12) 0%, rgba(28, 41, 56, 0.9) 60%);
+  }
+
+  /* 建议与结论 */
+  #advice {
+    font-size: 14px; line-height: 1.65; color: #ffffff;
+    word-break: break-word; font-weight: 500;
+  }
+  #advice.empty { color: var(--muted); font-weight: 400; }
+  #verdict {
+    margin-top: 8px; color: #6ee7b7; font-size: 12px; font-weight: 600;
+    display: inline-block; padding: 2px 10px; border-radius: 6px;
+    background: linear-gradient(135deg, rgba(16, 185, 129, 0.25) 0%, rgba(5, 150, 105, 0.15) 100%);
+    border: 1px solid rgba(16, 185, 129, 0.45);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+  }
+  #verdict:empty { display: none; }
+  #verdict.hard {
+    color: #fde68a;
+    background: linear-gradient(135deg, rgba(245, 158, 11, 0.28) 0%, rgba(217, 119, 6, 0.16) 100%);
+    border-color: rgba(251, 191, 36, 0.5);
+  }
+  #verdict.brutal {
+    color: #fca5a5;
+    background: linear-gradient(135deg, rgba(239, 68, 68, 0.28) 0%, rgba(185, 28, 28, 0.16) 100%);
+    border-color: rgba(248, 113, 113, 0.5);
+  }
+  /* 难度档位的精度前提。档位名本身有前提（±0.2°），不写出来会误导：
+     同一个「很容易」，瞄得准是 97%，瞄得松就只剩 80%。 */
+  .verdict-note {
+    margin-top: 8px; color: var(--muted); font-size: 11px; line-height: 1.55;
+    padding-left: 2px;
+  }
+
+  /* 备选方案列表：晴空蓝高亮渐变 */
+  .alt {
+    display: flex; justify-content: space-between; gap: 8px; align-items: center;
+    padding: 8px 10px; border-radius: 7px; cursor: pointer; border: 1px solid transparent;
+    background: rgba(255, 255, 255, 0.03);
+    transition: var(--transition);
+  }
+  .alt:hover {
+    background: rgba(14, 165, 233, 0.15);
+    border-color: rgba(14, 165, 233, 0.4); transform: translateX(2px);
+  }
+  .alt.active {
+    background: linear-gradient(135deg, rgba(14, 165, 233, 0.25) 0%, rgba(37, 99, 235, 0.15) 100%);
+    border-color: #38bdf8;
+    box-shadow: inset 0 0 12px rgba(14, 165, 233, 0.2), 0 2px 8px rgba(0, 0, 0, 0.25);
+  }
+  .alt .name { font-size: 13px; font-weight: 500; display: block; }
+  .alt .position { color: #7dd3fc; font-size: 11px; display: block; line-height: 1.4; }
+  .alt .meta { color: var(--text-secondary); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .empty { color: var(--muted); font-size: 13px; }
+  .hint { color: var(--muted); font-size: 12px; line-height: 1.65; margin: 0 0 6px; }
+  .hint b { color: var(--text-secondary); font-weight: 600; }
+
+  /* 开关控件：明快蓝色切换 */
+  label.switch {
+    display: flex; align-items: center; gap: 9px; font-size: 13px;
+    color: var(--text-secondary); cursor: pointer; user-select: none;
+    padding: 3px 0;
+  }
+  label.switch input[type=checkbox] {
+    appearance: none; -webkit-appearance: none;
+    width: 36px; height: 19px; border-radius: 10px;
+    background: #233448; border: 1px solid var(--line);
+    position: relative; cursor: pointer; transition: var(--transition);
+    flex-shrink: 0; box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.4);
+  }
+  label.switch input[type=checkbox]::after {
+    content: ''; position: absolute; top: 2px; left: 2px;
+    width: 13px; height: 13px; border-radius: 50%;
+    background: #94a3b8; transition: var(--transition);
+  }
+  label.switch input[type=checkbox]:checked {
+    background: var(--grad-blue);
+    border-color: #38bdf8;
+    box-shadow: 0 0 10px rgba(14, 165, 233, 0.45);
+  }
+  label.switch input[type=checkbox]:checked::after {
+    transform: translateX(17px);
+    background: #ffffff;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  }
+
+  /* 击球点 2D 示意靶盘：珍珠白立体母球 */
+  .cue-pad-row {
+    display: flex; align-items: center; gap: 14px;
+    background: rgba(15, 23, 34, 0.65);
+    border: 1px solid var(--line);
+    border-radius: 9px; padding: 10px 12px; margin-bottom: 12px;
+  }
+  .cue-ball-pad {
+    position: relative; width: 70px; height: 70px; border-radius: 50%;
+    background: radial-gradient(circle at 35% 35%, #ffffff 0%, #f1f5f9 50%, #cbd5e1 80%, #94a3b8 100%);
+    box-shadow: inset 0 2px 6px rgba(255, 255, 255, 0.95), 0 6px 18px rgba(0, 0, 0, 0.5), 0 0 14px rgba(14, 165, 233, 0.25);
+    cursor: crosshair; touch-action: none; flex-shrink: 0; user-select: none;
+    border: 1px solid rgba(255, 255, 255, 0.6);
+  }
+  .cue-ball-crosshair-h, .cue-ball-crosshair-v {
+    position: absolute; background: rgba(71, 85, 105, 0.5); pointer-events: none;
+  }
+  .cue-ball-crosshair-h { left: 12%; right: 12%; top: 50%; height: 1px; }
+  .cue-ball-crosshair-v { top: 12%; bottom: 12%; left: 50%; width: 1px; }
+  .cue-ball-dot {
+    position: absolute; width: 13px; height: 13px; border-radius: 50%;
+    background: var(--grad-ruby);
+    border: 2px solid #ffffff;
+    box-shadow: 0 0 10px rgba(244, 63, 94, 0.95), 0 2px 4px rgba(0, 0, 0, 0.4);
+    transform: translate(-50%, -50%); left: 50%; top: 50%; pointer-events: none;
+  }
+  .cue-pad-info { font-size: 12px; color: var(--muted); line-height: 1.5; }
+  .cue-pad-info b { color: var(--text); font-weight: 600; }
+
+  /* 4 个滑块采用多彩色调区分 */
+  .ctrl { margin: 0 0 10px; }
+  .ctrl label {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;
+  }
+  .ctrl label b {
+    color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums;
+    background: rgba(255, 255, 255, 0.08);
+    padding: 1px 7px; border-radius: 4px;
+    border: 1px solid var(--line);
+  }
+  .ctrl input[type=range] {
+    width: 100%; margin: 0; height: 18px; background: transparent; cursor: pointer;
+    -webkit-appearance: none; appearance: none;
+  }
+  .ctrl input[type=range]::-webkit-slider-runnable-track {
+    height: 5px;
+    background: #233448;
+    border-radius: 3px; border: 1px solid var(--line);
+  }
+  /* 力度：翡翠绿到炽红渐变滑块 */
+  #power::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; margin-top: -6px;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--grad-green);
+    border: 2px solid #ffffff; box-shadow: 0 2px 8px rgba(16, 185, 129, 0.6);
+  }
+  /* 侧边栏力度快捷档位微调按钮 */
+  .power-chips-row {
+    display: flex; gap: 5px; margin-top: 6px;
+  }
+  .power-chip {
+    flex: 1; padding: 4px 0; font-size: 11px; font-weight: 600;
+    border-radius: 6px; background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--line); color: var(--text-secondary);
+    cursor: pointer; transition: var(--transition);
+  }
+  .power-chip:hover {
+    background: rgba(14, 165, 233, 0.22);
+    border-color: #38bdf8; color: #ffffff;
+    transform: translateY(-1px);
+  }
+  .power-chip.active {
+    background: linear-gradient(135deg, rgba(14, 165, 233, 0.35) 0%, rgba(16, 185, 129, 0.25) 100%);
+    border-color: #38bdf8; color: #ffffff;
+    box-shadow: 0 0 8px rgba(14, 165, 233, 0.35);
+  }
+
+  /* 经典垂直拉杆能量槽（参考 8 Ball Pool / 腾讯桌球） */
+  .cue-power-meter {
+    position: absolute;
+    left: 20px;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 25;
+    width: 66px;
+    background: linear-gradient(180deg, rgba(20, 30, 44, 0.94) 0%, rgba(12, 18, 26, 0.94) 100%);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 18px;
+    padding: 12px 8px 10px;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+    transition: box-shadow 0.2s ease, border-color 0.2s ease;
+  }
+  .cue-power-meter:hover {
+    border-color: rgba(56, 189, 248, 0.45);
+    box-shadow: 0 18px 46px rgba(0, 0, 0, 0.65), 0 0 20px rgba(14, 165, 233, 0.2);
+  }
+  .power-meter-header {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    width: 100%;
+  }
+  .power-meter-title {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+  .power-meter-badge-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .power-tier-badge {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 6px;
+    color: #fff;
+    background: #10b981;
+    box-shadow: 0 2px 8px rgba(16, 185, 129, 0.4);
+    transition: background 0.2s ease, box-shadow 0.2s ease;
+  }
+  .power-pct-text {
+    font-size: 12px;
+    font-weight: 800;
+    color: #f8fafc;
+    font-variant-numeric: tabular-nums;
+  }
+  .power-speed-text {
+    font-size: 10px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+  .power-meter-body {
+    position: relative;
+    width: 100%;
+    display: flex;
+    justify-content: center;
+    padding: 4px 0;
+  }
+  .power-track {
+    position: relative;
+    width: 24px;
+    height: 220px;
+    background: linear-gradient(180deg, #090e15 0%, #111a24 100%);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 12px;
+    box-shadow: inset 0 3px 8px rgba(0, 0, 0, 0.8), 0 1px 2px rgba(255, 255, 255, 0.1);
+    cursor: pointer;
+    overflow: visible;
+  }
+  .power-fill {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 27%;
+    border-radius: 11px;
+    background: linear-gradient(to top, #10b981 0%, #06b6d4 35%, #f59e0b 70%, #ef4444 100%);
+    background-size: 100% 220px;
+    background-position: bottom;
+    box-shadow: 0 0 14px rgba(16, 185, 129, 0.5);
+    pointer-events: none;
+    transition: height 0.05s ease-out;
+  }
+  .power-scale-marks {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+  .scale-mark {
+    position: absolute;
+    left: -3px;
+    right: -3px;
+    height: 1px;
+    background: rgba(255, 255, 255, 0.25);
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+  }
+  .scale-mark i {
+    font-style: normal;
+    font-size: 9px;
+    color: rgba(255, 255, 255, 0.6);
+    position: absolute;
+    right: 27px;
+    font-weight: 600;
+  }
+  .scale-mark.mark-100 { bottom: 100%; background: rgba(239, 68, 68, 0.6); }
+  .scale-mark.mark-75 { bottom: 75%; background: rgba(245, 158, 11, 0.5); }
+  .scale-mark.mark-50 { bottom: 50%; background: rgba(14, 165, 233, 0.4); }
+  .scale-mark.mark-25 { bottom: 25%; background: rgba(16, 185, 129, 0.4); }
+  .scale-mark.mark-100 i { color: #f87171; }
+  .scale-mark.mark-75 i { color: #fbbf24; }
+  .scale-mark.mark-50 i { color: #38bdf8; }
+  .scale-mark.mark-25 i { color: #34d399; }
+
+  .power-handle {
+    position: absolute;
+    left: 50%;
+    bottom: 27%;
+    transform: translate(-50%, 50%);
+    width: 32px;
+    height: 14px;
+    border-radius: 7px;
+    background: linear-gradient(180deg, #f8fafc 0%, #94a3b8 100%);
+    border: 1px solid #ffffff;
+    box-shadow: 0 3px 8px rgba(0, 0, 0, 0.6), 0 0 10px rgba(56, 189, 248, 0.6);
+    cursor: grab;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: bottom 0.05s ease-out, transform 0.1s ease;
+  }
+  .power-handle:active, .power-handle.dragging {
+    cursor: grabbing;
+    transform: translate(-50%, 50%) scale(1.12);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.8), 0 0 16px rgba(56, 189, 248, 0.9);
+  }
+  .handle-grip {
+    width: 14px;
+    height: 2px;
+    background: #334155;
+    border-radius: 1px;
+    box-shadow: 0 3px 0 #334155, 0 -3px 0 #334155;
+  }
+
+  .power-meter-presets {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+    width: 100%;
+    margin-top: 2px;
+  }
+  .power-meter-chip {
+    padding: 3px 0;
+    font-size: 10px;
+    font-weight: 700;
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: var(--transition);
+  }
+  .power-meter-chip:hover {
+    background: rgba(14, 165, 233, 0.25);
+    border-color: #38bdf8;
+    color: #ffffff;
+    transform: translateY(-1px);
+  }
+  .power-meter-chip.active {
+    background: linear-gradient(135deg, rgba(14, 165, 233, 0.4) 0%, rgba(16, 185, 129, 0.3) 100%);
+    border-color: #38bdf8;
+    color: #fff;
+    box-shadow: 0 0 8px rgba(14, 165, 233, 0.4);
+  }
+  #power::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; margin-top: -6px;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--grad-green);
+    border: 2px solid #ffffff; box-shadow: 0 2px 8px rgba(16, 185, 129, 0.6);
+  }
+  /* 瞄准偏移：晴空蓝 */
+  #aimOffset::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; margin-top: -6px;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--grad-blue);
+    border: 2px solid #ffffff; box-shadow: 0 2px 8px rgba(14, 165, 233, 0.6);
+  }
+  /* 高低杆：琥珀黄 */
+  #tipB::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; margin-top: -6px;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--grad-amber);
+    border: 2px solid #ffffff; box-shadow: 0 2px 8px rgba(245, 158, 11, 0.6);
+  }
+  /* 左右塞：紫罗兰 */
+  #tipA::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; margin-top: -6px;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--grad-purple);
+    border: 2px solid #ffffff; box-shadow: 0 2px 8px rgba(168, 85, 247, 0.6);
+  }
+  .ctrl input[type=range]:disabled { opacity: .4; cursor: not-allowed; }
+
+  button:focus-visible, select:focus-visible, input[type=checkbox]:focus-visible, a:focus-visible {
+    outline: 2px solid #38bdf8; outline-offset: 2px;
+  }
+  kbd {
+    font: inherit; font-size: 11px; padding: 1px 6px; border-radius: 4px;
+    background: linear-gradient(180deg, #283a4e 0%, #1a2736 100%);
+    border: 1px solid rgba(255, 255, 255, 0.2); border-bottom-width: 2px; color: var(--text);
+  }
+  .kb { display: grid; grid-template-columns: auto 1fr; gap: 5px 12px; font-size: 12px; color: var(--text-secondary); }
+  .kb kbd { justify-self: start; white-space: nowrap; }
+
+  /* 可折叠卡片 */
+  details.card-collapsible {
+    background: var(--panel-card);
+    border: 1px solid var(--line);
+    border-radius: 10px; box-shadow: var(--shadow-card); overflow: hidden;
+  }
+  details.card-collapsible summary {
+    padding: 10px 14px; font-size: 11px; font-weight: 700;
+    color: var(--muted); letter-spacing: 1.2px; text-transform: uppercase;
+    cursor: pointer; list-style: none; display: flex; align-items: center; justify-content: space-between;
+    user-select: none; transition: background .15s;
+  }
+  details.card-collapsible summary:hover { background: rgba(255, 255, 255, 0.04); }
+  details.card-collapsible summary::-webkit-details-marker { display: none; }
+  details.card-collapsible summary::after {
+    content: '▾'; font-size: 13px; color: var(--muted); transition: transform 0.2s ease;
+  }
+  details.card-collapsible[open] summary::after { transform: rotate(180deg); }
+  details.card-collapsible .details-body {
+    padding: 0 14px 12px; border-top: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  /* 锦标赛记分牌：全色金/花色蓝清晰夺目 */
+  .score { display: flex; flex-direction: column; gap: 7px; }
+  .who {
+    display: flex; align-items: center; gap: 9px; padding: 10px 12px;
+    border-radius: 8px; border: 1px solid var(--line);
+    background: rgba(15, 23, 34, 0.6);
+    transition: var(--transition);
+  }
+  .who.turn {
+    border-color: #38bdf8;
+    background: linear-gradient(135deg, rgba(14, 165, 233, 0.25) 0%, rgba(37, 99, 235, 0.1) 100%);
+    box-shadow: 0 0 20px rgba(14, 165, 233, 0.3), inset 0 0 2px #38bdf8;
+  }
+  .who .nm { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 7px; }
+  .who.turn .nm::before {
+    content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--grad-green);
+    box-shadow: 0 0 10px #34d399;
+    animation: turnPulse 1.6s infinite ease-in-out;
+  }
+  @keyframes turnPulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.35; transform: scale(0.75); }
+  }
+  .who .tag2 {
+    font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 5px;
+    background: #243548; border: 1px solid var(--line); color: var(--text-secondary);
+  }
+  .who .tag2.solid {
+    background: var(--grad-amber);
+    border-color: #fcd34d; color: #1a0f00;
+    box-shadow: 0 2px 6px rgba(245, 158, 11, 0.4);
+  }
+  .who .tag2.stripe {
+    background: var(--grad-blue);
+    border-color: #7dd3fc; color: #ffffff;
+    box-shadow: 0 2px 6px rgba(14, 165, 233, 0.4);
+  }
+  .who .tag2.eight {
+    background: linear-gradient(145deg, #334155, #1e293b);
+    border-color: #64748b; color: #f8fafc;
+  }
+  .who .fs {
+    margin-left: auto; color: #fee2e2; font-size: 12px; font-weight: 700;
+    padding: 1px 7px;
+    background: var(--grad-ruby);
+    border-radius: 4px; border: 1px solid #f87171;
+    box-shadow: 0 2px 6px rgba(244, 63, 94, 0.4);
+  }
+
+  #report { font-size: 13px; line-height: 1.65; }
+  #report.empty { color: var(--muted); }
+  #report .foul { color: var(--danger); font-weight: 600; }
+  #gAdvice { font-size: 14px; line-height: 1.65; color: #ffffff; font-weight: 500; }
+  #gAdvice.empty { color: var(--muted); font-weight: 400; }
+  #gVerdict {
+    margin-top: 8px; color: #6ee7b7; font-size: 12px; font-weight: 600;
+    display: inline-block; padding: 2px 10px; border-radius: 6px;
+    background: linear-gradient(135deg, rgba(16, 185, 129, 0.25) 0%, rgba(5, 150, 105, 0.15) 100%);
+    border: 1px solid rgba(16, 185, 129, 0.45);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+  }
+  #gVerdict:empty { display: none; }
+  #gVerdict.hard {
+    color: #fde68a;
+    background: linear-gradient(135deg, rgba(245, 158, 11, 0.28) 0%, rgba(217, 119, 6, 0.16) 100%);
+    border-color: rgba(251, 191, 36, 0.5);
+  }
+  #gVerdict.brutal {
+    color: #fca5a5;
+    background: linear-gradient(135deg, rgba(239, 68, 68, 0.28) 0%, rgba(185, 28, 28, 0.16) 100%);
+    border-color: rgba(248, 113, 113, 0.5);
+  }
+
+  .log {
+    max-height: 160px; overflow-y: auto; font-size: 12px;
+    color: var(--text-secondary); line-height: 1.65;
+  }
+  .log div { padding: 4px 0; border-bottom: 1px dashed rgba(255, 255, 255, 0.08); }
+  .log div:last-child { border-bottom: 0; }
+  .log::-webkit-scrollbar { width: 4px; }
+  .log::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.2); border-radius: 2px; }
+  .practice-buckets {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px;
+    margin: 8px 0; color: var(--text-secondary); font-size: 11px;
+  }
+  .practice-buckets div {
+    padding: 6px; border: 1px solid var(--line); border-radius: 6px;
+    background: rgba(255, 255, 255, 0.03); text-align: center;
+  }
+  .practice-buckets b { display: block; color: var(--text); font-size: 13px; }
+  .practice-week { margin-top: 10px; }
+  .practice-goal { margin-top: 10px; }
+  .practice-goal-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .practice-goal-header label { color: var(--text-secondary); font-size: 12px; }
+  .practice-goal-header select {
+    padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px;
+    background: #1b2938; color: var(--text); font: inherit; font-size: 12px;
+  }
+  .practice-goal-track {
+    height: 8px; margin-top: 6px; overflow: hidden;
+    border-radius: 999px; background: rgba(255, 255, 255, 0.08);
+  }
+  .practice-goal-fill {
+    width: 0; height: 100%; border-radius: inherit;
+    background: linear-gradient(90deg, #0ea5e9, #34d399);
+    transition: width 0.25s ease;
+  }
+  .practice-trend {
+    display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 5px;
+    margin-top: 7px; text-align: center;
+  }
+  .practice-day {
+    display: flex; min-width: 0; flex-direction: column; align-items: center;
+    color: var(--muted); font-size: 10px; line-height: 1.35;
+  }
+  .practice-day-rate { color: var(--text-secondary); font-size: 10px; min-height: 14px; }
+  .practice-day-track {
+    display: flex; width: 100%; height: 54px; align-items: flex-end; justify-content: center;
+    overflow: hidden; border-radius: 5px; background: rgba(255, 255, 255, 0.06);
+  }
+  .practice-day-bar {
+    width: 62%; min-height: 2px; border-radius: 4px 4px 0 0;
+    background: linear-gradient(180deg, #34d399, #059669);
+  }
+  .practice-day-bar.no-data { background: rgba(148, 163, 184, 0.25); }
+  .practice-day-count { color: var(--text-secondary); margin-top: 3px; white-space: nowrap; }
+  .practice-day-label { white-space: nowrap; }
+  button.practice-made:not(:disabled) {
+    flex: 1; background: linear-gradient(135deg, #059669, #10b981);
+    border-color: rgba(110, 231, 183, 0.65); font-weight: 700;
+  }
+  button.practice-missed:not(:disabled) {
+    flex: 1; background: linear-gradient(135deg, #9f1239, #e11d48);
+    border-color: rgba(251, 113, 133, 0.55); font-weight: 700;
+  }
+  button.practice-clear { font-size: 11px; padding-inline: 9px; }
+  button.practice-export { width: 100%; margin-top: 7px; color: var(--text-secondary); }
+  .practice-backup-actions { display: flex; gap: 7px; margin-top: 7px; }
+  .practice-backup-actions button { flex: 1; padding-inline: 7px; font-size: 11px; }
+  .miss-reason-row { display: flex; align-items: center; gap: 8px; margin-top: 7px; }
+  .miss-reason-row label { color: var(--muted); font-size: 12px; }
+  .miss-reason-row select {
+    flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid var(--line);
+    border-radius: 6px; background: #1b2938; color: var(--text); font: inherit; font-size: 12px;
+  }
+  button:focus-visible, select:focus-visible, input[type=checkbox]:focus-visible,
+  input[type=range]:focus-visible, a:focus-visible, summary:focus-visible {
+    outline: 2px solid #38bdf8; outline-offset: 3px;
+  }
+  .practice-details { margin-top: 8px; }
+  .practice-details summary { color: var(--text-secondary); font-size: 12px; cursor: pointer; }
+  .practice-details .hint { margin-top: 6px; }
+
+  @media (max-width: 900px) {
+    body { height: auto; min-height: 100%; overflow: auto; }
+    header {
+      display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+      gap: 8px; padding: 8px 14px;
+    }
+    .sub-pill { min-width: 0; max-width: none; }
+    header .sub { max-width: none; }
+    header nav { margin-left: 0; }
+    main { flex: none; flex-direction: column; min-height: auto; }
+    #stage { flex: none; height: min(58vh, 500px); min-height: 300px; padding: 16px; }
+    aside { width: 100%; max-height: none; overflow: visible; border-left: 0; border-top: 1px solid var(--line); padding: 14px; }
+    footer { flex-wrap: wrap; gap: 4px 16px; padding: 8px 14px; }
+  }
+  @media (max-width: 600px) {
+    header { grid-template-columns: minmax(0, 1fr) auto; gap: 7px; padding: 8px 10px; }
+    header h1 { font-size: 13px; gap: 5px; }
+    .brand-logo { width: 32px; height: 32px; }
+    .tabs button { padding: 5px 10px; }
+    .sub-pill { display: none; }
+    header select { justify-self: start; }
+    header nav { justify-self: end; }
+    #stage { height: 48vh; min-height: 260px; }
+    aside { padding: 10px; }
+    .practice-buckets { gap: 4px; font-size: 10px; }
+    .practice-buckets div { padding: 6px 3px; }
+    footer { font-size: 10px; }
+  }
+
+  footer {
+    padding: 8px 20px; border-top: 1px solid var(--line);
+    color: var(--muted); font-size: 12px;
+    background: linear-gradient(180deg, #182330 0%, #111a24 100%);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand-group">
+    <div class="brand-logo">🎱</div>
+    <h1>台球 AI 教练 <span class="badge-ai">PRO</span></h1>
+  </div>
+  <div class="tabs">
+    <button id="tabPractice" class="on">练习</button>
+    <button id="tabGame">打一局</button>
+  </div>
+  <div class="sub-pill">
+    <span class="sub" id="subtitle">拖动任意球改摆位 · 求解后给出瞄准线、容错窗口与力度</span>
+  </div>
+  <select id="tablePreset" title="球台尺寸"></select>
+  <nav><a href="./pose.html">动作评估 ↗</a></nav>
+</header>
+
+<main>
+  <div id="stage">
+    <!-- 经典游戏级垂直拉杆力度槽 (参考 8 Ball Pool / 腾讯桌球) -->
+    <div id="cuePowerMeter" class="cue-power-meter" title="拖拽或点击拉杆调整击球力度 (快捷键: ↑ / ↓)">
+      <div class="power-meter-header">
+        <span class="power-meter-title">击球力度</span>
+        <div class="power-meter-badge-row">
+          <span id="powerMeterLevel" class="power-tier-badge">轻力</span>
+          <span id="powerMeterPct" class="power-pct-text">27%</span>
+        </div>
+        <div id="powerMeterSpeed" class="power-speed-text">2.20 m/s</div>
+      </div>
+      <div class="power-meter-body">
+        <div id="powerMeterTrack" class="power-track">
+          <div id="powerMeterFill" class="power-fill"></div>
+          <div class="power-scale-marks">
+            <span class="scale-mark mark-100" data-pct="100"><i>爆</i></span>
+            <span class="scale-mark mark-75" data-pct="75"><i>发</i></span>
+            <span class="scale-mark mark-50" data-pct="50"><i>中</i></span>
+            <span class="scale-mark mark-25" data-pct="25"><i>轻</i></span>
+          </div>
+          <div id="powerMeterHandle" class="power-handle">
+            <div class="handle-grip"></div>
+          </div>
+        </div>
+      </div>
+      <div class="power-meter-presets">
+        <button type="button" class="power-meter-chip" data-speed="2.05" title="轻力 25% (2.05 m/s)">轻</button>
+        <button type="button" class="power-meter-chip" data-speed="3.55" title="中力 50% (3.55 m/s)">中</button>
+        <button type="button" class="power-meter-chip" data-speed="5.10" title="发力 75% (5.10 m/s)">发</button>
+        <button type="button" class="power-meter-chip" data-speed="6.60" title="爆杆 100% (6.60 m/s)">爆</button>
+      </div>
+    </div>
+
+    <div class="stage-controls">
+      <button id="viewToggle" class="view-toggle-btn" title="切换第一人称视角 / 俯视视角 (快捷键: V)">
+        <span class="vt-icon">🎥</span>
+        <span id="viewToggleText">视角: 俯视</span>
+        <kbd>V</kbd>
+      </button>
+    </div>
+    <canvas id="table"></canvas>
+  </div>
+  <aside>
+    <!-- 练习模式 -->
+    <div id="practicePanel">
+      <div class="row" style="margin-bottom:12px">
+        <button id="solve" class="primary" style="flex:1">求解最佳方案</button>
+        <button id="shoot" style="background:var(--grad-blue);border-color:#38bdf8;color:#fff;font-weight:600">演示这一杆</button>
+        <button id="reset">重置</button>
+      </div>
+
+      <div class="card hero" style="margin-bottom:12px">
+        <h2>AI 击球战术</h2>
+        <div id="advice" class="empty">点「求解最佳方案」开始。</div>
+        <div id="verdict"></div>
+        <div id="verdictNote" class="verdict-note"></div>
+      </div>
+
+      <div class="card" style="margin-bottom:12px;border-left:3px solid #34d399">
+        <h2>专项训练</h2>
+        <p class="hint">选择一类球型，一键摆球；每次会轮换 6 种合法球位与目标袋方向，减少记固定答案。每 5 杆命中至少 4 杆，记为完成一组。只统计你手动记录的实战结果。</p>
+        <div class="row">
+          <label for="drillSelect" class="hint" style="align-self:center">训练内容</label>
+          <select id="drillSelect" aria-label="选择专项训练">
+            <option value="straight">直线球</option>
+            <option value="cut">切球</option>
+            <option value="long">长台球</option>
+          </select>
+          <button id="startDrill" class="primary">摆好训练球</button>
+        </div>
+        <div id="drillDescription" class="hint" style="margin-top:7px"></div>
+        <div id="drillProgress" style="margin-top:6px;font-size:13px;font-weight:600" aria-live="polite"></div>
+      </div>
+
+      <div class="card" style="margin-bottom:12px;border-left:3px solid #34d399">
+        <h2>实战练习反馈</h2>
+        <p class="hint">在真实球桌按推荐方案练完后记录结果。「演示这一杆」只运行仿真，不会计入实战统计。</p>
+        <div class="row">
+          <button id="practiceMade" disabled class="practice-made">实战打进</button>
+          <button id="practiceMissed" disabled class="practice-missed">实战没进</button>
+          <button id="clearPractice" class="practice-clear">清空记录</button>
+        </div>
+        <div class="miss-reason-row">
+          <label for="missReason">未进原因（可选）</label>
+          <select id="missReason">
+            <option value="">暂不标注</option>
+            <option value="aim">瞄准偏差</option>
+            <option value="speed">力度控制</option>
+            <option value="contact">击球厚薄</option>
+            <option value="spin">杆法/旋转</option>
+            <option value="position">走位/线路</option>
+            <option value="other">其他</option>
+          </select>
+        </div>
+        <div id="missReasonSummary" class="hint" style="margin-top:6px" aria-live="polite"></div>
+        <div id="practiceFocus" class="hint" style="margin-top:7px;padding:8px;border-radius:6px;background:rgba(56,189,248,.08)" aria-live="polite"></div>
+        <button id="practiceFocusAction" hidden style="margin-top:6px">开始推荐训练</button>
+        <button id="exportPractice" disabled class="practice-export">导出实战记录 CSV</button>
+        <div class="practice-backup-actions">
+          <button id="backupPractice">下载完整备份</button>
+          <button id="restorePractice">从备份恢复</button>
+        </div>
+        <input id="practiceBackupFile" type="file" accept=".json,application/json" hidden>
+        <div class="hint">备份文件包含完整记录；恢复会替换当前记录，操作前会再次确认。</div>
+        <div id="practiceMessage" class="hint" style="margin-top:7px" role="status" aria-live="polite">先求解一个目标袋方案，再记录真实练习结果。</div>
+        <div id="practiceSummary" style="margin-top:8px;font-size:13px;font-weight:600" aria-live="polite">还没有实战记录。</div>
+        <div class="practice-goal">
+          <div class="practice-goal-header">
+            <label for="practiceGoal">今日实战目标</label>
+            <select id="practiceGoal" aria-label="每日实战练习目标">
+              <option value="5">5 杆</option>
+              <option value="10" selected>10 杆</option>
+              <option value="20">20 杆</option>
+            </select>
+          </div>
+          <div id="practiceGoalSummary" class="hint" style="margin-top:4px" aria-live="polite"></div>
+          <div id="practiceGoalBar" class="practice-goal-track" role="progressbar" aria-label="今日练习目标进度" aria-valuemin="0" aria-valuemax="10" aria-valuenow="0">
+            <div id="practiceGoalFill" class="practice-goal-fill"></div>
+          </div>
+        </div>
+        <div class="practice-week">
+          <div id="practiceWeekSummary" class="hint" aria-live="polite">近 7 天还没有实战记录。</div>
+          <div id="practiceTrend" class="practice-trend" role="group" aria-label="近 7 天每日练习命中率"></div>
+        </div>
+        <div id="practiceCalibration" class="hint" role="status" aria-live="polite" style="margin-top:6px"></div>
+        <div id="practiceBuckets" class="practice-buckets"></div>
+        <details class="practice-details">
+          <summary id="practiceHistorySummary">查看最近记录</summary>
+          <div id="practiceHistory" class="log empty">—</div>
+          <p class="hint">只保存在本机浏览器。容错分组按求解器给出的角度统计，不代表自动测得的个人瞄准误差。</p>
+        </details>
+      </div>
+
+      <div class="card alts-card" style="margin-bottom:12px">
+        <h2>备选进球路线</h2>
+        <div id="alts" class="empty">—</div>
+      </div>
+
+      <div class="card tune-card" style="margin-bottom:12px">
+        <h2>手打微调出杆</h2>
+        <!-- 击球点直观靶盘 -->
+        <div class="cue-pad-row">
+          <div id="cueBallPad" class="cue-ball-pad" title="拖动或点击圆盘设置击球点（高低杆与左右塞）">
+            <div class="cue-ball-crosshair-h"></div>
+            <div class="cue-ball-crosshair-v"></div>
+            <div id="cueBallDot" class="cue-ball-dot"></div>
+          </div>
+          <div class="cue-pad-info">
+            <b>击球点视效靶</b><br>
+            可直接在左球面上点选/拖动击球点，或通过下方滑块精细微调。
+          </div>
+        </div>
+
+        <div class="ctrl">
+          <label for="power">力度 <b id="powerVal">2.20 m/s</b></label>
+          <input type="range" id="power" min="0.55" max="6.6" step="0.05" value="2.20">
+          <div class="power-chips-row">
+            <button type="button" class="power-chip" data-speed="2.05" title="轻力 25% (2.05 m/s)">轻 25%</button>
+            <button type="button" class="power-chip" data-speed="3.55" title="中力 50% (3.55 m/s)">中 50%</button>
+            <button type="button" class="power-chip" data-speed="5.10" title="发力 75% (5.10 m/s)">发 75%</button>
+            <button type="button" class="power-chip" data-speed="6.60" title="爆杆 100% (6.60 m/s)">爆 100%</button>
+          </div>
+        </div>
+        <div class="ctrl">
+          <label for="aimOffset">瞄准偏移 <b id="aimOffsetVal">0.00°</b></label>
+          <input type="range" id="aimOffset" min="-8" max="8" step="0.05" value="0">
+        </div>
+        <div class="ctrl">
+          <label for="tipB">高低杆 <b id="tipBVal">中杆</b></label>
+          <input type="range" id="tipB" min="-0.5" max="0.5" step="0.05" value="0">
+        </div>
+        <div class="ctrl">
+          <label for="tipA">左右塞 <b id="tipAVal">无塞</b></label>
+          <input type="range" id="tipA" min="-0.5" max="0.5" step="0.05" value="0">
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button id="useSolution" style="flex:1;background:var(--grad-indigo);border-color:#818cf8;color:#fff;font-weight:600">套用求解参数</button>
+          <button id="shootManual" class="primary" style="flex:1">按这些参数打</button>
+        </div>
+        <p class="hint" style="margin-top:8px">
+          手动参数从当前瞄准线出发：先「求解」定方向，再用「瞄准偏移」微调。左右塞会改变母球出库角，是真实侧旋物理。
+        </p>
+      </div>
+
+      <div class="card rack-card" style="margin-bottom:12px">
+        <h2>台面摆球</h2>
+        <div class="row" style="align-items:center">
+          <select id="ballPick" style="flex:1"></select>
+          <button id="addBall" style="background:var(--grad-purple);border-color:#c084fc;color:#fff;font-weight:600">+ 加一颗</button>
+        </div>
+        <div class="row" style="align-items:center;margin-top:8px">
+          <select id="ballRemove" style="flex:1"></select>
+          <button id="removeBall">- 拿掉</button>
+          <button id="rackUp">摆满 15 颗</button>
+        </div>
+        <p class="hint" style="margin-top:8px">最多 16 颗（1 颗母球 + 15 颗目标球）。加错了用「拿掉」单独移走那一颗，不用整盘重置。</p>
+      </div>
+
+      <div class="card" style="margin-bottom:12px">
+        <h2>辅助显示</h2>
+        <label class="switch"><input type="checkbox" id="showCone" checked> 显示容错锥（视觉放大 20×）</label>
+        <label class="switch"><input type="checkbox" id="showGhost" checked> 显示假想球与进球线</label>
+      </div>
+
+      <details class="card-collapsible" style="margin-bottom:12px">
+        <summary>键盘快捷键指南</summary>
+        <div class="details-body">
+          <div class="kb" style="margin-top:8px">
+            <kbd>V</kbd><span>切换第一人称 / 俯视视角</span>
+            <kbd>S</kbd><span>求解 / 对手回合时看它打</span>
+            <kbd>Enter</kbd><span>打这一杆</span>
+            <kbd>Z</kbd><span>撤销上一杆（球局）</span>
+            <kbd>N</kbd><span>新的一局（球局） / 重置（练习）</span>
+            <kbd>1</kbd><span>切到练习</span>
+            <kbd>2</kbd><span>切到打一局</span>
+            <kbd>← →</kbd><span>瞄准偏移 ±0.1°</span>
+            <kbd>↑ ↓</kbd><span>力度 ±0.1 m/s</span>
+          </div>
+          <p class="hint" style="margin-top:8px">焦点在输入框、下拉或滑块上时不抢按键。</p>
+        </div>
+      </details>
+
+      <details class="card-collapsible">
+        <summary>教练算法原理说明</summary>
+        <div class="details-body">
+          <p class="hint" style="margin-top:8px">
+            <b>容错窗口</b>是这一杆允许的瞄准角误差。它是排序依据——不是"能不能进"，
+            而是"偏多少度还进得去"。袋口越大、球越近、切角越薄，窗口越宽。
+          </p>
+          <p class="hint">
+            推荐杆的力度和瞄准角都用真实物理核试打过：能进才留下，进不了直接淘汰。
+          </p>
+        </div>
+      </details>
+    </div>
+
+    <!-- 球局模式 -->
+    <div id="gamePanel" class="hidden">
+      <div class="row" style="margin-bottom:12px">
+        <button id="newGame" class="primary">新的一局</button>
+        <select id="gameKind" title="玩哪种规则">
+          <option value="eightball">黑八（15 颗三角）</option>
+          <option value="nineball">九球（9 颗菱形）</option>
+        </select>
+        <button id="gSolve" style="background:var(--grad-blue);border-color:#38bdf8;color:#fff;font-weight:600">求解</button>
+        <button id="gShoot" style="background:var(--grad-amber);border-color:#fbbf24;color:#1a0f00;font-weight:700">打这一杆</button>
+        <button id="gUndo">撤销上一杆</button>
+        <button id="gRerack" class="hidden">重摆开球</button>
+      </div>
+      <label class="switch" style="margin-bottom:10px"><input type="checkbox" id="autoOpponent" checked> 对手自动出杆（关掉就是双方都由你操作）</label>
+      <label class="switch" style="margin-bottom:12px"><input type="checkbox" id="allowSafety" checked> 没有进攻机会时打防守（关掉就退回兜底直撞）</label>
+
+      <div id="gChoice" class="card hidden" style="margin-bottom:12px">
+        <h2>开球不达标</h2>
+        <p class="hint" style="margin-bottom:8px">
+          九球开球要至少三颗目标球「进袋或越过开球线」。这一杆没做到，按 WPA Regulation 16
+          接手方有选择权——你可以照现在这样接着打，也可以把台面交回给开球方（对方再开球时可以推杆）。
+        </p>
+        <div class="row">
+          <button id="gAccept">照这样打</button>
+          <button id="gHandBack">交回给对手</button>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:12px;border-left:3px solid #38bdf8">
+        <h2>对战记分牌</h2>
+        <div class="score" id="score"></div>
+      </div>
+
+      <div class="card" style="margin-bottom:12px;border-left:3px solid #f43f5e">
+        <h2>这一杆播报</h2>
+        <div id="report" class="empty">点「新的一局」开始。</div>
+      </div>
+
+      <div class="card hero" style="margin-bottom:12px">
+        <h2>AI 击球战术建议</h2>
+        <div id="gAdvice" class="empty">—</div>
+        <div id="gVerdict"></div>
+      </div>
+
+      <div class="card" style="margin-bottom:12px">
+        <h2>对局存档</h2>
+        <div class="row">
+          <button id="saveGame">保存这一局</button>
+          <button id="loadGame">读取存档</button>
+          <button id="clearSave">删掉存档</button>
+        </div>
+        <p class="hint" id="saveInfo" style="margin-top:8px">还没有存档。存的是局面本身（球位、分组、杆数、轮到谁），刷新页面之后还能接着打。</p>
+      </div>
+
+      <div class="card">
+        <h2>对局记录</h2>
+        <div class="log" id="log">—</div>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<footer>
+  <span>纯 JS · 零运行时依赖 · 物理核、求解器与规则引擎均为 ES module</span>
+  <span>按 WPA 国际台球协会锦标赛官方规则仿真</span>
+</footer>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>
