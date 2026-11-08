@@ -6,7 +6,6 @@
 //     · 支持带袋口的台面（原项目是开伦台，无袋）
 //     · 支持任意球台尺寸 / 球半径 / 质量
 //     · 增加袋口捕获、袋口夹球回弹与出界兜底
-//     · 增加袋口漏斗效应（球靠近袋口边缘时会被"吸入"）
 //     · 改进库边反弹模型（库边硬度随速度变化）
 //   数值常数与"静止/滑动/滚动"状态划分对照 ekiefl/pooltool (Apache-2.0) 校核。
 //   tailuge/billiards 为 GPL-3.0，仅阅读对照，未复制任何实现。
@@ -31,63 +30,14 @@ const RAIL_EVENT_SPEED = 0.015;
  */
 const MIN_CAPTURE_R = 0.063;
 
-// ---------------------------------------------------------------- 袋口漏斗效应
+// ---------------------------------------------------------------- 袋口几何
 //
-// 真实袋口不是简单的"圆形捕获区"：袋口边缘有弧度，球靠近时会被引导滑入。
-// 这个效应在某些角度下能让"看起来差一点"的球进袋。
-//
-// 建模方式：在袋口边缘施加一个指向袋心的径向力，力的大小随距离衰减。
-// 只在球已经非常接近袋口（< 1.5 * captureR）时才生效，避免影响正常运动。
-//
-// 参数 tuning：
-//   · FUNNEL_STRENGTH: 漏斗力强度，0.3 表示最大加速度 = 0.3 * g
-//   · FUNNEL_RANGE: 漏斗生效范围，以 captureR 为单位
-const FUNNEL_STRENGTH = 0.3;
-const FUNNEL_RANGE = 1.5;
-
-/**
- * 计算袋口漏斗效应对球产生的加速度。
- *
- * @param {Ball} ball
- * @param {Table} table
- * @returns {{x: number, y: number}} 加速度向量
- */
-function pocketFunnelAcceleration(ball, table) {
-  let ax = 0, ay = 0;
-  const speed = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy);
-
-  // 静止球不受漏斗影响（避免球在袋口边缘莫名其妙动起来）
-  if (speed < 1e-6) return { x: 0, y: 0 };
-
-  for (const pocket of table.pockets) {
-    const dx = pocket.x - ball.x;
-    const dy = pocket.y - ball.y;
-    const distSq = dx * dx + dy * dy;
-    const range = pocket.captureR * FUNNEL_RANGE;
-
-    if (distSq > range * range) continue;
-
-    const dist = Math.sqrt(distSq);
-    if (dist < 1e-6) continue;
-
-    // 球已经在袋内，不再施加漏斗力
-    if (dist <= pocket.captureR) continue;
-
-    // 漏斗力强度：随距离线性衰减，边缘处最大，captureR 处为 0
-    const t = (dist - pocket.captureR) / (range - pocket.captureR);
-    const forceMag = FUNNEL_STRENGTH * PHYS.g * t;
-
-    // 只施加垂直于袋口边缘的分量（沿径向指向袋心）
-    // 球速度越慢，漏斗效应越明显（球有更多时间被"引导"）
-    const speedFactor = Math.min(1, 2 / (speed + 1));
-    const f = forceMag * speedFactor;
-
-    ax += (dx / dist) * f;
-    ay += (dy / dist) * f;
-  }
-
-  return { x: ax, y: ay };
-}
+// 袋口只做两件事，都用同一套几何：捕获圆（球心进入即落袋）+ 袋角夹球
+// （越过库面却没进袋的球顶回台内）。刻意**不**加"袋口弧度的吸引力"这一类
+// 近似：曾经加过一版指向袋心的径向漏斗力（0.3 g、1.5 倍捕获半径内生效），
+// 实测把贴库平行滚过中袋的球和中远台擦边球全吸进袋，与台面几何自带的
+// 捕获圆判定重复，且没有任何校准数据支撑那两个常数——已删除。
+// 要更接近真实，正确做法是按袋角实际形状做接触求解，而不是叠加一个吸力。
 
 /**
  * @typedef {object} Ball
@@ -228,14 +178,10 @@ export function strike(ball, { angle, speed, tip = { a: 0, b: 0 } }) {
  * 自由运动推进 tau 秒（解析积分，不做定步长迭代）。
  * 打滑阶段摩擦沿滑移方向，滚动阶段沿速度方向，两段在函数内精确分段。
  *
- * 增强：现在考虑袋口漏斗效应（球靠近袋口边缘时会被"吸入"）。
- * 漏斗力会改变球的速度和位置，但不会影响旋转（简化模型）。
- *
  * @param {Ball} b
  * @param {number} tau
- * @param {Table} [table] 可选，传入时启用袋口漏斗效应
  */
-export function advanceBall(b, tau, table) {
+export function advanceBall(b, tau) {
   const R = b.__R;
   let remaining = tau;
   let guard = 0;
@@ -256,13 +202,6 @@ export function advanceBall(b, tau, table) {
       const ny = uy / uLen;
       let ax = -PHYS.muSlide * PHYS.g * nx;
       let ay = -PHYS.muSlide * PHYS.g * ny;
-
-      // 添加袋口漏斗效应
-      if (table) {
-        const funnel = pocketFunnelAcceleration(b, table);
-        ax += funnel.x;
-        ay += funnel.y;
-      }
 
       b.x += b.vx * dt + 0.5 * ax * dt * dt;
       b.y += b.vy * dt + 0.5 * ay * dt * dt;
@@ -298,13 +237,6 @@ export function advanceBall(b, tau, table) {
 
     let ax = -decel * nx;
     let ay = -decel * ny;
-
-    // 添加袋口漏斗效应（滚动阶段也生效）
-    if (table) {
-      const funnel = pocketFunnelAcceleration(b, table);
-      ax += funnel.x;
-      ay += funnel.y;
-    }
 
     b.x += b.vx * dt + 0.5 * ax * dt * dt;
     b.y += b.vy * dt + 0.5 * ay * dt * dt;
@@ -590,8 +522,6 @@ function settlePockets(world, events) {
 /**
  * 推进 dt 秒。内部按"最早接触事件"切分，接触点按精确几何求解。
  *
- * 增强：现在传递 table 给 advanceBall，启用袋口漏斗效应。
- *
  * @param {object} world
  * @param {number} dt
  * @param {Array} [events] 事件流（按时间排序）
@@ -630,7 +560,7 @@ export function stepWorld(world, dt, events) {
     if (tau > 0) {
       for (const b of world.balls) {
         if (b.pocketed) continue;
-        if (isMoving(b) || b.wz !== 0) advanceBall(b, tau, world.table);
+        if (isMoving(b) || b.wz !== 0) advanceBall(b, tau);
       }
       world.t += tau;
       remaining -= tau;

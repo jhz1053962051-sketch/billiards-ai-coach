@@ -589,7 +589,6 @@ export function createRenderer({ canvas, table: initialTable }) {
       ctx.closePath();
       ctx.fill();
     }
-    void m;
   }
 
   function drawPockets() {

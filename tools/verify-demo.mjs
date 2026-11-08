@@ -101,6 +101,15 @@ ws.onmessage = (ev) => {
 const evaluate = async (expression) => {
   const r = await send(ws, 'Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
   if (r.exceptionDetails) {
+    // 先把手头收集到的页面错误打出来：脚本自身的异常往往只是表象，
+    // 真正的原因（模块加载失败、运行时抛错）在页面控制台里。
+    const collected = [...pageErrors, ...consoleErrors].slice(-15);
+    if (collected.length) {
+      console.error('\n页面已报的错误（先看这个）:');
+      for (const line of collected) console.error('  ' + line);
+      console.error('');
+    }
+    console.error('出错时执行的是: ' + expression.trim().slice(0, 160).replace(/\s+/g, ' ') + '\n');
     throw new Error(r.exceptionDetails.exception?.description ?? r.exceptionDetails.text);
   }
   return r.result.value;
@@ -246,6 +255,16 @@ await shot('demo-practice.png');
 
 await evaluate(`window.__app.setMode('game')`);
 await sleep(500);
+// 这一段只验「玩家自己打」的路径：先把「对手自动出杆」关掉，否则玩家打完一杆
+// 对手会立刻接一杆，shots 就不止 1，turn 也不再是玩家——那是另一条路径，
+// 对手 AI 在下面的专门段落里验。测试要控住变量，不该靠放宽断言来迁就。
+const autoOppOff = await evaluate(`(() => {
+  const el = document.getElementById('autoOpponent');
+  el.checked = false;
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+  return window.__app.state.autoOpponent;
+})()`);
+check('能关掉对手自动出杆（对比双方都由自己操作）', autoOppOff === false);
 const gameInit = await evaluate(`(() => {
   const g = window.__app.state.game;
   return JSON.stringify({
@@ -370,6 +389,15 @@ console.log('截图:', midPath, gamePath);
 
 // 前面连打时玩家一直在手动点「求解/打这一杆」，需要先确认那几杆里有没有轮到对手。
 // 这里不依赖上一段的状态，直接开一局新的，只让对手动。
+// 上一段为了控变量把开关关了，这里必须重新打开——对手 AI 就在这一段验。
+const autoOppOn = await evaluate(`(() => {
+  const el = document.getElementById('autoOpponent');
+  el.checked = true;
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+  return window.__app.state.autoOpponent;
+})()`);
+check('能打开对手自动出杆', autoOppOn === true);
+
 await evaluate(`window.__app.newGame()`);
 await sleep(300);
 await evaluate(`(() => {

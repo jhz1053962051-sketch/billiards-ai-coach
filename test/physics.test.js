@@ -277,31 +277,50 @@ test('袋口：沿库边平行滚过的球不会误判进袋', () => {
   assert.ok(b.y >= table.bounds.minY - 1e-6 && b.y <= table.bounds.maxY + 1e-6);
 });
 
-test('袋口：粗步长下擦袋角的球不会被误判成进袋', () => {
-  // settlePockets 只在子步结束时看球心位置。步长太粗时，球会在一子步里
-  // 直接跳过库边落进捕获圆——于是「擦袋角、本来进不去」被误判成「进袋」。
+test('袋口：球心始终在捕获圆外的擦边球，任何步长都不能判进', () => {
+  // 球沿下库高速滚过底袋袋口前沿。球心固定在 y = 0.085，右下袋捕获半径 0.074，
+  // 到袋心最近距离 = sqrt((2.54 - 2.5114)^2 + 0.085^2) ≈ 0.090 > 0.074，
+  // 全程在捕获圆外，物理上就不该进袋。
   //
-  // 这一杆是实测扫出来的最坏用例：6.6 m/s（最高球速）、纵向偏 64 mm 打右下袋。
-  // 关闭 stepWorld 的步长钳制后，1/240 与 1/120 都判不进（正确），
-  // 1/30 却判进（错）——扫描 4 种力度 × 41 个偏移，共 8 处这种误判。
-  // 开启钳制后全部归零。
-  //
-  // 这条测试的意义：漏判和误判都不报错、不抛异常，看起来只是「物理不准」。
-  // 如果有人为了提速把 dt 调粗，或者把球速上限提高，问题会静默回来。
-  const p = table.pockets.find((x) => x.id === 'c-br');
+  // 旧版这条用例把球心放在 p.y - 0.064 即 y = -0.064（台外 64 mm），
+  // 第一次 settlePockets 就把它顶回台面，之后是一段和「擦袋角」无关的弹射，
+  // 结果对浮点极度敏感（本机实测这一杆最后落到右上袋）。既不合法、也不能当基线，
+  // 已按合法几何重写。
   const make = (dt) => {
-    const b = createBall('cue', p.x - 0.7, p.y - 0.064);
+    const b = createBall('cue', 0.9, 0.085);
     const w = freshWorld([b]);
-    const angle = Math.atan2(p.y - b.y, p.x - b.x);
-    strike(b, { angle, speed: 6.6, tip: { a: 0, b: 0.4 } });
+    strike(b, { angle: 0, speed: 6.6, tip: { a: 0, b: 0.4 } });
     runShot(w, { maxTime: 20, dt });
     return b.pocketed;
   };
 
-  const fine = make(1 / 240);
-  assert.equal(fine, false, '这一杆擦袋角，细步长下必须判不进');
-  assert.equal(make(1 / 120), false, '1/120 下也必须判不进');
-  assert.equal(make(1 / 30), false, '1/30 这种粗步长下也必须判不进（靠 stepWorld 的步长钳制）');
+  assert.equal(make(1 / 240), false, '球心全程在捕获圆外，1/240 不该判进');
+  assert.equal(make(1 / 120), false, '1/120 不该判进');
+  assert.equal(make(1 / 30), false, '1/30 这种粗步长也不该判进');
+});
+
+test('袋口：滚进袋口的快球，粗步长不能漏判成没进', () => {
+  // 球心 y = 0.070，沿下库冲向右下袋。球会滚进袋口开口区、球心进入捕获圆
+  // （落点距袋心约 0.072 < 0.074），物理上是进袋。
+  //
+  // 对照组实测（把 stepWorld 里的步长钳制临时改成不生效再跑同一杆）：
+  //   1/240 判进、1/120 判进、1/30 判「没进」——粗步长一步跨过捕获圆，
+  //   而 settlePockets 只在子步结束时看球心位置，于是漏判。
+  // 钳制把一子步位移压到 0.9 × 最小捕获半径以内，三种步长才一致。
+  //
+  // 这条测试的意义：漏判不报错、不抛异常，只是「该进的球没进」，
+  // 直接污染求解器对候选杆的判断。若有人为提速调粗 dt 或抬高球速上限，问题会静默回来。
+  const make = (dt) => {
+    const b = createBall('cue', 0.9, 0.07);
+    const w = freshWorld([b]);
+    strike(b, { angle: 0, speed: 6.6, tip: { a: 0, b: 0.4 } });
+    runShot(w, { maxTime: 20, dt });
+    return b.pocketed;
+  };
+
+  assert.equal(make(1 / 240), true, '1/240 应判进袋');
+  assert.equal(make(1 / 120), true, '1/120 应判进袋');
+  assert.equal(make(1 / 30), true, '1/30 粗步长也必须判进（靠 stepWorld 的步长钳制）');
 });
 
 test('袋口：正对袋心打，任何步长都必须进袋', () => {
