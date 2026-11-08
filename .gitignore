@@ -11,6 +11,10 @@ _research/
 # DSH 会话记忆与每日日志，属于本机运行态，不是项目内容
 .deepseek-harness/
 
+# 桌面自动化截图缓存与临时脚本，同样是本机运行态
+.dsh-pilot/
+.tmp-cdp/
+
 # 编辑器 / 系统
 .vscode/
 .idea/
