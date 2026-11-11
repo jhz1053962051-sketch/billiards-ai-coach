@@ -40,7 +40,7 @@ import {
   handBackBreak,
 } from '../src/rules.js';
 import { takeTurn } from '../src/opponent.js';
-import { readSave, writeSave, clearSave, describeSave, readSaveStamp, SAVE_KEY } from './save.js';
+import { readSave, writeSave, clearSave, describeSave, readSaveStamp, serialize, sanitize, SAVE_KEY } from './save.js';
 import {
   appendPracticeResult,
   clearPracticeLog,
@@ -2099,6 +2099,14 @@ function loadGame() {
     refreshSaveInfo();
     return;
   }
+  applyLoadedGame(saved);
+}
+
+/**
+ * 把一份已经校验过的存档装进当前局面。localStorage 读回来的和从文件导入的
+ * 都走这里，免得两条路各自演变、其中一条慢慢坏掉。
+ */
+function applyLoadedGame(saved) {
   if (saved.table.id !== table.preset) {
     // 存档的坐标是按那张台算的，换台之后直接装进来会全部越界。
     const okTable = TABLE_PRESETS[saved.table.id];
@@ -2154,6 +2162,87 @@ function removeSave() {
   state.saveOverwrite = false;
   setReport(ok ? '存档已删除。' : '删不了——浏览器禁用了本地存储。');
   refreshSaveInfo();
+}
+
+/**
+ * 把当前这一局压成文件内容。导出按钮与端到端脚本走同一条路。
+ * 没有局面时返回 null。
+ */
+function exportGameText(now = Date.now()) {
+  const g = state.game;
+  if (!g) return null;
+  return JSON.stringify(serialize(g, now), null, 2);
+}
+
+/**
+ * 从文件文本恢复一局。校验全部交给 save.js 的 sanitize：球台认不出、球位
+ * 越界、玩法不认识的都整份丢掉，不会把半份脏数据装到台面上。
+ * 返回 { ok, reason }，界面据此说人话。
+ */
+function importGameText(text) {
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return { ok: false, reason: '这个文件不是 JSON，可能选错了。' };
+  }
+  const saved = sanitize(raw);
+  if (!saved) {
+    return {
+      ok: false,
+      reason: '这份存档用不了：球台或玩法认不出来，或者球位跑出台了面。为了不把台面弄乱，整份丢掉了。',
+    };
+  }
+  applyLoadedGame(saved);
+  return { ok: true, reason: '' };
+}
+
+function downloadText(filename, text, mime = 'application/json') {
+  let url;
+  try {
+    url = URL.createObjectURL(new Blob([text], { type: mime }));
+  } catch {
+    return false;
+  }
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return true;
+}
+
+function exportGameSave() {
+  const text = exportGameText();
+  if (!text) {
+    setReport('还没有开局，没有可导出的。');
+    return;
+  }
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const name = `billiards-game-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.json`;
+  if (!downloadText(name, text)) {
+    setReport('导出失败：浏览器没法创建下载文件。');
+    return;
+  }
+  setReport(`已导出 ${name}（第 ${state.game.shots} 杆）。换设备后用「从文件读取」能接着打。`);
+}
+
+function importGameSaveFromFile(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const result = importGameText(String(reader.result ?? ''));
+    if (result.ok) {
+      setReport(`已从文件读入：第 ${state.game.shots} 杆，轮到「${esc(state.game.players[state.game.turn].name)}」。`);
+    } else {
+      setReport(result.reason);
+    }
+  };
+  reader.onerror = () => setReport('读取文件失败，可能没有权限或文件已被移动。');
+  reader.readAsText(file);
 }
 
 function removePracticeLog() {
@@ -2438,6 +2527,13 @@ $('practiceFocusAction').addEventListener('click', () => {
 $('saveGame').addEventListener('click', saveGame);
 $('loadGame').addEventListener('click', loadGame);
 $('clearSave').addEventListener('click', removeSave);
+// 导出 / 导入到文件：存档原本只在本机 localStorage 里，换设备就没了
+$('exportGameSave').addEventListener('click', exportGameSave);
+$('importGameSave').addEventListener('click', () => $('gameSaveFile').click());
+$('gameSaveFile').addEventListener('change', (e) => {
+  importGameSaveFromFile(e.target.files?.[0] ?? null);
+  e.target.value = '';
+});
 
 // 另一个标签页动了存档。storage 事件只在**别的**标签页写入时触发（自己写不会
 // 回调自己），正好用来把「这份存档我见过的那版已经过期了」标出来。
@@ -2682,6 +2778,9 @@ window.__app = {
   saveGame,
   loadGame,
   removeSave,
+  // 导出/导入到文件：端到端脚本直接喂文本，不必去模拟文件选择器与下载
+  exportGameText,
+  importGameText,
   refreshSaveInfo,
   onKeyDown,
   toggleView,

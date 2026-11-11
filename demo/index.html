@@ -1229,6 +1229,14 @@
           <button id="clearSave">删掉存档</button>
         </div>
         <p class="hint" id="saveInfo" style="margin-top:8px">还没有存档。存的是局面本身（球位、分组、杆数、轮到谁），刷新页面之后还能接着打。</p>
+        <!-- 存档只在当前浏览器里，换台机器、换个浏览器、清了站点数据就没了。
+             给一份能拿走的文件，换设备之后还能接着打这一局。 -->
+        <div class="row" style="margin-top:8px">
+          <button id="exportGameSave">导出到文件</button>
+          <button id="importGameSave">从文件读取</button>
+        </div>
+        <input id="gameSaveFile" type="file" accept=".json,application/json" hidden>
+        <p class="hint" style="margin-top:6px">导出的是一个 JSON 文件，换设备后「从文件读取」能接着打。文件里的球位会按球台尺寸校验，越界或玩法不认识就整份丢掉。</p>
       </div>
 
       <div class="card">

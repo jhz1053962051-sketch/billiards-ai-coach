@@ -1243,6 +1243,78 @@ console.log('存档·名字里的标签:', xssSave);
   );
 }
 
+// ------------------------------------------------------------ 存档导出成文件、再读回来
+//
+// localStorage 只在本机这份浏览器里。导出成文件是为了换设备之后还能接着打，
+// 所以这条路径必须证明两件事：导出的东西真能读回来，读不回来的东西不许把台面弄乱。
+
+const fileSaveStart = await evaluate(`(() => {
+  const app = window.__app;
+  app.setMode('game');
+  app.state.autoOpponent = false;
+  app.newGame();
+  const g = app.state.game;
+  g.turn = 0; g.breakShot = false; g.requiresRerack = false; g.ballInHand = null;
+  const before = g.shots;
+  const text = app.exportGameText();
+  // 文本放窗口上，下一步的 evaluate 直接取，省掉来回转义
+  window.__fileSaveText = text;
+  const parsedOk = (() => { try { JSON.parse(text); return true; } catch { return false; } })();
+  const hasButtons =
+    Boolean(document.getElementById('exportGameSave')) &&
+    Boolean(document.getElementById('importGameSave'));
+  // 改变局面：开一杆，杆数一定会动
+  app.gameSolve();
+  app.gameShoot();
+  return JSON.stringify({ before, parsedOk, textLen: text.length, hasButtons });
+})()`);
+console.log('存档·导出成文件:', fileSaveStart);
+
+// 回放要等它放完，否则读到的是打到一半的杆数
+for (let i = 0; i < 60; i++) {
+  const a = await evaluate(`window.__app.state.animating`);
+  if (!a) break;
+  await sleep(200);
+}
+
+const fileSaveResult = await evaluate(`(() => {
+  const app = window.__app;
+  const text = window.__fileSaveText;
+  const afterShoot = app.state.game.shots;
+
+  const good = app.importGameText(text);
+  const restored = app.state.game.shots;
+
+  const bad = app.importGameText('{');
+  const afterBad = app.state.game.shots;
+
+  const tampered = JSON.parse(text);
+  tampered.balls[0].x = 99;
+  const badBall = app.importGameText(JSON.stringify(tampered));
+  const afterBadBall = app.state.game.shots;
+
+  return JSON.stringify({
+    afterShoot, restored, afterBad, afterBadBall,
+    goodOk: good.ok, badOk: bad.ok, badReason: bad.reason,
+    badBallOk: badBall.ok,
+  });
+})()`);
+console.log('存档·读回来:', fileSaveResult);
+{
+  const start = JSON.parse(fileSaveStart);
+  const r = JSON.parse(fileSaveResult);
+  check('导出的存档是合法 JSON', start.parsedOk === true, fileSaveStart);
+  check('导出/导入两个按钮都在界面上', start.hasButtons === true, fileSaveStart);
+  check('打一杆之后杆数变了（先确认局面真的动过）', r.afterShoot > start.before, fileSaveResult);
+  check('把导出的文件读回来，局面回到导出那一刻', r.goodOk === true && r.restored === start.before, fileSaveResult);
+  check('不是 JSON 的文件会被拒绝，且局面不动', r.badOk === false && r.afterBad === start.before, fileSaveResult);
+  check(
+    '球位跑出台面的文件会被拒绝，且局面不动',
+    r.badBallOk === false && r.afterBadBall === start.before,
+    fileSaveResult
+  );
+}
+
 // ------------------------------------------------------------ 两个标签页不许静默互盖
 //
 // 两个标签页各开一局、各自点「存这一局」，后点的会把先存的那份无声盖掉——

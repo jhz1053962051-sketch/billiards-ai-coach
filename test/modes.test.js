@@ -114,6 +114,36 @@ test('存档：存进去读出来，局面完全一样', () => {
   }
 });
 
+test('存档：写成文件再读回来，过关卡也不走样', () => {
+  const g = realGame('nineball');
+  const facts = simulateShot(table, g.balls, { angle: 0, speed: 6.6, tip: { a: 0, b: -0.1 } });
+  const { next } = resolveShot(g, facts);
+
+  // 导出到文件走的是 JSON 文本，和 localStorage 那条路不同：数字会变成
+  // JSON 数字、undefined 会整键消失。这一步要能把局面原样带回来。
+  const text = JSON.stringify(serialize(next, 1700000000000), null, 2);
+  const back = sanitize(JSON.parse(text));
+  assert.ok(back, '导出的文件必须能读回来');
+  assert.equal(back.kind, next.kind);
+  assert.equal(back.shots, next.shots);
+  assert.equal(back.turn, next.turn);
+  assert.equal(back.balls.length, next.balls.length);
+  for (let i = 0; i < next.balls.length; i++) {
+    assert.equal(back.balls[i].number, next.balls[i].number);
+    assert.ok(Math.abs(back.balls[i].x - next.balls[i].x) < 1e-9, `第 ${i} 颗球 x 要一致`);
+    assert.ok(Math.abs(back.balls[i].y - next.balls[i].y) < 1e-9, `第 ${i} 颗球 y 要一致`);
+    assert.equal(back.balls[i].pocketed, next.balls[i].pocketed);
+  }
+  // 手改文本（有人会这么干）：球位挪出台面就必须整份丢掉，不能装一半。
+  const tampered = JSON.parse(text);
+  tampered.balls[0].x = 99;
+  assert.equal(sanitize(tampered), null);
+  // 玩法名写错同理，别悄悄按黑八读进来。
+  const wrongKind = JSON.parse(text);
+  wrongKind.kind = 'snooker';
+  assert.equal(sanitize(wrongKind), null);
+});
+
 test('存档：不存 log 与 history（回放和撤销历史不跨会话）', () => {
   const g = realGame('eightball');
   const raw = serialize(g);
