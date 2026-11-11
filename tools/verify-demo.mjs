@@ -212,6 +212,113 @@ for (let i = 0; i < 50; i++) {
 console.log('练习·演示:', afterShoot ?? '（25s 内未结束）');
 check('演示一杆报告进球', Boolean(afterShoot && afterShoot.startsWith('✓')), afterShoot ?? '');
 
+// ------------------------------------------------------------ 回放被打断
+// 回放是「按下标把帧数据往球数组里写」。在途时点重置 / 切模式 / 换题，球数组会被换成
+// 另一个长度；旧 tick 若继续写，轻则把别人的局面改坏，重则回调里 original[i] 读到
+// undefined 直接抛 TypeError。下面三条各守一个入口：删掉 app.js 里的代次守卫，它们必须变红。
+
+const readBalls = `(() => {
+  const s = window.__app.state;
+  const arr = s.mode === 'practice' ? s.balls : (s.game ? s.game.balls : []);
+  return JSON.stringify({
+    mode: s.mode,
+    animating: s.animating,
+    gen: s.generation,
+    coords: arr.map((b) => [+b.x.toFixed(6), +b.y.toFixed(6)]),
+  });
+})()`;
+
+// 造一串 2 秒的假帧（每帧球数按当前局面），播到一半就把局面换掉。
+// 帧里的 x 都在 0.05–0.25 之间，与任何正常摆位都不重叠，写脏了一眼能看出来。
+const startFakeReplay = `(() => {
+  const app = window.__app;
+  const arr = app.state.mode === 'practice' ? app.state.balls : app.state.game.balls;
+  const frames = [];
+  for (let i = 0; i < 40; i++) {
+    const f = [];
+    for (let k = 0; k < arr.length; k++) {
+      f.push({
+        x: 0.05 + 0.005 * i + k * 0.001, y: 0.05, pocketed: false, pocket: null,
+        rollAngle: 0, rollDirX: 0, rollDirY: 0,
+      });
+    }
+    frames.push(f);
+  }
+  window.__replayDone = false;
+  app.replay(frames, 0.05, () => { window.__replayDone = true; });
+  return JSON.stringify({ frames: frames.length, balls: arr.length });
+})()`;
+
+// ① 回放中点重置
+await evaluate(`window.__app.setMode('practice'); document.getElementById('reset').click();`);
+await sleep(120);
+await evaluate(startFakeReplay);
+await sleep(300); // 先让它真的跑起来几帧
+await evaluate(`document.getElementById('reset').click()`);
+const resetJustAfter = JSON.parse(await evaluate(readBalls));
+await sleep(1300); // 假帧总长 2 秒，等它「本该」播完
+const resetSettled = JSON.parse(await evaluate(readBalls));
+const resetDone = await evaluate(`window.__replayDone`);
+check('回放中重置：旧回放的回调没有跑', resetDone === false, `done=${resetDone}`);
+check(
+  '回放中重置：球位没被旧帧写脏',
+  JSON.stringify(resetJustAfter.coords) === JSON.stringify(resetSettled.coords),
+  JSON.stringify(resetSettled.coords)
+);
+check('回放中重置：animating 没被旧 tick 打回 true', resetSettled.animating === false, String(resetSettled.animating));
+
+// ② 回放中切模式
+await evaluate(`window.__app.setMode('practice'); document.getElementById('reset').click();`);
+await sleep(120);
+await evaluate(startFakeReplay);
+await sleep(300);
+await evaluate(`(() => {
+  const el = document.getElementById('autoOpponent');
+  el.checked = false;
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+  return 'ok';
+})()`);
+await evaluate(`document.getElementById('tabGame').click()`);
+await sleep(300);
+const modeBalls1 = JSON.parse(await evaluate(readBalls));
+await sleep(900);
+const modeBalls2 = JSON.parse(await evaluate(readBalls));
+check('回放中切模式：模式真的切过去了', modeBalls2.mode === 'game', modeBalls2.mode);
+check('回放中切模式：球局还是 16 颗', modeBalls2.coords.length === 16, `${modeBalls2.coords.length} 颗`);
+check(
+  '回放中切模式：球局的球位没被旧帧写脏',
+  JSON.stringify(modeBalls1.coords) === JSON.stringify(modeBalls2.coords),
+  JSON.stringify(modeBalls2.coords)
+);
+
+// ③ 训练题的球位（2 颗）回放中重置成 4 颗 —— 这是原先会直接崩掉的顺序
+await evaluate(`window.__app.setMode('practice')`);
+await evaluate(`(() => {
+  document.getElementById('drillSelect').value = 'straight';
+  document.getElementById('startDrill').click();
+  return 'ok';
+})()`);
+await sleep(200);
+const drillCount = await evaluate(`window.__app.state.balls.length`);
+await evaluate(`document.getElementById('solve').click()`);
+await sleep(1500);
+await evaluate(`document.getElementById('shoot').click()`);
+await sleep(250);
+const drillAnimating = await evaluate(`window.__app.state.animating`);
+await evaluate(`document.getElementById('reset').click()`);
+// 这一杆的帧数取决于球停得多快，不能只等一个固定时长：等短了断言会跑在崩溃之前，
+// 看起来全绿其实漏了问题。所以既等一段，又在收尾处再兜一次「全程无未捕获异常」。
+await sleep(3000);
+const afterDrill = JSON.parse(await evaluate(readBalls));
+check('训练题是 2 颗球起手', drillCount === 2, `${drillCount} 颗`);
+check('训练题回放真的在跑（否则这一条测了个空的）', drillAnimating === true, `animating=${drillAnimating}`);
+check('训练题回放中重置：球数换成 4 颗', afterDrill.coords.length === 4, `${afterDrill.coords.length} 颗`);
+// 这一杆崩不崩，由收尾处的「全程没有未捕获异常」统一判：回放的 tick 要等帧放完才走到
+// 回调，当场取样会跑在崩溃之前。实测把守卫关掉后，正是那条收尾断言报出了 TypeError。
+// 复位成默认练习局面，后面的加球 / 换台几段都按 4 颗球起手
+await evaluate(`document.getElementById('reset').click()`);
+await sleep(120);
+
 // ------------------------------------------------------------ 加球
 
 const addResult = await evaluate(`(() => {
@@ -1151,6 +1258,10 @@ console.log('第一人称·切换:', fpvActive, '切回:', topViewAfter);
 }
 
 // ------------------------------------------------------------ 收尾
+
+// 有些崩溃发生在某段断言之后（比如回放的 tick 要等帧放完才走到回调），
+// 逐条 check 抓不住它们。这条放在最末，专门兜住迟到的未捕获异常。
+check('全程没有未捕获异常', pageErrors.length === 0, pageErrors.slice(-2).join(' | '));
 
 console.log('console errors:', consoleErrors.length ? consoleErrors : '无');
 console.log('page errors:', pageErrors.length ? pageErrors : '无');

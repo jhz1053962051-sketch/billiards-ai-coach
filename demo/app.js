@@ -122,6 +122,8 @@ function resize() {
 // ---------------------------------------------------------------- 练习模式
 
 function resetLayout() {
+  // 重摆等于换掉整个练习局面：在途的回放必须作废，否则它会继续往新数组里写帧数据。
+  state.generation += 1;
   state.solution = null;
   state.practiceRecorded = false;
   state.activeDrillId = null;
@@ -1007,6 +1009,8 @@ function startPracticeDrill() {
   if (!drill) return;
   const layout = practiceDrillLayout(table, drill.id, state.drillVariation++);
   const { cue, target } = layout;
+  // 换题会把球数组从 4 颗换成 2 颗，在途回放必须作废。
+  state.generation += 1;
   state.solution = null;
   state.practiceRecorded = false;
   state.activeDrillId = drill.id;
@@ -1129,17 +1133,35 @@ function renderAlts(card, ms) {
 
 /** 按录制帧回放，结束后回调。 */
 function replay(frames, dt, onDone) {
+  // 这一串帧属于哪个局面。回放期间用户可能切模式、点重置、换训练题或换球台，
+  // 那些入口会把球数组整个换成另一个长度；不认代次就会按下标写到 undefined 上。
+  const gen = state.generation;
+  // 写目标也在开头定死：中途 state.mode 变了，就再也回不到原来那个数组了。
+  const targets = state.mode === 'practice' ? state.balls : state.game.balls;
   state.animating = true;
   updatePracticeFeedback();
+
+  // 中途作废时把球杆复位。不复位的话，停在 -0.012 的球杆会插在母球里，
+  // 换到新局面上看着就像穿模。
+  const restoreStroke = () => {
+    state.manual.strokeOffset = getPowerTier(state.manual.speed).ratio * 0.12;
+  };
 
   const startRolling = () => {
     const t0 = performance.now();
     const tick = () => {
+      // 局面已经换掉了，这一串帧作废。
+      // 这里绝不能回写 state.animating = false：切换入口自己会置 false，
+      // 旧 tick 再写一次会把新回放刚设上的 true 踩掉，新回放就永远不动了。
+      if (gen !== state.generation) {
+        restoreStroke();
+        return;
+      }
       const elapsed = (performance.now() - t0) / 1000;
       const frameTime = Math.min(frames.length - 1, elapsed / dt);
       const idx = Math.floor(frameTime);
       const f = interpolateBallStates(frames[idx], frames[Math.min(idx + 1, frames.length - 1)], frameTime - idx);
-      const balls = state.mode === 'practice' ? state.balls : state.game.balls;
+      const balls = targets;
       for (let i = 0; i < balls.length && i < f.length; i++) {
         balls[i].x = f[i].x;
         balls[i].y = f[i].y;
@@ -1170,6 +1192,10 @@ function replay(frames, dt, onDone) {
     const strikeDuration = 60;
     const fromOffset = state.manual.strokeOffset || 0.04;
     const strikeTick = () => {
+      if (gen !== state.generation) {
+        restoreStroke();
+        return;
+      }
       const elapsed = performance.now() - strikeStart;
       const p = Math.min(1, elapsed / strikeDuration);
       state.manual.strokeOffset = fromOffset * (1 - p) + (-0.012) * p;
@@ -1208,7 +1234,11 @@ function shootPractice() {
   }
 
   const original = state.balls.map((b) => ({ x: b.x, y: b.y, pocketed: b.pocketed, pocket: b.pocket }));
+  // replay 内部已经按代次拦住过期帧，这里再挡一次：只要 original 和当前球数组不是同一批球，
+  // 按下标恢复就会读到 undefined。宁可什么都不做，也不能把别人的局面改坏。
+  const gen = state.generation;
   replay(frames, dt, () => {
+    if (gen !== state.generation || state.balls.length !== original.length) return;
     const target = state.balls.find((b) => b.id === best.targetId);
     const ok = Boolean(target && target.pocketed && target.pocket === best.pocketId);
     setAdvice((ok ? '✓ 进球。' : '✗ 这一杆没进（袋口或力度需要微调）。') + ' ' + sol.message, sol.verdict);
@@ -2148,6 +2178,9 @@ function refreshSaveInfo() {
 // ---------------------------------------------------------------- 模式切换
 
 function setMode(mode) {
+  // 切模式下面的 animating = false 会立刻放行「求解 / 打这一杆」按钮，
+  // 所以在途回放的 tick 必须靠代次自己认出来过期，否则会和新的动画抢同一个球数组。
+  state.generation += 1;
   state.mode = mode;
   state.solution = null;
   state.gSolution = null;
@@ -2520,6 +2553,9 @@ window.__app = {
   view,
   get mode() { return state.mode; },
   setMode,
+  // 回放本身也暴露出来：端到端脚本要能构造一串长帧，在动画进行中去点重置 / 切模式，
+  // 否则「回放被打断」这条路只能靠运气在真实击球里重现。
+  replay,
   runSolve,
   gameSolve,
   gameShoot,

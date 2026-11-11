@@ -23,3 +23,5 @@ Thumbs.db
 
 # 日志
 *.log
+# 后台起静态服务器时 nohup 留下的输出（本机运行态）
+nohup.out
