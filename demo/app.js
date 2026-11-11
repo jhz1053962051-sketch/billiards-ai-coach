@@ -889,6 +889,10 @@ function updatePracticeLog() {
     ? `${summary.made}/${summary.attempts} 杆命中 · 总命中率 ${Math.round(summary.rate * 100)}% · 最近 ${summary.recent.attempts} 杆 ${summary.recent.attempts ? `${Math.round(summary.recent.rate * 100)}%` : '—'}`
     : '还没有实战记录。';
   $('practiceGoal').value = String(today.goal || DEFAULT_PRACTICE_GOAL);
+  // 统计折起来了，但「今天练了几杆」得一眼看得见，否则折叠等于藏掉进度
+  $('practiceStatsSummary').textContent = today.attempts
+    ? `练习统计与今日目标（今天 ${today.attempts}/${today.goal} 杆${today.complete ? '，已达成' : ''}）`
+    : '练习统计与今日目标';
   $('practiceGoalSummary').textContent = today.complete
     ? `今日目标达成！已完成 ${today.attempts}/${today.goal} 杆。`
     : `今日已练 ${today.attempts}/${today.goal} 杆 · 还差 ${today.remaining} 杆`;

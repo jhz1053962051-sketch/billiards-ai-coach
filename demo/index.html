@@ -1040,26 +1040,31 @@
         <div class="hint">备份文件包含完整记录；恢复会替换当前记录，操作前会再次确认。</div>
         <div id="practiceMessage" class="hint" style="margin-top:7px" role="status" aria-live="polite">先求解一个目标袋方案，再记录真实练习结果。</div>
         <div id="practiceSummary" style="margin-top:8px;font-size:13px;font-weight:600" aria-live="polite">还没有实战记录。</div>
-        <div class="practice-goal">
-          <div class="practice-goal-header">
-            <label for="practiceGoal">今日实战目标</label>
-            <select id="practiceGoal" aria-label="每日实战练习目标">
-              <option value="5">5 杆</option>
-              <option value="10" selected>10 杆</option>
-              <option value="20">20 杆</option>
-            </select>
+        <!-- 统计一坨（今日目标、近七天、校准、容错分组）能占半屏，而真正每天看的是
+             上面那一行数字。折起来，想看细节再展开；记录按钮和状态行始终在外。 -->
+        <details class="practice-details" id="practiceStats">
+          <summary id="practiceStatsSummary">练习统计与今日目标</summary>
+          <div class="practice-goal">
+            <div class="practice-goal-header">
+              <label for="practiceGoal">今日实战目标</label>
+              <select id="practiceGoal" aria-label="每日实战练习目标">
+                <option value="5">5 杆</option>
+                <option value="10" selected>10 杆</option>
+                <option value="20">20 杆</option>
+              </select>
+            </div>
+            <div id="practiceGoalSummary" class="hint" style="margin-top:4px" aria-live="polite"></div>
+            <div id="practiceGoalBar" class="practice-goal-track" role="progressbar" aria-label="今日练习目标进度" aria-valuemin="0" aria-valuemax="10" aria-valuenow="0">
+              <div id="practiceGoalFill" class="practice-goal-fill"></div>
+            </div>
           </div>
-          <div id="practiceGoalSummary" class="hint" style="margin-top:4px" aria-live="polite"></div>
-          <div id="practiceGoalBar" class="practice-goal-track" role="progressbar" aria-label="今日练习目标进度" aria-valuemin="0" aria-valuemax="10" aria-valuenow="0">
-            <div id="practiceGoalFill" class="practice-goal-fill"></div>
+          <div class="practice-week">
+            <div id="practiceWeekSummary" class="hint" aria-live="polite">近 7 天还没有实战记录。</div>
+            <div id="practiceTrend" class="practice-trend" role="group" aria-label="近 7 天每日练习命中率"></div>
           </div>
-        </div>
-        <div class="practice-week">
-          <div id="practiceWeekSummary" class="hint" aria-live="polite">近 7 天还没有实战记录。</div>
-          <div id="practiceTrend" class="practice-trend" role="group" aria-label="近 7 天每日练习命中率"></div>
-        </div>
-        <div id="practiceCalibration" class="hint" role="status" aria-live="polite" style="margin-top:6px"></div>
-        <div id="practiceBuckets" class="practice-buckets"></div>
+          <div id="practiceCalibration" class="hint" role="status" aria-live="polite" style="margin-top:6px"></div>
+          <div id="practiceBuckets" class="practice-buckets"></div>
+        </details>
         <details class="practice-details">
           <summary id="practiceHistorySummary">查看最近记录</summary>
           <div id="practiceHistory" class="log empty">—</div>

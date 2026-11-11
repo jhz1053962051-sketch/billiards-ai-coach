@@ -370,6 +370,21 @@ check('演示一杆报告进球', Boolean(afterShoot && afterShoot.startsWith('�
   await evaluate(`document.getElementById('practiceMissed').click()`);
   const afterSecond = await evaluate(`window.__app.practiceCount()`);
   check('同一个球位连记第二杆', afterSecond === before + 2, `${before} → ${afterSecond}`);
+
+  // 统计一坨折起来了，但「今天练了几杆」必须还看得见，否则折叠等于藏掉进度
+  const stats = await evaluate(`(() => {
+    const d = document.getElementById('practiceStats');
+    return JSON.stringify({
+      isDetails: d?.tagName === 'DETAILS',
+      open: d?.open === true,
+      summary: document.getElementById('practiceStatsSummary')?.textContent ?? '',
+      goalInside: Boolean(d?.querySelector('#practiceGoalBar')),
+    });
+  })()`);
+  const st = JSON.parse(stats);
+  check('练习统计默认折着', st.isDetails && st.open === false, JSON.stringify(st));
+  check('统计标题里带今日进度', /今天 \d+\/10 杆/.test(st.summary), st.summary);
+  check('今日目标进度折在统计里', st.goalInside, JSON.stringify(st));
 }
 
 // ------------------------------------------------------------ 回放被打断
