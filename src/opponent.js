@@ -22,6 +22,7 @@ import {
   resolveShot,
   simulateShot,
 } from './rules.js';
+import { SEARCH_DT } from './constants.js';
 import { planShot } from './solver.js';
 
 /**
@@ -119,7 +120,7 @@ export function takeTurn(table, game, opts = {}) {
     table,
     work.balls,
     { angle: plan.aimAngle, speed: plan.speed, tip: { a: plan.tip.a, b: plan.tip.b } },
-    { record: opts.record === true, dt: opts.dt ?? 1 / 120 }
+    { record: opts.record === true, dt: opts.dt ?? SEARCH_DT }
   );
   const { next, report } = resolveShot(work, facts);
   return { ok: true, plan, kind, alternatives, facts, next, report, cuePlaced, cueSpot };

@@ -9,7 +9,7 @@
 //   球局：由 rules.js 管回合、分组、犯规、胜负，打进就继续，没进就换人。
 
 import { createTable } from '../src/table.js';
-import { TABLE_PRESETS } from '../src/constants.js';
+import { TABLE_PRESETS, SEARCH_DT } from '../src/constants.js';
 import { createBall, createWorld, strike, stepWorld, allStopped, createRollTracker } from '../src/physics.js';
 import {
   solveShot,
@@ -1237,7 +1237,7 @@ function shootPractice() {
   const cue = copy.find((b) => b.id === 'cue');
   strike(cue, { angle: best.aimAngle, speed: best.speed, tip: { a: best.tip.a, b: best.tip.b } });
 
-  const dt = 1 / 120;
+  const dt = SEARCH_DT;
   const trackRoll = createRollTracker(copy, table.ballRadius);
   const frames = [captureBallFrame(copy, trackRoll)];
   for (let i = 0; i < 120 * 20; i++) {
@@ -1431,7 +1431,7 @@ function gameShoot() {
     table,
     g.balls,
     { angle: best.aimAngle, speed: best.speed, tip: { a: best.tip.a, b: best.tip.b } },
-    { record: true, dt: 1 / 120 }
+    { record: true, dt: SEARCH_DT }
   );
   const { next, report } = resolveShot(g, facts);
   pushHistory(g);
@@ -1556,7 +1556,7 @@ function runOpponentTurn(gen = state.generation) {
     state.opponentThinking = false;
     return;
   }
-  const r = takeTurn(table, g, { record: true, dt: 1 / 120, safety: state.allowSafety });
+  const r = takeTurn(table, g, { record: true, dt: SEARCH_DT, safety: state.allowSafety });
   if (!r.ok) {
     state.opponentThinking = false;
     if (r.reason === 'needs_rerack') {
@@ -1894,7 +1894,7 @@ function shootPracticeWith(shot, aim) {
   if (!cue) return;
   strike(cue, shot);
 
-  const dt = 1 / 120;
+  const dt = SEARCH_DT;
   const trackRoll = createRollTracker(copy, table.ballRadius);
   const frames = [captureBallFrame(copy, trackRoll)];
   for (let i = 0; i < 120 * 20; i++) {
@@ -1937,7 +1937,7 @@ function shootGameWith(shot, aim) {
     $('gAdvice').textContent = '先把母球摆到台面上。';
     return;
   }
-  const facts = simulateShot(table, g.balls, shot, { record: true, dt: 1 / 120 });
+  const facts = simulateShot(table, g.balls, shot, { record: true, dt: SEARCH_DT });
   const { next, report } = resolveShot(g, facts);
   pushHistory(g);
 

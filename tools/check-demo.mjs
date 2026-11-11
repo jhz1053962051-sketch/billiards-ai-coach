@@ -82,6 +82,26 @@ for (const page of PAGES) {
   }
 }
 
+// 步长必须来自 SEARCH_DT，不许在别处写死数字。
+// constants.js 里写明「求解器验证和真正执行必须用同一步长，否则验证的是另一件事」。
+// 两边各写一个 1/120 只是「此刻恰好相等」，哪天有人只改了一边，不会有任何提示。
+const dtFiles = ['src', 'demo']
+  .flatMap((dir) => fs.readdirSync(path.join(root, dir))
+    .filter((f) => f.endsWith('.js'))
+    .map((f) => `${dir}/${f}`))
+  .filter((rel) => rel !== 'src/constants.js');
+checked++;
+const hardDt = [];
+for (const rel of dtFiles) {
+  const text = fs.readFileSync(path.join(root, rel), 'utf8');
+  text.split('\n').forEach((line, i) => {
+    if (/1\s*\/\s*120/.test(line)) hardDt.push(`${rel}:${i + 1}`);
+  });
+}
+if (hardDt.length) {
+  problems.push(`这些地方把步长写死成 1/120，应 import SEARCH_DT：${hardDt.join('、')}`);
+}
+
 console.log(`检查 ${checked} 项`);
 if (problems.length) {
   console.error('问题:\n' + problems.join('\n'));

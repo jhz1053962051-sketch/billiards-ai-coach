@@ -68,17 +68,20 @@ test('玩法选择：黑八摆 16 颗三角，九球摆 10 颗菱形', () => {
   assert.equal(nine.filter((b) => b.number === 0).length, 1);
 });
 
-test('玩法选择：createRack 不认识的玩法当黑八处理，不抛错', () => {
-  const weird = createRack('snooker', table, { seed: 3 });
-  assert.equal(weird.length, 16, '未知玩法回退到黑八摆球');
+test('玩法选择：createRack 不认识玩法就报错，不静默回退黑八', () => {
+  assert.throws(() => createRack('snooker', table, { seed: 3 }), /不认识的玩法：snooker/);
+  assert.throws(() => createRack('九球', table, { seed: 3 }), /不认识的玩法/);
+  assert.throws(() => createRack('nine-ball', table, { seed: 3 }), /不认识的玩法/);
+  // 缺省仍然是黑八，那是正常默认值，不能跟着报错
+  assert.equal(createRack(undefined, table, { seed: 3 }).length, 16);
 });
 
-test('玩法选择：建局时把玩法记下来，未知值回退黑八', () => {
+test('玩法选择：建局时把玩法记下来，未知值直接报错', () => {
   assert.equal(realGame('nineball').kind, 'nineball');
   assert.equal(realGame('eightball').kind, 'eightball');
   const balls = createStandardRack(table, { seed: 2 }).map((b) => createBall(b.id, b.x, b.y, b));
-  const odd = createGame(table, balls, { kind: 'snooker' });
-  assert.equal(odd.kind, 'eightball', '未知玩法回退黑八，而不是留一个没人认得的 kind');
+  assert.throws(() => createGame(table, balls, { kind: 'snooker' }), /不认识的玩法：snooker/);
+  assert.equal(createGame(table, balls, {}).kind, 'eightball', '不传玩法时默认黑八');
 });
 
 test('玩法选择：九球局里没有分组概念', () => {

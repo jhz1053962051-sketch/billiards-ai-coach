@@ -73,7 +73,10 @@
 //   · 不合法开球只提供 4.3(d)/Reg.16 的「对手重新摆球开球」或「接手」，不提供推杆。
 //   · 开球线后摆球（3.10/3.11）只做提示，不拦人。
 
-import { groupOf, findFreeSpot } from './rack.js';
+import { groupOf, findFreeSpot, GAME_KINDS } from './rack.js';
+
+// 玩法登记表放在 rack.js（那边零依赖），这里转出去给调用方继续从 rules.js 取。
+export { GAME_KINDS };
 import { createBall, createWorld, stepWorld, allStopped, strike, createRollTracker } from './physics.js';
 import { SEARCH_DT, MAX_SHOT_TIME } from './constants.js';
 
@@ -103,12 +106,6 @@ const FOUL_TEXT = {
  */
 export const ILLEGAL_BREAK_NOTICE = 'three_ball_rule';
 
-/** 玩法 id → 中文名与摆球球数。 */
-export const GAME_KINDS = Object.freeze({
-  eightball: { id: 'eightball', label: '黑八', balls: 15 },
-  nineball: { id: 'nineball', label: '九球', balls: 9 },
-});
-
 /** 开球线位置：靠近开球端（x = 0）的四分之一线。 */
 export function headStringX(table) {
   return table.length / 4;
@@ -128,7 +125,11 @@ export function footSpotX(table) {
 export function createGame(table, balls, opts = {}) {
   const names = opts.names ?? ['玩家 1', '玩家 2'];
   const breaker = opts.breaker === 1 ? 1 : 0;
-  const kind = opts.kind === 'nineball' ? 'nineball' : 'eightball';
+  const kind = opts.kind === undefined ? 'eightball' : GAME_KINDS[opts.kind] ? opts.kind : null;
+  if (kind === null) {
+    // 静默回落黑八会让一局九球按黑八规则跑完，中途没有任何提示，比直接报错难查得多。
+    throw new Error(`不认识的玩法：${String(opts.kind)}（支持 ${Object.keys(GAME_KINDS).join(' / ')}）`);
+  }
   const cue = balls.find((b) => b.number === 0 || b.id === 'cue');
   if (!cue) throw new Error('建局需要一颗母球（number 0 或 id "cue"）');
 

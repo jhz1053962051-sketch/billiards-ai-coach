@@ -169,7 +169,8 @@ test('建局：默认黑八，显式传 nineball 才切成九球', () => {
   const balls = makeBalls([1, 2, 3]);
   assert.equal(createGame(table, balls).kind, 'eightball');
   assert.equal(createGame(table, balls, { kind: 'nineball' }).kind, 'nineball');
-  assert.equal(createGame(table, balls, { kind: '瞎写' }).kind, 'eightball', '未知玩法退回黑八，不能悄悄建出一个四不像');
+  // 原来是「未知玩法悄悄退回黑八」，等于让一局球按另一套规则跑完还不吭声
+  assert.throws(() => createGame(table, balls, { kind: '瞎写' }), /不认识的玩法：瞎写/);
   assert.deepEqual(GAME_KINDS.nineball, { id: 'nineball', label: '九球', balls: 9 });
 });
 

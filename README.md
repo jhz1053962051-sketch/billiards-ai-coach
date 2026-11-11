@@ -156,6 +156,8 @@ vendor/pose/     MediaPipe Pose Landmarker（Apache-2.0）wasm + lite 模型
 
 **验证比执行更精确不是优点。** 验证的意义是预测实际会发生什么，精度对不上时它预测的是另一件事：求解器用 240 Hz 算「这一杆能进」，用户点下去按 120 Hz 真的打，两边算出来的球位不是同一个。改成一致之后既修掉了这个问题，求解还快了一倍。
 
+改完之后还有个遗留问题：页面和对手那边把 `1 / 120` **写死**在五个地方（`demo/app.js` 四处、`src/opponent.js` 一处）。它们此刻恰好等于 `SEARCH_DT`，但哪天有人只调了 `constants.js` 里的那个常数，这五处不会有任何提示——又一次「验证和执行算的不是同一件事」。现在全部改成 `import { SEARCH_DT }`，并且 `check:demo` 加了一条静态断言：`src/` 与 `demo/` 里除 `constants.js` 之外，任何一处出现 `1/120` 字面量都报错。
+
 ### 步长不能随便调粗
 
 `settlePockets` 只在子步结束时看球心位置，所以「一子步位移 < 捕获半径」是它正确工作的前提。pool9 台最小捕获半径 63.0 mm，最高球速 6.6 m/s：
@@ -336,7 +338,7 @@ vendor/pose/     MediaPipe Pose Landmarker（Apache-2.0）wasm + lite 模型
 
 ### 摆球
 
-黑八用 `rackLayout` 摆标准三角阵：顶点球在脚点（`length × 3/4`），8 号在第三排正中，两个底角一全色一花色。九球用 `rackDiamondLayout` 摆菱形：1 号在顶点、9 号在正中且**压在脚点上**。`createRack(kind, table, opts)` 按玩法分发，界面与测试都走这个入口。
+黑八用 `rackLayout` 摆标准三角阵：顶点球在脚点（`length × 3/4`），8 号在第三排正中，两个底角一全色一花色。九球用 `rackDiamondLayout` 摆菱形：1 号在顶点、9 号在正中且**压在脚点上**。`createRack(kind, table, opts)` 按玩法分发，界面与测试都走这个入口。**认不出的玩法直接报错，不回落黑八**：原来写成 `kind === 'nineball' ? 九球 : 黑八`，于是 `'snooker'`、中文 `'九球'`、拼错的 `'nine-ball'` 全都会被静默摆成黑八，一局球按另一套规则跑完也不会有任何提示。不传 `kind` 仍然算黑八，那是正常默认值；`createGame` 同样处理。玩法登记表 `GAME_KINDS` 放在 `rack.js`（那边零依赖），`rules.js` 转出去，两边共享一份名单。
 
 `seed` 决定其余球的排列，同 seed 可复现。`rackLayout(table, [3, 5, 9])` 可以只摆指定的几颗——练习模式的「加一颗」用的就是这个。
 

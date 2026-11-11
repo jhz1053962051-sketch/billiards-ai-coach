@@ -370,9 +370,29 @@ export function createNineBallRack(table, opts = {}) {
   return balls;
 }
 
+/**
+ * 玩法 id → 中文名与摆球球数。
+ *
+ * 放在 rack.js 而不是 rules.js：rack.js 一个 import 都没有，是纯几何模块，
+ * 而 rules.js 已经 import 了 rack.js。把登记表放这边、再从 rules.js 转出去，
+ * 两边共用同一份，不会各写一份名单慢慢走偏。
+ */
+export const GAME_KINDS = Object.freeze({
+  eightball: { id: 'eightball', label: '黑八', balls: 15 },
+  nineball: { id: 'nineball', label: '九球', balls: 9 },
+});
+
 /** 按玩法取对应的一副球。 */
 export function createRack(kind, table, opts = {}) {
-  return kind === 'nineball' ? createNineBallRack(table, opts) : createStandardRack(table, opts);
+  // 认不出的玩法直接报错，不回落黑八。
+  // 原来写成 `kind === 'nineball' ? 九球 : 黑八`，于是 'snooker'、'九球'（中文）、
+  // 拼错的 'nine-ball' 都会被静默摆成黑八——一局球按另一套规则跑完，
+  // 中间不会有任何一处提示。缺省（undefined）仍然算黑八，那是正常默认值。
+  const id = kind === undefined ? 'eightball' : kind;
+  if (!GAME_KINDS[id]) {
+    throw new Error(`不认识的玩法：${String(kind)}（支持 ${Object.keys(GAME_KINDS).join(' / ')}）`);
+  }
+  return id === 'nineball' ? createNineBallRack(table, opts) : createStandardRack(table, opts);
 }
 
 
