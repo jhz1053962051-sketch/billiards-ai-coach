@@ -551,7 +551,7 @@ MediaPipe 的关键点是**回归**出来的，肢体被画面裁掉时它照样
 
 ## 测试
 
-303 个用例，覆盖：
+305 个用例，覆盖：
 
 **击球求解（62 个）**
 
@@ -607,6 +607,11 @@ MediaPipe 的关键点是**回归**出来的，肢体被画面裁掉时它照样
 - **Host 不在白名单回 421**（挡 DNS rebinding；`127.0.0.1:端口` 与 `localhost:端口` 放行）
 - 只接受 GET 与 HEAD（POST 回 405）
 - 开放目录里不存在的文件回 404，且响应体不泄露磁盘路径
+
+**第三方资产（2 个）**
+
+- `vendor/pose/` 下每个文件的 sha256 都和 `manifest.json` 登记的一致（20 MB 的模型与 wasm 是二进制/压缩产物，`git diff` 看不出被换过；这条同时拦住「下载被截断」和「顺手更新了个版本」）
+- 目录里不该多出 manifest 没登记的文件（多一个就意味着有人塞了没人校验过的东西；`manifest.json`、`LICENSE`、`NOTICE` 不算资产）
 
 **模块加载（2 个）**
 
@@ -664,4 +669,4 @@ node tools/verify-pose.mjs     # 动作评估：图片 / 真实录像 / 静止�
 
 ## 许可
 
-MIT。第三方资产：MediaPipe Pose Landmarker（Apache-2.0），模型与 wasm 见 `vendor/pose/`。
+MIT。第三方资产：MediaPipe Pose Landmarker（Apache-2.0），模型与 wasm 见 `vendor/pose/`，许可证全文与来源声明也在那个目录（`LICENSE` / `NOTICE`）——Apache-2.0 第 4(a) 条要求分发时随附许可证副本，只在 README 里写一句出处不等于随附文本。那 5 个文件的 sha256 登记在 `vendor/pose/manifest.json`，`npm test` 会逐个核对。

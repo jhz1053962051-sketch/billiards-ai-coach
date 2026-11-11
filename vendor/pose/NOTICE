@@ -1,0 +1,22 @@
+# 第三方资产说明
+
+本目录下的文件随仓库分发，不是本项目的代码。原样使用，未做修改。
+
+| 文件 | 来源 | 许可证 |
+| --- | --- | --- |
+| `pose_landmarker_lite.task` | MediaPipe Pose Landmarker Lite（float16）模型，`storage.googleapis.com/mediapipe-models` | Apache-2.0 |
+| `vision_bundle.mjs` | `@mediapipe/tasks-vision@1.2.0` | Apache-2.0 |
+| `vision.d.ts` | 同上（TypeScript 声明） | Apache-2.0 |
+| `wasm/vision_wasm_internal.js` | 同上 | Apache-2.0 |
+| `wasm/vision_wasm_internal.wasm` | 同上（官方编译的 SIMD wasm） | Apache-2.0 |
+
+许可证全文见同目录 `LICENSE`（Apache License 2.0）。上游项目：
+<https://github.com/google-ai-edge/mediapipe>
+
+Apache-2.0 第 4(a) 条要求在分发衍生作品时随附一份许可证副本——这就是 `LICENSE`
+放在这里的原因，不是重复放一遍好看。第 4(c) 条要求保留来源声明，对应本文件。
+这些文件都没有被修改，因此 4(b) 不适用。
+
+`manifest.json` 是**本项目**加的文件（不是上游资产）：登记这 5 个文件的 sha256，
+`test/vendor.test.js` 会逐个核对，`tools/fetch-pose-assets.mjs` 下载完也会核对。
+20 MB 的二进制和压缩产物看不出有没有被换过，只能靠哈希。

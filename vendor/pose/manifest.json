@@ -1,0 +1,15 @@
+{
+  "_comment": "vendor/pose 下每个文件的 sha256，供 test/vendor.test.js 与 tools/fetch-pose-assets.mjs 校验。这几个文件是随仓库分发的第三方资产（MediaPipe Pose Landmarker，Apache-2.0），大小 20 MB，本身是二进制/压缩产物，看 diff 看不出被换过——所以要靠哈希。改了这里就要同步改哈希，别为了让测试变绿而放宽断言。",
+  "upstream": {
+    "package": "@mediapipe/tasks-vision",
+    "version": "1.2.0",
+    "license": "Apache-2.0"
+  },
+  "files": {
+    "pose_landmarker_lite.task": "59929e1d1ee95287735ddd833b19cf4ac46d29bc7afddbbf6753c459690d574a",
+    "vision_bundle.mjs": "870da5cfc43bfcf2a8b0f14e8152dae8c7e701722e1191b0e592b94b81b4127a",
+    "vision.d.ts": "7f5d542f4cc581b5770cea813f5558e47e0e938c321c1ce5748334722a1547d9",
+    "wasm/vision_wasm_internal.js": "85c1a342be70427987f900969a5f26e17557351111364e6585e97fb03e93e108",
+    "wasm/vision_wasm_internal.wasm": "bcc13df22d3d69ec8cbe8e280989356d844ae00f4523eb82072d2484f44134dc"
+  }
+}

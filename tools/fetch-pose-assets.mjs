@@ -1,6 +1,7 @@
 // 下载姿态模型资产到 vendor/pose/，让 demo 可离线运行。
 // 只下载，不改动任何项目源码。资产许可证：MediaPipe Apache-2.0。
 import fs from 'node:fs/promises';
+import crypto from 'node:crypto';
 import path from 'node:path';
 
 const ROOT = new URL('../vendor/pose/', import.meta.url);
@@ -26,13 +27,35 @@ async function download(url, dest) {
   return buf.length;
 }
 
+// 下载完必须和 manifest 里登记的哈希对上。
+// CDN 换版本、中间人替换、或者下载被截断，都会在这里停下来——
+// 这 20 MB 是二进制，光看文件大小根本分辨不出内容有没有变。
+const MANIFEST = new URL('./manifest.json', ROOT);
+let expected = {};
+try {
+  expected = JSON.parse(await fs.readFile(MANIFEST, 'utf8')).files ?? {};
+} catch {
+  console.warn('没有 vendor/pose/manifest.json，跳过哈希校验（下载后请自己核对）');
+}
+
+function sha256(buf) {
+  return crypto.createHash('sha256').update(buf).digest('hex');
+}
+
 await fs.mkdir(WASM_DIR, { recursive: true });
 
 for (const [url, dest] of FILES) {
   const name = path.basename(new URL(dest).pathname);
+  // manifest 用的是相对 vendor/pose 的路径，wasm/ 下的要带上目录
+  const rel = name.match(/^vision_wasm_internal/) ? `wasm/${name}` : name;
   try {
     const size = await download(url, dest);
-    console.log(`ok  ${name.padEnd(32)} ${(size / 1024).toFixed(0)} KB`);
+    const got = sha256(await fs.readFile(dest));
+    const want = expected[rel];
+    if (want && got !== want) {
+      throw new Error(`哈希对不上：manifest 记的是 ${want.slice(0, 16)}…，下下来的是 ${got.slice(0, 16)}…`);
+    }
+    console.log(`ok  ${name.padEnd(32)} ${(size / 1024).toFixed(0)} KB${want ? '  ✓ 哈希一致' : ''}`);
   } catch (e) {
     console.error(`FAIL ${name}: ${e.message}`);
     process.exitCode = 1;
