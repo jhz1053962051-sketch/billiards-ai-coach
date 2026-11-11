@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const CHROME =
   process.argv[2] ?? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
@@ -139,6 +140,49 @@ const shot = async (name) => {
 await send(ws, 'Runtime.enable');
 await send(ws, 'Log.enable');
 await send(ws, 'Page.enable');
+
+// ------------------------------------------------------------ file:// 兜底提示
+//
+// 用 file:// 双击打开时，浏览器以 CORS 拒掉 ES module，页面主体一行都不执行，
+// 结果是纯白页。这个提示只能靠一段普通脚本放出来（demo/file-guard.js），所以它
+// 能不能真的出现必须实测：只检查 HTML 里有那个 <script> 标签是不够的。
+//
+// 放在进正题之前跑：file:// 下模块加载失败必然产生一条 CORS 报错，那是浏览器的
+// 正常行为、与本次验证无关，这里断言完就把收集到的错误清空，免得干扰后面的
+// 「全程没有未捕获异常」。
+{
+  const fileUrl = pathToFileURL(
+    path.resolve(import.meta.dirname, '..', 'demo', 'index.html')
+  ).href;
+  await send(ws, 'Page.navigate', { url: fileUrl });
+  await sleep(1200);
+
+  const guard = JSON.parse(
+    await evaluate(`(() => {
+      const el = document.getElementById('file-protocol-notice');
+      return JSON.stringify({
+        has: Boolean(el),
+        text: el ? el.textContent.replace(/\\s+/g, ' ').trim() : '',
+        title: document.title,
+      });
+    })()`)
+  );
+
+  console.log('file:// 兜底提示:', guard.has ? guard.text.slice(0, 60) + '…' : '（没有出现）');
+  check(
+    'file:// 直接打开时给出提示，不是白屏',
+    guard.has && guard.text.includes('node tools/start.mjs'),
+    JSON.stringify(guard)
+  );
+  check(
+    'file:// 提示里写清了要怎么起服务',
+    guard.text.includes('127.0.0.1:4173') && guard.title.includes('本地服务'),
+    guard.title
+  );
+
+  pageErrors.length = 0;
+  consoleErrors.length = 0;
+}
 
 await send(ws, 'Page.navigate', { url: URL });
 await sleep(2500);

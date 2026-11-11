@@ -68,6 +68,18 @@ for (const page of PAGES) {
     const p = path.resolve(path.join(root, path.dirname(page.html)), match[1]);
     if (!fs.existsSync(p)) problems.push(`${page.html}: 脚本不存在 ${match[1]}`);
   }
+
+  // file:// 兜底提示必须在场，而且必须排在所有 module 脚本之前。
+  // 只断言「标签在」不够，但顺序错了同样白屏——模块被 CORS 拒之后才轮到的普通
+  // 脚本，救不回一个已经什么都不显示的页面。
+  checked++;
+  const guardAt = html.indexOf('src="./file-guard.js"');
+  const moduleAt = html.indexOf('<script type="module"');
+  if (guardAt < 0) {
+    problems.push(`${page.html}: 缺少 ./file-guard.js——file:// 打开会白屏且没有任何提示`);
+  } else if (moduleAt >= 0 && guardAt > moduleAt) {
+    problems.push(`${page.html}: ./file-guard.js 必须排在 <script type="module"> 之前`);
+  }
 }
 
 console.log(`检查 ${checked} 项`);
