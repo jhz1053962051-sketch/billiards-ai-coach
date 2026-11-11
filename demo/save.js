@@ -17,6 +17,9 @@
 //   log     —— 战绩流水，重新开一局就该重来；留着反而让"第 N 杆"对不上。
 //   history —— 撤销栈。存了会让人以为能一路退到上一局的起点。
 
+import { createTable } from '../src/table.js';
+import { GAME_KINDS } from '../src/rules.js';
+
 const KEY = 'pool-ai-coach/game/v1';
 
 /** 母球之外允许出现的号：黑八 1–15、九球 1–9。读档时按实际出现的号校验即可。 */
@@ -38,6 +41,16 @@ export function sanitize(raw) {
   const t = raw.table;
   if (!t || typeof t.id !== 'string') return null;
 
+  // 球台预设必须真的是个预设。只判 typeof string 的话，一个手改成 "abc" 的存档
+  // 会被原样接受，读回去建不出球台，界面在更晚的地方炸。
+  let table;
+  try {
+    table = createTable(t.id);
+  } catch {
+    return null;
+  }
+  const { minX, maxX, minY, maxY } = table.bounds;
+
   if (!Array.isArray(raw.balls) || raw.balls.length < 1) return null;
   const seen = new Set();
   const balls = [];
@@ -45,6 +58,9 @@ export function sanitize(raw) {
     if (!b || typeof b.id !== 'string') return null;
     if (!isFiniteNumber(b.x) || !isFiniteNumber(b.y)) return null;
     if (!isFiniteNumber(b.number) || b.number < 0 || b.number > MAX_NUMBER) return null;
+    // 文件头写着「球位越界就整份丢掉」，这里就得真的查。落袋的球坐标在袋口
+    // （袋心常在台面边界外），只有还留在台上的球才要求落在 bounds 内。
+    if (!b.pocketed && (b.x < minX || b.x > maxX || b.y < minY || b.y > maxY)) return null;
     if (b.number !== 0) {
       if (seen.has(b.number)) return null; // 同一号码出现两次，这份存档不可信
       seen.add(b.number);
@@ -65,6 +81,11 @@ export function sanitize(raw) {
   const players = Array.isArray(raw.players) && raw.players.length === 2 ? raw.players : null;
   if (!players) return null;
 
+  // 玩法同理：认不出来就丢。默认回落到黑八会让一局九球读回来按黑八规则走，
+  // 而「先碰哪颗」「进 9 算不算赢」全不一样——这种错比读不出来严重得多。
+  const kind = raw.kind === undefined ? 'eightball' : GAME_KINDS[raw.kind] ? raw.kind : null;
+  if (!kind) return null;
+
   const zone = raw.ballInHand && (raw.ballInHand.zone === 'kitchen' || raw.ballInHand.zone === 'anywhere')
     ? raw.ballInHand.zone
     : null;
@@ -74,7 +95,7 @@ export function sanitize(raw) {
     balls,
     // 玩法必须存：黑八和九球的「先碰哪颗」「进 9 号算不算赢」「能不能分组」
     // 全都不一样，读回时按黑八重建会让一局九球立刻变成非法的黑八局。
-    kind: raw.kind === 'nineball' ? 'nineball' : 'eightball',
+    kind,
     players: players.map((p) => ({
       name: typeof p?.name === 'string' ? p.name : '玩家',
       group: p?.group === 'solid' || p?.group === 'stripe' ? p.group : null,

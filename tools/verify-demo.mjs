@@ -1131,6 +1131,40 @@ console.log('存档·读回:', saveReload);
   check('读档后内部玩法状态一致', r.settingsFollowed === true);
 }
 
+// ------------------------------------------------------------ 存档里的名字不许当 HTML
+//
+// 计分板是用 innerHTML 拼的，名字来自存档；存档就在 localStorage 里，谁都能手改。
+// 这里真的塞一个带 onerror 的名字进去，验证它被当成文字画出来、而不是被执行。
+
+const xssSave = await evaluate(`(() => {
+  const app = window.__app;
+  app.saveGame();
+  const key = 'pool-ai-coach/game/v1';
+  const raw = JSON.parse(localStorage.getItem(key));
+  raw.players[0].name = '<img src=x onerror="window.__xss=1">';
+  localStorage.setItem(key, JSON.stringify(raw));
+  window.__xss = undefined;
+  app.loadGame();
+  const score = document.getElementById('score');
+  const out = JSON.stringify({
+    hasImg: Boolean(score.querySelector('img')),
+    text: score.textContent.slice(0, 80),
+    fired: window.__xss === 1,
+  });
+  window.__xss = undefined;
+  return out;
+})()`);
+console.log('存档·名字里的标签:', xssSave);
+{
+  const r = JSON.parse(xssSave);
+  check('存档里的名字不会被当成 HTML 插进计分板', r.hasImg === false, JSON.stringify(r));
+  check(
+    '名字里的标签原样显示成文字，而不是被执行',
+    r.fired === false && r.text.includes('<img'),
+    JSON.stringify(r)
+  );
+}
+
 // ------------------------------------------------------------ 手动出杆
 //
 // 滑块存在的意义就是"用户能自己定这一杆"。这里验证：改力度 → 真的改变结果。

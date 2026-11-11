@@ -175,6 +175,32 @@ test('存档：sanitize 直接吃 null / undefined / 数组也不炸', () => {
   assert.equal(sanitize('x'), null);
 });
 
+test('存档：球跑出台面、球台或玩法认不出来，都要整份丢掉', () => {
+  // 文件头写着「球位越界或重复就整份丢掉」，但代码里原本只判了 isFiniteNumber：
+  // 手改一个 x=1e9 照样能读回来，球会被画到台面外。这条测试守的就是那句话。
+  const good = serialize(realGame());
+  assert.ok(sanitize(good), '基准存档本身必须能读回来，不能误杀正常球位');
+
+  const target = good.balls.find((b) => b.number !== 0 && !b.pocketed);
+  assert.ok(target, '基准存档里得有一颗在台上的目标球');
+  const withBall = (patch) => ({
+    ...good,
+    balls: good.balls.map((b) => (b === target ? { ...b, ...patch } : b)),
+  });
+
+  assert.equal(sanitize(withBall({ x: 1e9 })), null, 'x 飞出台面必须丢');
+  assert.equal(sanitize(withBall({ y: -5 })), null, 'y 落到库外必须丢');
+  assert.equal(sanitize({ ...good, table: { id: 'no-such-table' } }), null, '认不出的球台必须丢');
+  assert.equal(sanitize({ ...good, kind: 'snooker' }), null, '认不出的玩法必须丢');
+
+  // 落袋的球坐标在袋口，本来就可能落在 bounds 之外，不能因此判坏档
+  const potted = good.balls.find((b) => b.pocketed);
+  if (potted) {
+    const moved = { ...good, balls: good.balls.map((b) => (b === potted ? { ...b, x: 0, y: 0 } : b)) };
+    assert.ok(sanitize(moved), '落袋球的坐标不该被台面范围卡掉');
+  }
+});
+
 test('存档：删掉之后读不到，describeSave 也说没有', () => {
   const store = fakeStore();
   writeSave(realGame('nineball'), store);

@@ -111,6 +111,19 @@ const state = {
 
 const GROUP_LABEL = { solid: '全色', stripe: '花色', eight: '8 号', cue: '母球' };
 
+/**
+ * 拼进 innerHTML 之前必须过这一道。
+ *
+ * 现在玩家名只有「你」「对手」两个常量，所以还炸不出来；但存档是存在
+ * localStorage 里的，任何人手改一下（或者以后加了改名、分享存档）就能把
+ * `<img src=x onerror=...>` 塞进去，而计分板正是用 innerHTML 拼名字的。
+ * 与其等到那天再补，不如把所有外部字符串统一转义。
+ */
+const ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+function esc(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (ch) => ESC_MAP[ch]);
+}
+
 // ---------------------------------------------------------------- 尺寸
 
 function resize() {
@@ -1302,7 +1315,7 @@ function updateScore() {
     const tagCls = p.group ?? '';
     const tagTxt = p.group ? GROUP_LABEL[p.group] : '未分组';
     const left = p.group ? remainingOfGroup(numbersOnTable(g.balls), p.group) : null;
-    div.innerHTML = `<span class="nm">${p.name}</span>
+    div.innerHTML = `<span class="nm">${esc(p.name)}</span>
       <span class="tag2 ${tagCls}">${tagTxt}</span>
       ${left !== null ? `<span class="tag2">剩 ${left}</span>` : ''}
       ${p.fouls > 0 ? `<span class="fs">连犯 ${p.fouls}</span>` : ''}`;
@@ -1311,7 +1324,7 @@ function updateScore() {
   if (g.phase === 'ended') {
     const d = document.createElement('div');
     d.className = 'who';
-    d.innerHTML = `<span class="nm">本局结束</span><span class="tag2">${g.players[g.winner]?.name ?? '—'} 获胜</span>`;
+    d.innerHTML = `<span class="nm">本局结束</span><span class="tag2">${esc(g.players[g.winner]?.name ?? '—')} 获胜</span>`;
     box.appendChild(d);
   }
 }
@@ -1629,7 +1642,7 @@ function doRerack() {
   state.placing = false;
   canvas.classList.remove('placing');
   $('gRerack').classList.add('hidden');
-  setReport(`已重摆，${g.players[g.turn].name}开球。`);
+  setReport(`已重摆，${esc(g.players[g.turn].name)}开球。`);
   $('gAdvice').textContent = '—';
   $('gAdvice').className = 'empty';
   updateScore();
@@ -1988,7 +2001,7 @@ function updateChoicePanel(g) {
     $('gChoice').classList.add('hidden');
     const next = acceptTable(g);
     state.game = next;
-    setReport(`${next.players[1].name}选择照这样打。`);
+    setReport(`${esc(next.players[1].name)}选择照这样打。`);
     return;
   }
   $('gChoice').classList.remove('hidden');
@@ -2057,7 +2070,7 @@ function loadGame() {
   $('gAdvice').textContent = '—';
   $('gAdvice').className = 'empty';
   $('gVerdict').textContent = '';
-  setReport(`已读取存档：第 ${g.shots} 杆，轮到「${g.players[g.turn].name}」。`);
+  setReport(`已读取存档：第 ${g.shots} 杆，轮到「${esc(g.players[g.turn].name)}」。`);
   if (state.mode !== 'game') setMode('game');
   updateScore();
   updateLog();
@@ -2260,7 +2273,7 @@ $('gHandBack').addEventListener('click', () => {
   state.game = next;
   state.gSolution = null;
   $('gChoice').classList.add('hidden');
-  setReport(`已把台面交回给 ${next.players[next.turn].name}。`);
+  setReport(`已把台面交回给 ${esc(next.players[next.turn].name)}。`);
   $('gAdvice').textContent = '—';
   $('gAdvice').className = 'empty';
   updateScore();
