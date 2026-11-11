@@ -8,7 +8,7 @@ import { createGame, legalTargetNumbers, numbersOnTable, simulateShot, resolveSh
 import { createStandardRack, createNineBallRack, createRack } from '../src/rack.js';
 import { planShot } from '../src/solver.js';
 import { interpolateBallStates, sampleDampedCamera } from '../demo/render.js';
-import { SAVE_KEY, sanitize, serialize, writeSave, readSave, clearSave, describeSave } from '../demo/save.js';
+import { SAVE_KEY, sanitize, serialize, writeSave, readSave, readSaveStamp, clearSave, describeSave } from '../demo/save.js';
 import {
   PRACTICE_KEY,
   PRACTICE_DRILLS,
@@ -211,6 +211,34 @@ test('存档：删掉之后读不到，describeSave 也说没有', () => {
   clearSave(store);
   assert.equal(readSave(store), null);
   assert.equal(describeSave(store), null);
+});
+
+test('存档：写入时间戳是可比对的，好让另一个标签页认出「这份我没见过」', () => {
+  const g = realGame('eightball');
+  const store = fakeStore();
+
+  // 没存过的时候读不到时间戳，页面才不会把「没有存档」误判成「被改过」
+  assert.equal(readSaveStamp(store), null);
+
+  assert.equal(writeSave(g, store, { now: 1700000000000 }), true);
+  assert.equal(readSaveStamp(store), 1700000000000);
+  // 时间戳必须真的留在存档里，只写在 writeSave 的参数上没用
+  assert.equal(readSave(store).savedAt, 1700000000000);
+
+  // 再存一次就是新的时间戳
+  assert.equal(writeSave(g, store, { now: 1700000001000 }), true);
+  assert.equal(readSaveStamp(store), 1700000001000);
+
+  // 手改存档把 savedAt 删掉：当作比任何真实时间戳都旧，但整份不许丢
+  const raw = JSON.parse(store.getItem(SAVE_KEY));
+  delete raw.savedAt;
+  store.setItem(SAVE_KEY, JSON.stringify(raw));
+  assert.equal(readSaveStamp(store), 0);
+  assert.ok(readSave(store), '少一个时间戳不该让整份存档作废');
+
+  // 承认不了内容的时候也不能抛
+  store.setItem(SAVE_KEY, '{');
+  assert.equal(readSaveStamp(store), null);
 });
 
 test('存档：没有 localStorage 时 writeSave 返回 false，不抛错', () => {

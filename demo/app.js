@@ -38,7 +38,7 @@ import {
   handBackBreak,
 } from '../src/rules.js';
 import { takeTurn } from '../src/opponent.js';
-import { readSave, writeSave, clearSave, describeSave } from './save.js';
+import { readSave, writeSave, clearSave, describeSave, readSaveStamp, SAVE_KEY } from './save.js';
 import {
   appendPracticeResult,
   clearPracticeLog,
@@ -102,6 +102,11 @@ const state = {
   // 共用
   animating: false,
   placing: false,
+  // 存档的写入时间戳。null = 这个页面还没读过也没存过，说什么都算新鲜。
+  // 用来分辨「存档还是我见过的那份」和「另一个标签页已经改过了」。
+  saveStamp: null,
+  // 已经被提示过一次「存档被别人改过」，再点一次存档就是真要覆盖。
+  saveOverwrite: false,
   // 撤销用：每一杆结算前的局面快照。只存球局，练习模式的「重置」已经是退路。
   history: [],
   // 手动出杆参数。求解会给"建议参数"，但滑块一旦被用户动过就不再被覆盖——
@@ -2014,8 +2019,26 @@ function saveGame() {
     setReport('还没有开局，没有可存的。');
     return;
   }
+  // 两个标签页各开一局的时候，后点的那个会把先存的静默盖掉——谁存的、
+  // 存的是哪一局，全都没有痕迹。所以先看一眼存档还是不是自己认识的那份：
+  // 不是的话先不写，把对方的进度说出来，让人自己决定要不要覆盖。
+  const storedStamp = readSaveStamp();
+  const stale =
+    storedStamp !== null && state.saveStamp !== null && storedStamp !== state.saveStamp;
+  if (stale && !state.saveOverwrite) {
+    const theirs = describeSave();
+    state.saveOverwrite = true;
+    setReport(
+      `存档已经被另一个标签页改过了（那边存的是第 ${theirs?.shots ?? '?'} 杆），这一局没有覆盖它。` +
+        '确认要覆盖的话，再点一次「存这一局」。'
+    );
+    refreshSaveInfo();
+    return;
+  }
   const ok = writeSave(g);
+  state.saveOverwrite = false;
   if (ok) {
+    state.saveStamp = readSaveStamp();
     setReport(`已存档：第 ${g.shots} 杆，${g.balls.filter((b) => !b.pocketed && b.number !== 0).length} 颗目标球在台上。刷新页面后点「读取存档」能接着打。`);
     refreshSaveInfo();
   } else {
@@ -2065,6 +2088,8 @@ function loadGame() {
   state.placing = Boolean(g.ballInHand);
   canvas.classList.toggle('placing', state.placing);
   state.history = [];
+  state.saveStamp = saved.savedAt;
+  state.saveOverwrite = false;
   updateUndoButton();
   $('gRerack').classList.toggle('hidden', !g.requiresRerack);
   $('gAdvice').textContent = '—';
@@ -2080,6 +2105,8 @@ function loadGame() {
 
 function removeSave() {
   const ok = clearSave();
+  state.saveStamp = null;
+  state.saveOverwrite = false;
   setReport(ok ? '存档已删除。' : '删不了——浏览器禁用了本地存储。');
   refreshSaveInfo();
 }
@@ -2366,6 +2393,25 @@ $('practiceFocusAction').addEventListener('click', () => {
 $('saveGame').addEventListener('click', saveGame);
 $('loadGame').addEventListener('click', loadGame);
 $('clearSave').addEventListener('click', removeSave);
+
+// 另一个标签页动了存档。storage 事件只在**别的**标签页写入时触发（自己写不会
+// 回调自己），正好用来把「这份存档我见过的那版已经过期了」标出来。
+// 不自动读进来：这边可能正打到关键一杆，突然换桌比丢一份存档更糟。
+window.addEventListener('storage', (e) => {
+  if (e.key !== SAVE_KEY) return;
+  state.saveOverwrite = false;
+  if (e.newValue === null) {
+    state.saveStamp = null;
+    setReport('另一个标签页把存档删掉了。这边不受影响。');
+  } else {
+    const theirs = describeSave();
+    setReport(
+      `另一个标签页刚存了一份新的（第 ${theirs?.shots ?? '?'} 杆）。` +
+        '这边接着打没问题，但点「存这一局」时会被先问一句，免得把它盖掉。'
+    );
+  }
+  refreshSaveInfo();
+});
 
 // ---------------------------------------------------------------- 键盘
 

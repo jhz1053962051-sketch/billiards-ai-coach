@@ -112,14 +112,17 @@ export function sanitize(raw) {
     phase: raw.phase === 'ended' ? 'ended' : 'playing',
     winner: raw.winner === 0 || raw.winner === 1 ? raw.winner : null,
     shots: isFiniteNumber(raw.shots) ? Math.max(0, Math.floor(raw.shots)) : 0,
+    // 存下来是为了让别的标签页能判断「这份存档是不是我看过的那个」。
+    // 不合法就当 0（比任何真实时间戳都旧），不会因此丢掉整份存档。
+    savedAt: isFiniteNumber(raw.savedAt) ? raw.savedAt : 0,
   };
 }
 
 /** 把一局压成可存的形状（只留需要的字段，别把 table 对象整个塞进去）。 */
-export function serialize(game) {
+export function serialize(game, now = Date.now()) {
   return {
     v: 1,
-    savedAt: Date.now(),
+    savedAt: now,
     table: { id: game.table.preset },
     balls: game.balls.map((b) => ({
       id: b.id,
@@ -163,13 +166,35 @@ function defaultStore() {
 }
 
 /** 写存档。存储不可用（隐私模式 / 配额满）时返回 false，不抛。 */
-export function writeSave(game, store = defaultStore()) {
+export function writeSave(game, store = defaultStore(), { now = Date.now() } = {}) {
   if (!store) return false;
   try {
-    store.setItem(KEY, JSON.stringify(serialize(game)));
+    store.setItem(KEY, JSON.stringify(serialize(game, now)));
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * 存档的写入时间戳，给「另一个标签页是不是改过」用。没有存档返回 null。
+ * 注意这里读的是原始 JSON 而不是 sanitize 之后的对象：存档坏掉时也要能把
+ * 「它存在过」这件事说出来，哪怕内容已经不能用了。
+ */
+export function readSaveStamp(store = defaultStore()) {
+  if (!store) return null;
+  let text = null;
+  try {
+    text = store.getItem(KEY);
+  } catch {
+    return null;
+  }
+  if (!text) return null;
+  try {
+    const raw = JSON.parse(text);
+    return typeof raw?.savedAt === 'number' && Number.isFinite(raw.savedAt) ? raw.savedAt : 0;
+  } catch {
+    return null;
   }
 }
 

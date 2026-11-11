@@ -1177,6 +1177,71 @@ console.log('存档·名字里的标签:', xssSave);
   );
 }
 
+// ------------------------------------------------------------ 两个标签页不许静默互盖
+//
+// 两个标签页各开一局、各自点「存这一局」，后点的会把先存的那份无声盖掉——
+// 谁存的、存的是哪一局，什么都没留下。
+// 这里模拟"另一个标签页刚存过"（直接把 localStorage 里的时间戳改新、杆数改掉），
+// 然后本页点存档：第一次必须先被拦下来并把对方的进度说出来，第二次才覆盖。
+
+const twoTab = await evaluate(`(() => {
+  const app = window.__app;
+  app.setMode('game');
+  app.newGame();
+  const key = 'pool-ai-coach/game/v1';
+  localStorage.removeItem(key);
+  app.state.saveStamp = null;
+  app.state.saveOverwrite = false;
+
+  // 本页先存一份，记下自己的时间戳
+  app.saveGame();
+  const mine = JSON.parse(localStorage.getItem(key));
+  const mineShots = mine.shots;
+
+  // 装作另一个标签页刚存过：时间戳更新、杆数不同
+  mine.savedAt = mine.savedAt + 60000;
+  mine.shots = mineShots + 7;
+  localStorage.setItem(key, JSON.stringify(mine));
+
+  // 本页这一杆已经打出去了，杆数会变
+  app.state.game.shots = mineShots + 1;
+
+  // 第一次点存档：必须只提醒，不写
+  app.saveGame();
+  const firstReport = document.getElementById('report').textContent;
+  const afterFirst = JSON.parse(localStorage.getItem(key));
+
+  // 第二次点存档：才真的覆盖
+  app.saveGame();
+  const secondReport = document.getElementById('report').textContent;
+  const afterSecond = JSON.parse(localStorage.getItem(key));
+
+  return JSON.stringify({
+    mineShots,
+    foreignShots: mineShots + 7,
+    firstReport: firstReport.slice(0, 120),
+    secondReport: secondReport.slice(0, 120),
+    keptForeign: afterFirst.shots === mineShots + 7,
+    overwrote: afterSecond.shots === mineShots + 1,
+    stampMovedOn: afterSecond.savedAt >= mine.savedAt,
+  });
+})()`);
+console.log('存档·两个标签页:', twoTab);
+{
+  const r = JSON.parse(twoTab);
+  check(
+    '另一个标签页存过之后，本页第一次存档要拦下来并说明对方存到第几杆',
+    r.keptForeign === true && r.firstReport.includes('另一个标签页') && r.firstReport.includes(String(r.foreignShots)),
+    JSON.stringify(r)
+  );
+  check('第一次点存档不许偷偷写进去', r.keptForeign === true, JSON.stringify(r));
+  check(
+    '再点一次才覆盖，存的是本页这一局',
+    r.overwrote === true && r.secondReport.includes('已存档'),
+    JSON.stringify(r)
+  );
+}
+
 // ------------------------------------------------------------ 手动出杆
 //
 // 滑块存在的意义就是"用户能自己定这一杆"。这里验证：改力度 → 真的改变结果。
