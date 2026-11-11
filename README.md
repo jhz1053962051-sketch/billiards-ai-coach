@@ -658,7 +658,7 @@ node tools/verify-demo.mjs     # 击球求解 + 加球 + 打一局
 node tools/verify-pose.mjs     # 动作评估：图片 / 真实录像 / 静止反例 三条路径
 ```
 
-`status.mjs` 和另外两个不是一回事，先说清分工：它是「现在这一刻系统能不能用」，另外两个是「改动有没有破坏既定契约」。前者检查五条路由是否 200、两个页面是否真加载、求解是否出结果、控制台有没有报错；后者是 127 项断言。改完代码想知道有没有把页面弄坏，跑 status 十几秒就够。
+`status.mjs` 和另外两个不是一回事，先说清分工：它是「现在这一刻系统能不能用」，另外两个是「改动有没有破坏既定契约」。前者检查五条路由是否 200、两个页面是否真加载、求解是否出结果、控制台有没有报错；后者是 145 项断言。改完代码想知道有没有把页面弄坏，跑 status 十几秒就够。
 
 `status.mjs` 写的时候踩了一个 CDP 的坑：**别用 `Target.createTarget` 新建标签页**。第一版照着「干净隔离」的想法先建一个新 target 再 `Target.attachToTarget`，结果 `Target.createTarget` 直接超时 30 秒——Chrome 从 `/json/list` 拿到的那个 page target 已经可以直接 `Page.navigate`，多绕一层反而挂在会话建立上。现在的写法是连现成 target、`Runtime.enable` / `Log.enable` / `Page.enable` 之后 navigate，和 `verify-demo.mjs` 一致。
 
