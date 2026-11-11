@@ -1523,6 +1523,50 @@ console.log('窄屏 390×844:', narrow);
 await send(ws, 'Emulation.clearDeviceMetricsOverride');
 await new Promise((r) => setTimeout(r, 400));
 
+// ------------------------------------------------------------ 姿态页窄屏（390×844）
+//
+// 姿态页原本是「左画面右面板」：aside 固定 390 px + main 是 flex，
+// 手机上侧栏一个人就吃掉整行，主画面被压成 0 宽——实测 #stage 只剩 48 px、
+// canvas 宽 0，打开就是坏的。而这一页的现实输入恰恰是「手机拍自己出杆」。
+// 所以这里量的是「canvas 到底有没有宽度」，不是「文件里有没有 @media」。
+// 模型要等用户选文件才加载，进这一页本身很轻。
+
+await send(ws, 'Emulation.setDeviceMetricsOverride', {
+  width: 390,
+  height: 844,
+  deviceScaleFactor: 2,
+  mobile: true,
+});
+await send(ws, 'Page.navigate', { url: new globalThis.URL('pose.html', URL).href });
+await sleep(1600);
+
+const poseNarrow = await evaluate(`(() => {
+  const box = (sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { w: Math.round(r.width), h: Math.round(r.height), top: Math.round(r.top) };
+  };
+  return JSON.stringify({
+    vw: document.documentElement.clientWidth,
+    stage: box('#stage'),
+    canvas: box('#view'),
+    aside: box('aside'),
+    scrollW: document.documentElement.scrollWidth,
+    canScroll: document.documentElement.scrollHeight > window.innerHeight,
+  });
+})()`);
+console.log('姿态页窄屏 390×844:', poseNarrow);
+{
+  const p = JSON.parse(poseNarrow);
+  check('姿态页在 390 宽下主画面还占得到宽度', Boolean(p.stage) && p.stage.w > 200, JSON.stringify(p.stage));
+  check('姿态页在 390 宽下 canvas 有可见宽度（不是 0）', Boolean(p.canvas) && p.canvas.w > 200, JSON.stringify(p.canvas));
+  check('姿态页在 390 宽下侧栏不再吃掉整行', Boolean(p.aside) && p.aside.w <= p.vw, JSON.stringify(p.aside));
+  check('姿态页在 390 宽下没有横向滚动', p.scrollW <= p.vw + 1, `scrollWidth=${p.scrollW} viewport=${p.vw}`);
+}
+
+await send(ws, 'Emulation.clearDeviceMetricsOverride');
+
 // ------------------------------------------------------------ 收尾
 
 // 有些崩溃发生在某段断言之后（比如回放的 tick 要等帧放完才走到回调），

@@ -263,6 +263,25 @@
     color: var(--muted); font-size: 12px;
     background: linear-gradient(180deg, #182330 0%, #111a24 100%);
   }
+
+  /* 窄屏：这一页原本是「左画面右面板」的桌面布局，侧栏固定 390 px。
+     手机上不切的话侧栏一个人就吃掉整行，主画面被压成 0 宽——实测 390 视口下
+     #stage 只剩 48 px（两侧 padding）、canvas 宽 0，等于打开就坏了。
+     而这一页的现实输入恰恰是「手机拍自己出杆」，所以必须适配。 */
+  @media (max-width: 900px) {
+    html, body { height: auto; min-height: 100%; overflow: auto; }
+    header { padding: 0 12px; gap: 10px; }
+    header .sub { display: none; }
+    main { flex-direction: column; }
+    #stage {
+      flex: none; min-height: 56vh; padding: 12px;
+      border-bottom: 1px solid var(--line);
+    }
+    aside {
+      width: auto; flex: none; border-left: none;
+      overflow: visible;
+    }
+  }
 </style>
 </head>
 <body>
@@ -278,7 +297,7 @@
 <main>
   <div id="stage">
     <canvas id="view" width="640" height="480"></canvas>
-    <div id="empty">还没有素材。<br>点右侧「选择图片」或「选择视频」开始。</div>
+    <div id="empty">还没有素材。<br>点「选择图片」或「选择视频」开始。</div>
     <video id="video" playsinline muted hidden></video>
   </div>
 

@@ -128,6 +128,24 @@ for (const page of PAGES) {
   }
 }
 
+// 姿态页的窄屏适配：它在 390 宽下曾经把主画面压成 0 宽（aside 固定 390 + main flex）。
+// 端到端那边量的是真实宽度，这里再钉一次「别再退回桌面专用布局」，
+// 免得有人删掉媒体查询却因为端到端没跑到那一页而漏过。
+checked++;
+{
+  const poseHtml = fs.readFileSync(path.join(root, 'demo/pose.html'), 'utf8');
+  if (!/@media[^{]*max-width:\s*900px/.test(poseHtml)) {
+    problems.push('demo/pose.html: 缺少 max-width: 900px 的媒体查询，手机上主画面会被侧栏压成 0 宽');
+  }
+  const block = poseHtml.match(/@media[^{]*max-width:\s*900px[^{]*\{([\s\S]*?)\n  \}/);
+  if (!block || !/main\s*\{[^}]*flex-direction:\s*column/.test(block[1])) {
+    problems.push('demo/pose.html: 窄屏媒体查询里要把 main 改成竖向排列，否则侧栏仍会挤掉画面');
+  }
+  if (!/aside\s*\{[^}]*width:\s*auto/.test(block?.[1] ?? '')) {
+    problems.push('demo/pose.html: 窄屏媒体查询里 aside 的宽度要改成 auto，否则它自己就占满一行');
+  }
+}
+
 console.log(`检查 ${checked} 项`);
 if (problems.length) {
   console.error('问题:\n' + problems.join('\n'));
