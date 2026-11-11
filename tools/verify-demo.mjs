@@ -313,6 +313,24 @@ console.log('练习·切换备选:', altClick);
   const r = JSON.parse(altClick);
   check('切换备选后建议变了', r.ok && r.before !== r.after, r.why ?? '');
 }
+// 「能点」这件事要看得出来：触屏没有 hover，光靠变色等于没提示。
+{
+  const afford = await evaluate(`(() => {
+    const rows = [...document.querySelectorAll('#alts .alt')];
+    const hint = document.querySelector('.alts-card .hint');
+    return JSON.stringify({
+      rows: rows.length,
+      arrows: rows.filter((r) => r.querySelector('.go')).length,
+      role: rows.every((r) => r.getAttribute('role') === 'button'),
+      tabbable: rows.every((r) => r.tabIndex === 0),
+      hint: hint ? hint.textContent.trim() : '',
+    });
+  })()`);
+  const a = JSON.parse(afford);
+  check('备选行都带可点的箭头', a.rows > 0 && a.arrows === a.rows, `${a.arrows}/${a.rows}`);
+  check('备选行是按钮语义且能聚焦', a.role && a.tabbable, JSON.stringify(a));
+  check('备选区写明点了会发生什么', /点某一条/.test(a.hint), a.hint);
+}
 await evaluate(`document.querySelectorAll('#alts .alt')[0]?.click()`);
 
 // 演示一杆

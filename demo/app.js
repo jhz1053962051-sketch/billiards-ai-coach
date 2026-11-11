@@ -1151,7 +1151,15 @@ function renderAlts(card, ms) {
     const meta = document.createElement('span');
     meta.className = 'meta';
     meta.textContent = `±${c.toleranceDeg.toFixed(2)}° · ${difficultyLabel(c.value ?? c.difficulty)}`;
-    row.append(title, meta);
+    // 触屏没有 hover，给一个常驻的箭头，让人知道这一行能点
+    const go = document.createElement('span');
+    go.className = 'go';
+    go.setAttribute('aria-hidden', 'true');
+    go.textContent = '›';
+    row.append(title, meta, go);
+    row.setAttribute('role', 'button');
+    row.tabIndex = 0;
+    row.title = '点一下换成这个方案';
     row.addEventListener('click', () => {
       if (state.animating) return;
       const v = c.value ?? c.difficulty;
@@ -1171,6 +1179,12 @@ function renderAlts(card, ms) {
         dd > 80 ? 'brutal' : dd > 55 ? 'hard' : ''
       );
       render();
+    });
+    // 标了 role=button + tabIndex，键盘也得能按，否则焦点停在上面按回车没反应
+    row.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+      row.click();
     });
     $('alts').appendChild(row);
   }

@@ -351,6 +351,13 @@
   .alt .name { font-size: 13px; font-weight: 500; display: block; }
   .alt .position { color: #7dd3fc; font-size: 11px; display: block; line-height: 1.4; }
   .alt .meta { color: var(--text-secondary); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  /* 没有鼠标的设备上 hover 永远不触发，靠变色做「可点」提示等于没做。
+     给一个常驻的箭头 + 边框，手指点下去还有 :active 反馈。 */
+  .alt .go { color: var(--muted); font-size: 15px; line-height: 1; margin-left: 4px; flex: none; }
+  @media (hover: none) {
+    .alt { border-color: rgba(255, 255, 255, 0.1); }
+    .alt:active { background: rgba(14, 165, 233, 0.22); border-color: rgba(14, 165, 233, 0.5); }
+  }
   .empty { color: var(--muted); font-size: 13px; }
   .hint { color: var(--muted); font-size: 12px; line-height: 1.65; margin: 0 0 6px; }
   .hint b { color: var(--text-secondary); font-weight: 600; }
@@ -1062,6 +1069,8 @@
 
       <div class="card alts-card" style="margin-bottom:12px">
         <h2>备选进球路线</h2>
+        <!-- 鼠标悬停有变色，触屏没有；不写一句话，手机上看着就是一列文字 -->
+        <div class="hint" style="margin-bottom:6px">点某一条就换成那个方案（球杆会跟着转过去）。</div>
         <div id="alts" class="empty">—</div>
       </div>
 
