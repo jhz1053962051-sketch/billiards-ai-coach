@@ -24,6 +24,8 @@ node tools/test.mjs         # 跑测试（等价于 npm test）
 node tools/status.mjs       # 开机自检：服务、两个页面、控制台报错（等价于 npm run status）
 ```
 
+`serve.mjs` 只开放 `/demo`、`/src`、`/vendor` 三个目录，也只认 `127.0.0.1` 与 `localhost` 这两个 Host。它是本机开发用的服务器，不是发布用的：仓库根上的 `.git/`（完整提交历史）、`_research/`（素材）、`.deepseek-harness/`（会话记忆）都不该被一个 GET 读走，所以按目录白名单拦在最前面，路径里出现以点开头的段（`.git`、`..`）直接 403。畸形编码（比如 `/%`）回 400，不会把进程带走——之前这里一次 `decodeURIComponent` 抛异常就能让服务退出，任意网页放一个 `<img src="/%">` 就够。
+
 `tools/test.mjs` 会按当前 Node 版本挑进程隔离开关——这个开关改过两次名字（22.8 的 `--experimental-test-isolation=none`、23.6 起叫 `--test-isolation=none`），写死在命令里就只能在某一段版本区间用。
 
 `tools/status.mjs` 和 `tools/verify-demo.mjs` 的分工：后者是逐项验收（112 项断言，改代码后跑），前者只回答「现在这一刻系统能不能用」——五条路由是否 200、两个页面是否真加载、求解是否出结果、控制台有没有报错。改完代码想知道有没有把页面弄坏，跑 status 十几秒就够；要验收细节才跑 verify-demo。
@@ -107,7 +109,7 @@ demo/            浏览器演示（原生 ESM，直接 import ../src/*.js）
   save.js              存档的序列化与校验（只存局面，不存日志与撤销栈）
   index.html/app.js    击球求解 + 打一局 + 手动出杆 + 存档 + 键盘
   pose.html/pose.js    动作评估
-test/            290 个 node:test 用例
+test/            299 个 node:test 用例
 tools/           静态服务器、测试启动器、开机自检（status）、demo 自检、Chrome CDP 端到端验证
 vendor/pose/     MediaPipe Pose Landmarker（Apache-2.0）wasm + lite 模型
 ```
@@ -537,7 +539,7 @@ MediaPipe 的关键点是**回归**出来的，肢体被画面裁掉时它照样
 
 ## 测试
 
-290 个用例，覆盖：
+299 个用例，覆盖：
 
 **击球求解（62 个）**
 
@@ -581,6 +583,18 @@ MediaPipe 的关键点是**回归**出来的，肢体被画面裁掉时它照样
 - **防守的瞄准偏移按几何上界缩放**（`swingOffsetsDeg` 每个采样点都在 `asin(2R/d)` 内、最大值达上界 80% 以上、三种距离都真的能碰到 1 号球；改回固定 55° 时这条会报「19.250° 超过了几何上界 9.398°」）
 - **防守重复求解结果一致**（同一局面两次求解的瞄准角、力度、打分完全相同，没有引入隐藏随机）
 - **存档校验**（坏存档、缺母球、号码重复、玩家人数不对都拒绝；好的存档能原样往返）
+
+**静态服务（9 个）**
+
+- 正常放行（`/demo/index.html`、`/src/solver.js`、`/vendor/.../vision.wasm`；wasm 的 MIME 必须是 `application/wasm`，否则 `instantiateStreaming` 直接拒绝加载）
+- 根路径 302 到 `/demo/`、`/favicon.ico` 回 204 不刷 404 噪音
+- **`.git/` 读不到**（`config`、`HEAD`、目录本身全 403）
+- **素材目录与会话记忆读不到**（`/_research/`、`/.deepseek-harness/memory/`、`/package.json`、`/README.md` 全 403）
+- **编码后的穿越读不到**（`/demo/%2e%2e/%2e%2e/etc/passwd` 403，响应体里不出现 `root:`）
+- **畸形编码回 400 且服务不退出**（`GET /%` 之后紧接着再请求一次必须还是 200——这条专守「一次 `decodeURIComponent` 抛异常带走整个进程」）
+- **Host 不在白名单回 421**（挡 DNS rebinding；`127.0.0.1:端口` 与 `localhost:端口` 放行）
+- 只接受 GET 与 HEAD（POST 回 405）
+- 开放目录里不存在的文件回 404，且响应体不泄露磁盘路径
 
 **动作评估（55 个）**
 
