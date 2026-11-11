@@ -1465,6 +1465,64 @@ console.log('第一人称·切换:', fpvActive, '切回:', topViewAfter);
   check('俯视按钮恢复俯视文案与普通样式', b.text.includes('俯视') && !b.hasFpvClass, JSON.stringify(b));
 }
 
+// ------------------------------------------------------------ 窄屏（390×844）
+//
+// 页面上有 @media (max-width: 900px) 的窄屏布局，也就是说它声称在手机上能用。
+// 这类声明最容易烂掉：改主布局的时候没人会去 390px 底下看一眼，
+// 而横向溢出的表现是「右边按钮被裁掉一截」，照样能点、只是点不到。
+// 所以这里真的把视口压到 390 宽，逐条量「有没有横向滚动」和
+// 「关键按钮是不是整个落在视口里」。
+
+await send(ws, 'Emulation.setDeviceMetricsOverride', {
+  width: 390,
+  height: 844,
+  deviceScaleFactor: 2,
+  mobile: true,
+});
+await new Promise((r) => setTimeout(r, 400));
+
+const narrow = await evaluate(`(() => {
+  const vw = document.documentElement.clientWidth;
+  const doc = document.documentElement;
+  const rect = (el) => { const r = el.getBoundingClientRect(); return { l: Math.round(r.left), r: Math.round(r.right), w: Math.round(r.width) }; };
+  const pick = (sel) => {
+    const el = document.querySelector(sel);
+    return el ? { ...rect(el), inView: el.getBoundingClientRect().left >= -1 && el.getBoundingClientRect().right <= vw + 1 } : null;
+  };
+  const wide = [];
+  for (const el of document.querySelectorAll('body *')) {
+    const r = el.getBoundingClientRect();
+    if (r.width > 0 && (r.right > vw + 1 || r.left < -1)) {
+      wide.push(el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + ':' + Math.round(r.right));
+    }
+  }
+  return JSON.stringify({
+    vw,
+    scrollW: doc.scrollWidth,
+    overflowing: wide.slice(0, 6),
+    solve: pick('#solve'),
+    gameTab: pick('#tabGame'),
+    table: pick('#table'),
+    height: window.innerHeight,
+  });
+})()`);
+console.log('窄屏 390×844:', narrow);
+{
+  const r = JSON.parse(narrow);
+  check('390 宽下页面不产生横向滚动', r.scrollW <= r.vw + 1, `scrollWidth=${r.scrollW} viewport=${r.vw}`);
+  check('390 宽下没有元素越出视口右边', r.overflowing.length === 0, r.overflowing.join(', '));
+  check(
+    '390 宽下「求解最佳方案」整个在视口里',
+    Boolean(r.solve) && r.solve.inView && r.solve.w > 40,
+    JSON.stringify(r.solve)
+  );
+  check('390 宽下「打一局」标签页整个在视口里', Boolean(r.gameTab) && r.gameTab.inView, JSON.stringify(r.gameTab));
+}
+
+// 量完把视口还原，别让后面的检查跑在手机尺寸上
+await send(ws, 'Emulation.clearDeviceMetricsOverride');
+await new Promise((r) => setTimeout(r, 400));
+
 // ------------------------------------------------------------ 收尾
 
 // 有些崩溃发生在某段断言之后（比如回放的 tick 要等帧放完才走到回调），
