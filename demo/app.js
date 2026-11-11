@@ -85,6 +85,8 @@ const state = {
   balls: [],
   solution: null,
   practiceRecorded: false,
+  // 上一次记录成功的时间，用来挡双击（「进了」和「没进」挨着，手抖会记成两杆）
+  lastRecordAt: 0,
   activeDrillId: null,
   drillVariation: 0,
   activeDrillVariation: 0,
@@ -853,16 +855,17 @@ function practiceHint() {
   if (!state.solution?.found || !state.solution.best?.pocketId) {
     return '先求解一个目标袋方案，再记录真实练习结果。';
   }
-  if (state.practiceRecorded) return '这一杆记下了。换下一杆、或换个摆位再求解。';
+  if (state.practiceRecorded) return '这一杆记下了。同一个球位可以接着记，换球位就再求解一次。';
   return '按实际结果点「进了」或「没进」——记下来才看得出进步。';
 }
 
 function updatePracticeFeedback(message = null) {
+  // 记完一杆不再禁用：同一个球位反复练十杆是常态，每杆都得重新求解一次
+  // 才能记录，等于逼人重复劳动。这里只要「有解」就给点，记多少次都行。
   const ready = Boolean(
     state.mode === 'practice' &&
     state.solution?.found &&
-    state.solution.best?.pocketId &&
-    !state.practiceRecorded
+    state.solution.best?.pocketId
   );
   $('practiceMade').disabled = !ready || state.animating;
   $('practiceMissed').disabled = !ready || state.animating;
@@ -1069,6 +1072,10 @@ function startPracticeDrill() {
 
 function recordPracticeOutcome(made) {
   if (state.mode !== 'practice' || state.animating) return false;
+  // 双击防呆：「进了」和「没进」是挨着的两个按钮，手抖点两下不该记成两杆。
+  // 真连着记两杆至少也要换一次手，600 ms 里点两下一定是误触。
+  const now = Date.now();
+  if (now - state.lastRecordAt < 600) return false;
   const best = state.solution?.found ? state.solution.best : null;
   if (!best?.pocketId) {
     updatePracticeFeedback('请先求解一个有目标袋的方案。');
@@ -1091,9 +1098,10 @@ function recordPracticeOutcome(made) {
     return false;
   }
   state.practiceRecorded = true;
+  state.lastRecordAt = now;
   $('missReason').value = '';
   updatePracticeLog();
-  updatePracticeFeedback(`已记录实战结果：${made ? '命中' : '未进'}。`);
+  updatePracticeFeedback(`已记录实战结果：${made ? '命中' : '未进'}。同一个球位可以接着记。`);
   return true;
 }
 
@@ -2649,6 +2657,8 @@ window.__app = {
   shootManual,
   recordPracticeOutcome,
   updatePracticeLog,
+  // 端到端脚本要能数「记了几杆」，不用去解析 localStorage
+  practiceCount: () => readPracticeLog().length,
   applySolutionToManual,
   currentAim,
   saveGame,

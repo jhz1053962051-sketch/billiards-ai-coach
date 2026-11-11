@@ -328,6 +328,32 @@ for (let i = 0; i < 50; i++) {
 console.log('练习·演示:', afterShoot ?? '（25s 内未结束）');
 check('演示一杆报告进球', Boolean(afterShoot && afterShoot.startsWith('✓')), afterShoot ?? '');
 
+// ------------------------------------------------------------ 同一个球位连着记
+// 记完一杆就把两个按钮禁掉、非得重新求解才能记下一杆，等于逼人重复劳动：
+// 同一个球位反复练十杆是常态。这里守两件事：记完还能接着记；手抖双击不记成两杆。
+{
+  const before = await evaluate(`window.__app.practiceCount()`);
+  const first = await evaluate(`(() => {
+    const b = document.getElementById('practiceMade');
+    b.click();
+    return JSON.stringify({ disabled: b.disabled, text: document.getElementById('practiceMessage').textContent });
+  })()`);
+  const f = JSON.parse(first);
+  check('记完一杆按钮仍可点', f.disabled === false, JSON.stringify(f));
+  check('记完的文案说明还能接着记', /接着记/.test(f.text), f.text);
+
+  // 立刻再点一次：600 ms 内的双击算误触，不该多记一杆
+  await evaluate(`document.getElementById('practiceMissed').click()`);
+  const afterDouble = await evaluate(`window.__app.practiceCount()`);
+  check('双击不会记成两杆', afterDouble === before + 1, `${before} → ${afterDouble}`);
+
+  // 等过防抖窗口再点，必须真记进去
+  await sleep(700);
+  await evaluate(`document.getElementById('practiceMissed').click()`);
+  const afterSecond = await evaluate(`window.__app.practiceCount()`);
+  check('同一个球位连记第二杆', afterSecond === before + 2, `${before} → ${afterSecond}`);
+}
+
 // ------------------------------------------------------------ 回放被打断
 // 回放是「按下标把帧数据往球数组里写」。在途时点重置 / 切模式 / 换题，球数组会被换成
 // 另一个长度；旧 tick 若继续写，轻则把别人的局面改坏，重则回调里 original[i] 读到
