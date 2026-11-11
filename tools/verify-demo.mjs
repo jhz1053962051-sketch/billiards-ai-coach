@@ -255,6 +255,7 @@ const probe = await evaluate(`(() => {
   return JSON.stringify({
     w: c.width, h: c.height,
     advice: document.getElementById('advice').textContent,
+    writePractice: document.getElementById('practiceMessage').textContent,
     balls: window.__app.state.balls.length,
     paintedPct: +(100 * nonEmpty / total).toFixed(1),
     feltPct: +(100 * green / total).toFixed(1),
@@ -266,6 +267,9 @@ console.log('加载后:', probe);
   check('canvas 画满', info.paintedPct >= 80, `${info.paintedPct}%`);
   check('台呢画出来了', info.feltPct >= 40, `${info.feltPct}%`);
   check('初始 4 颗球', info.balls === 4, `${info.balls} 颗`);
+  // resetLayout 一开机就会调 updatePracticeFeedback()，以前不传参就清成空字符串，
+  // 首屏那句提示当场被抹掉，球友看到一块空白不知道下一步干什么。
+  check('首屏状态行没被清空', info.writePractice.trim().length > 0 && /先求解/.test(info.writePractice), info.writePractice);
 }
 
 // 求解
@@ -291,6 +295,9 @@ console.log('练习·求解:', solved);
     /±0\.2°/.test(r.note) && /毫米/.test(r.note),
     r.note
   );
+  // 求解完成后状态行要换成「下一步做什么」，不能还留着求解前那句、也不能空
+  const hint = await evaluate(`document.getElementById('practiceMessage').textContent`);
+  check('求解后状态行说清下一步', /点「进了」或「没进」/.test(hint), hint);
 }
 
 // 切备选

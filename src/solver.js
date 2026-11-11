@@ -493,6 +493,10 @@ export function solveShot(table, balls, opts = {}) {
     candidates.push(...extra);
   }
 
+  // 候选带上球台，describeCandidate 才能把「(1.62, 0.83) 米」翻译成
+  // 「台面右下、距右库 12 厘米」。describeCandidate 只吃一个参数，只能这样带。
+  for (const c of candidates) c.table = table;
+
   return opts.maxCandidates ? candidates.slice(0, opts.maxCandidates) : candidates;
 }
 
@@ -907,7 +911,7 @@ export function describeCandidate(c) {
     const parts = [
       `组合球：打 ${c.viaNumber} 号球撞 ${c.targetNumber} 号球进${pocketName(c.pocketId)}`,
       `两级切角最大 ${c.cutDeg.toFixed(0)}°`,
-      `容错 ±${c.toleranceDeg.toFixed(2)}°`,
+      toleranceText(c),
       `${c.power.name}力`,
       c.tip.name,
     ];
@@ -928,7 +932,7 @@ export function describeCandidate(c) {
     const parts = [
       `翻袋：${c.targetNumber} 号球翻${railName}进${pocketName(c.pocketId)}`,
       `切角 ${c.cutDeg.toFixed(0)}°`,
-      `容错 ±${c.toleranceDeg.toFixed(2)}°`,
+      toleranceText(c),
       `${c.power.name}力`,
       c.tip.name,
     ];
@@ -961,7 +965,7 @@ export function describeCandidate(c) {
   const parts = [
     `打 ${c.targetNumber} 号球进${pocketName(c.pocketId)}`,
     `切角 ${c.cutDeg.toFixed(0)}°`,
-    `容错 ±${c.toleranceDeg.toFixed(2)}°`,
+    toleranceText(c),
     `${c.power.name}力`,
     c.tip.name,
   ];
@@ -974,9 +978,53 @@ export function describeCandidate(c) {
   return parts.join(' · ');
 }
 
+/**
+ * 容错角度换成手上的说法：母球走这么远，方向偏几毫米就打不进。
+ *
+ * 只给「±0.57°」这种数字，球友读不出它到底有多难——0.57° 和 0.2° 在纸上
+ * 差三倍，落到手上是「偏 8 毫米」和「偏 3 毫米」，后者基本等于打不进。
+ * 换算用母球到假想球的距离，也就是这一杆真正要走的路。
+ */
+export function toleranceText(c) {
+  const base = `容错 ±${c.toleranceDeg.toFixed(2)}°`;
+  const dist = c.distanceCue;
+  // 贴球（不到 20 厘米）时这个换算会变成「偏 1 毫米」，没有信息量，干脆不给
+  if (!(c.toleranceDeg > 0) || !(dist > 0.2)) return base;
+  const mm = Math.tan((c.toleranceDeg * Math.PI) / 180) * dist * 1000;
+  const shown =
+    mm < 1 ? `${mm.toFixed(1)} 毫米` : mm < 10 ? `${Math.round(mm)} 毫米` : `${(mm / 10).toFixed(1)} 厘米`;
+  return `${base}（母球走 ${dist.toFixed(2)} 米，方向偏 ${shown}就打不进）`;
+}
+
+/**
+ * 母球停位说人话：台面哪一块 + 离最近那条库多远。
+ *
+ * 原来写 `(1.62, 0.83) 米`，那是给写代码的人看的坐标，站在台边的球友没法
+ * 把这个数字变成「往哪儿走」。改成九宫格 + 到库距离，能直接对着台子找位置。
+ */
+export function cueRestText(table, rest) {
+  if (!rest) return '母球建议停位：—';
+  // 没带球台（旧调用方或存档里的候选）就退回坐标，总比报错强
+  if (!table || !(table.length > 0)) {
+    return `母球建议停位 (${rest.x.toFixed(2)}, ${rest.y.toFixed(2)}) 米`;
+  }
+  const col = rest.x / table.length < 1 / 3 ? '左' : rest.x / table.length > 2 / 3 ? '右' : '';
+  const row = rest.y / table.width < 1 / 3 ? '下' : rest.y / table.width > 2 / 3 ? '上' : '';
+  const where = col && row ? `台面${row}${col}` : col || row ? `台面靠${col || row}` : '台面正中';
+
+  const rails = [
+    { name: '左库', d: rest.x },
+    { name: '右库', d: table.length - rest.x },
+    { name: '下库', d: rest.y },
+    { name: '上库', d: table.width - rest.y },
+  ].sort((a, b) => a.d - b.d);
+  const near = rails[0];
+  return `母球建议停位：${where}（距${near.name} ${Math.round(near.d * 100)} 厘米）`;
+}
+
 function addPositioningAdvice(parts, candidate) {
   if (!candidate.positioningRequired || !candidate.cueRest) return;
-  parts.push(`母球建议停位 (${candidate.cueRest.x.toFixed(2)}, ${candidate.cueRest.y.toFixed(2)}) 米`);
+  parts.push(cueRestText(candidate.table, candidate.cueRest));
   if (candidate.nextShot) {
     parts.push(
       `下一杆打 ${candidate.nextShot.targetNumber} 号进${pocketName(candidate.nextShot.pocketId)}`

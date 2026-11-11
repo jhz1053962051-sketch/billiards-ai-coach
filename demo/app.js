@@ -15,6 +15,8 @@ import {
   solveShot,
   coach,
   describeCandidate,
+  cueRestText,
+  toleranceText,
   difficultyLabel,
   difficultyCaveat,
   LABEL_SIGMA_DEG,
@@ -838,7 +840,24 @@ function clamp(v, lo, hi) {
 
 // ---------------------------------------------------------------- 练习：求解与演示
 
-function updatePracticeFeedback(message = '') {
+/**
+ * 练习面板的状态行。
+ *
+ * 不传参时不该把它清空：页面一打开 resetLayout 就会调一次，清成空字符串
+ * 等于把首屏那句「先求解一个目标袋方案，再记录真实练习结果」当场抹掉，
+ * 球友看到的是一块空白，不知道下一步该干什么。所以不传参就按当前状态
+ * 算一句该说的话。
+ */
+function practiceHint() {
+  if (state.mode !== 'practice') return '';
+  if (!state.solution?.found || !state.solution.best?.pocketId) {
+    return '先求解一个目标袋方案，再记录真实练习结果。';
+  }
+  if (state.practiceRecorded) return '这一杆记下了。换下一杆、或换个摆位再求解。';
+  return '按实际结果点「进了」或「没进」——记下来才看得出进步。';
+}
+
+function updatePracticeFeedback(message = null) {
   const ready = Boolean(
     state.mode === 'practice' &&
     state.solution?.found &&
@@ -847,7 +866,7 @@ function updatePracticeFeedback(message = '') {
   );
   $('practiceMade').disabled = !ready || state.animating;
   $('practiceMissed').disabled = !ready || state.animating;
-  $('practiceMessage').textContent = message;
+  $('practiceMessage').textContent = message ?? practiceHint();
 }
 
 function updatePracticeLog() {
@@ -1117,8 +1136,8 @@ function renderAlts(card, ms) {
       const position = document.createElement('span');
       position.className = 'position';
       position.textContent = c.nextShot
-        ? `母球停位 (${c.cueRest.x.toFixed(2)}, ${c.cueRest.y.toFixed(2)}) m · 下一杆 ${c.nextShot.targetNumber} 号`
-        : `母球停位 (${c.cueRest.x.toFixed(2)}, ${c.cueRest.y.toFixed(2)}) m`;
+        ? `${cueRestText(table, c.cueRest)} · 下一杆 ${c.nextShot.targetNumber} 号`
+        : cueRestText(table, c.cueRest);
       title.appendChild(position);
     }
     const meta = document.createElement('span');

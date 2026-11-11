@@ -15,7 +15,7 @@ import {
   firstBlocker,
   aimToleranceDeg,
 } from '../src/aim.js';
-import { solveShot, coach, describeCandidate, difficultyLabel, difficultyCaveat, LABEL_SIGMA_DEG, pocketName, solveBreak, solveDirectHit, planShot } from '../src/solver.js';
+import { solveShot, coach, describeCandidate, toleranceText, cueRestText, difficultyLabel, difficultyCaveat, LABEL_SIGMA_DEG, pocketName, solveBreak, solveDirectHit, planShot } from '../src/solver.js';
 import { createGame } from '../src/rules.js';
 import * as rulesMod from '../src/rules.js';
 import { createStandardRack } from '../src/rack.js';
@@ -216,6 +216,35 @@ test('求解器：走位分只由「打完之后的台面」决定，且奖励�
   // 走位好的一定比走位差的更靠前（同等单杆难度下）
   const sorted = [...scored].sort((a, b) => a.value - b.value);
   assert.ok(sorted.at(-1).leaveScore <= sorted[0].leaveScore + 1e-9 || sorted.at(-1).difficulty > sorted[0].difficulty);
+});
+
+test('教练卡说人话：容错给毫米级对照，停位给台面位置而不是坐标', () => {
+  // 产品问题：卡片上写「容错 ±0.57°」，球友读不出这有多难；写
+  // 「母球建议停位 (1.62, 0.83) 米」，站在台边的人没法把坐标变成「往哪儿走」。
+  const balls = [
+    createBall('cue', 0.6, 0.62, { number: 0 }),
+    createBall('b3', 1.7, 0.95, { number: 3 }),
+    createBall('b5', 2.0, 0.4, { number: 5 }),
+  ];
+  createWorld(table, balls);
+  const all = solveShot(table, balls, { cueId: 'cue' });
+  assert.ok(all.length > 0, '这个布局必须有解，否则这条测试什么也没证明');
+
+  for (const c of all) {
+    const text = describeCandidate(c);
+    // 角度后面必须跟得上「走多远、偏几毫米」，光有度数不算说清
+    assert.match(text, /容错 ±[\d.]+°（母球走 [\d.]+ 米，方向偏 [\d.]+ (毫米|厘米)就打不进）/, text);
+    if (c.positioningRequired && c.cueRest) {
+      assert.match(text, /母球建议停位：台面[^（]*（距[上下左右]库 \d+ 厘米）/, text);
+      assert.doesNotMatch(text, /母球建议停位 \(\d/, `停位不该退回坐标：${text}`);
+    }
+  }
+
+  // 贴球（不到 20 厘米）时不给毫无信息量的「偏 1 毫米」，只留角度
+  const near = { toleranceDeg: 0.5, distanceCue: 0.1 };
+  assert.equal(toleranceText(near), '容错 ±0.50°');
+  // 没带球台的旧调用方退回坐标，不能直接抛
+  assert.match(cueRestText(null, { x: 1, y: 0.5 }), /母球建议停位 \(1\.00, 0\.50\) 米/);
 });
 
 test('求解器：被完全挡住的球不会出现在候选里', () => {
