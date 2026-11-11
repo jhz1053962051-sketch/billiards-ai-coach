@@ -23,6 +23,12 @@ import { createStandardRack } from '../src/rack.js';
 const table = createTable('pool9');
 const R = table.ballRadius;
 
+// 求解器的组合球 / 翻袋是「挂钟预算」驱动的：默认 600 ms 一到就 break。
+// 所以凡是断言「一定算得出 N 个候选」的用例，都必须显式关掉预算——
+// 否则在慢机器或 CI 上会算出 0 个，断言失败却与算法无关（实测 1 ms 预算时
+// 同一翻袋布局返回 0 个）。预算只决定「算多久」，不影响候选的正确性。
+const NO_BUDGET = Object.freeze({ budgetMs: Infinity });
+
 test('假想球：位于目标球指向袋心的反方向上，距离恰好一个直径', () => {
   const target = { x: 1.0, y: 0.6 };
   const pocket = { x: 2.54, y: 0 };
@@ -467,7 +473,7 @@ test('翻袋：打不进直线球时，会给出翻库进袋的候选（不是�
   const direct = solveShot(table, balls, { cueId: 'cue', allow: [9], extras: false });
   assert.equal(direct.length, 0, '这个布局本来就没有直线解，测试前提要先成立');
 
-  const all = solveShot(table, balls, { cueId: 'cue', allow: [9] });
+  const all = solveShot(table, balls, { cueId: 'cue', allow: [9], ...NO_BUDGET });
   const banks = all.filter((c) => c.kind === 'bank');
   assert.ok(banks.length > 0, `应该算出翻袋候选，实际 ${all.length} 个候选里一个都没有`);
 
@@ -481,7 +487,7 @@ test('翻袋：打不进直线球时，会给出翻库进袋的候选（不是�
 
 test('翻袋：容错按展开路径算，不会比直线球还宽松', () => {
   const balls = bankLayout();
-  const banks = solveShot(table, balls, { cueId: 'cue', allow: [9] }).filter((c) => c.kind === 'bank');
+  const banks = solveShot(table, balls, { cueId: 'cue', allow: [9], ...NO_BUDGET }).filter((c) => c.kind === 'bank');
   assert.ok(banks.length > 0);
 
   // 曾经把「目标球到袋口」当成直线距离算容错，翻袋多走一个库边长，容错被算成
@@ -493,7 +499,7 @@ test('翻袋：容错按展开路径算，不会比直线球还宽松', () => {
 
 test('翻袋：难度比同等条件的直线球高（固定加数，且有上限 100）', () => {
   const balls = bankLayout();
-  const banks = solveShot(table, balls, { cueId: 'cue', allow: [9] }).filter((c) => c.kind === 'bank');
+  const banks = solveShot(table, balls, { cueId: 'cue', allow: [9], ...NO_BUDGET }).filter((c) => c.kind === 'bank');
   assert.ok(banks.length > 0);
   for (const c of banks) {
     assert.ok(c.difficulty <= 100, `难度不能超 100，实际 ${c.difficulty}`);
@@ -503,7 +509,7 @@ test('翻袋：难度比同等条件的直线球高（固定加数，且有上�
 
 test('翻袋：给出来的候选真打出去，目标球必须真的进那个袋', () => {
   const balls = bankLayout();
-  const banks = solveShot(table, balls, { cueId: 'cue', allow: [9] }).filter((c) => c.kind === 'bank');
+  const banks = solveShot(table, balls, { cueId: 'cue', allow: [9], ...NO_BUDGET }).filter((c) => c.kind === 'bank');
   assert.ok(banks.length > 0);
   const c = banks[0];
 
@@ -522,16 +528,16 @@ test('翻袋：袋口顺序不会把后面的袋饿死（尝试次数与成功�
   // 曾经把「被拒的尝试」也算进 maxBanks 配额，遍历到第 10 次就收工，
   // 下中袋永远轮不到，翻袋永远返回 0 个。
   const balls = bankLayout();
-  const all = solveShot(table, balls, { cueId: 'cue', allow: [9] });
+  const all = solveShot(table, balls, { cueId: 'cue', allow: [9], ...NO_BUDGET });
   assert.ok(all.length > 0, '默认配额下应该至少能算出候选');
   // 把配额放开，结果只能是「一样多或更多」，不能更少
-  const more = solveShot(table, balls, { cueId: 'cue', allow: [9], maxBanks: 20, maxBankTries: 200 });
+  const more = solveShot(table, balls, { cueId: 'cue', allow: [9], maxBanks: 20, maxBankTries: 200, ...NO_BUDGET });
   assert.ok(more.length >= all.length, `放宽配额不该变少：默认 ${all.length} 个，放宽 ${more.length} 个`);
 });
 
 test('组合球：目标球被挡住时，会给出「打 A 撞 B 进袋」的候选', () => {
   const balls = comboLayout();
-  const all = solveShot(table, balls, { cueId: 'cue', allow: [9] });
+  const all = solveShot(table, balls, { cueId: 'cue', allow: [9], ...NO_BUDGET });
   const combos = all.filter((c) => c.kind === 'combo');
   assert.ok(combos.length > 0, `应该算出组合球候选，实际 kinds=${all.map((c) => c.kind).join(',')}`);
 
@@ -548,7 +554,7 @@ test('组合球：目标球被挡住时，会给出「打 A 撞 B 进袋」的�
 
 test('组合球：给出来的候选真打出去，9 号球必须真的进那个袋', () => {
   const balls = comboLayout();
-  const combos = solveShot(table, balls, { cueId: 'cue', allow: [9] }).filter((c) => c.kind === 'combo');
+  const combos = solveShot(table, balls, { cueId: 'cue', allow: [9], ...NO_BUDGET }).filter((c) => c.kind === 'combo');
   assert.ok(combos.length > 0);
   const c = combos[0];
 
@@ -565,7 +571,7 @@ test('组合球：给出来的候选真打出去，9 号球必须真的进那个
 
 test('组合球：难度有固定加数，不比同样容错的直线球更容易', () => {
   const balls = comboLayout();
-  const combos = solveShot(table, balls, { cueId: 'cue', allow: [9] }).filter((c) => c.kind === 'combo');
+  const combos = solveShot(table, balls, { cueId: 'cue', allow: [9], ...NO_BUDGET }).filter((c) => c.kind === 'combo');
   assert.ok(combos.length > 0);
   for (const c of combos) {
     assert.ok(c.difficulty <= 100, `难度不能超 100，实际 ${c.difficulty}`);
@@ -582,7 +588,7 @@ test('组合球与翻袋：直接解存在时不算，省下的时间是真的�
   ];
   const direct = solveShot(table, easy, { cueId: 'cue', allow: [9], extras: false });
   assert.ok(direct.length > 0, '这个布局应该有直线解');
-  const full = solveShot(table, easy, { cueId: 'cue', allow: [9] });
+  const full = solveShot(table, easy, { cueId: 'cue', allow: [9], ...NO_BUDGET });
   assert.equal(
     full.some((c) => c.kind === 'combo' || c.kind === 'bank'),
     false,
@@ -593,8 +599,8 @@ test('组合球与翻袋：直接解存在时不算，省下的时间是真的�
 
 test('组合球与翻袋：求解结果里这两类都带完整可执行参数', () => {
   const extras = [
-    ...solveShot(table, comboLayout(), { cueId: 'cue', allow: [9] }).filter((c) => c.kind === 'combo'),
-    ...solveShot(table, bankLayout(), { cueId: 'cue', allow: [9] }).filter((c) => c.kind === 'bank'),
+    ...solveShot(table, comboLayout(), { cueId: 'cue', allow: [9], ...NO_BUDGET }).filter((c) => c.kind === 'combo'),
+    ...solveShot(table, bankLayout(), { cueId: 'cue', allow: [9], ...NO_BUDGET }).filter((c) => c.kind === 'bank'),
   ];
   assert.ok(extras.length > 0);
   for (const c of extras) {
@@ -606,4 +612,16 @@ test('组合球与翻袋：求解结果里这两类都带完整可执行参数',
     assert.ok(c.tip.a !== undefined && c.tip.b !== undefined);
     assert.ok(c.tip.name);
   }
+});
+
+test('组合球与翻袋：预算到点就停，所以断言非空的用例必须显式关掉预算', () => {
+  const balls = bankLayout();
+  // budgetMs 取负数，循环第一次检查就成立，必定一个候选都算不出来。
+  const starved = solveShot(table, balls, { cueId: 'cue', allow: [9], budgetMs: -1 });
+  assert.equal(starved.length, 0, '预算为负时不该再返回翻袋候选');
+
+  // 同一个布局，关掉预算就必须算得出来 —— 这条同时证明上面那个 0 确实来自预算，
+  // 而不是这个布局本来就无解。少了它，上面那条断言连「布局没有解」都拦不住。
+  const full = solveShot(table, balls, { cueId: 'cue', allow: [9], ...NO_BUDGET }).filter((c) => c.kind === 'bank');
+  assert.ok(full.length > 0, '关掉预算后同一布局应该算得出翻袋');
 });

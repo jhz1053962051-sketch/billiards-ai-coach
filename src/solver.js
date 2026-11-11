@@ -471,6 +471,10 @@ export function solveShot(table, balls, opts = {}) {
   // 直接解存在时这些解不会排到前面，算了也用不上。
   if (opts.extras !== false && candidates.length === 0) {
     const startedAt = Date.now();
+    // 挂钟预算，到点就 break，所以返回的候选数取决于这台机器跑多快。
+    // 凡是断言「一定算得出 N 个候选」的地方（测试、离线脚本）必须显式传
+    // budgetMs: Infinity，否则慢机器上会算出 0 个而误判成算法坏了；
+    // UI 侧保持 600 ms 的产品默认值，交互不能卡。
     const budget = opts.budgetMs ?? 600;
     const extra = [
       ...comboCandidates(table, balls, cueId, targets, opts, startedAt, budget),
