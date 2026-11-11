@@ -32,21 +32,26 @@ const CHROME_CANDIDATES = [
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export async function launch({ port = 9450, width = 1280, height = 900 } = {}) {
-  let exe = null;
+/**
+ * 按候选路径找一个能用的 Chrome/Edge。CHROME_PATH 优先。
+ * 导出来是为了让 verify-demo.mjs 复用同一套发现逻辑——它原先自己写死了一条
+ * Windows 路径，换平台或装在别处就直接 spawn 失败。
+ */
+export async function findChrome() {
   for (const c of CHROME_CANDIDATES) {
     try {
       await fs.access(c);
-      exe = c;
-      break;
+      return c;
     } catch {}
   }
-  if (!exe) {
-    throw new Error(
-      '找不到 Chrome/Edge。用 CHROME_PATH 指定可执行文件路径，' +
-        `当前试过：\n  ${CHROME_CANDIDATES.join('\n  ')}`
-    );
-  }
+  throw new Error(
+    '找不到 Chrome/Edge。用 CHROME_PATH 指定可执行文件路径，' +
+      `当前试过：\n  ${CHROME_CANDIDATES.join('\n  ')}`
+  );
+}
+
+export async function launch({ port = 9450, width = 1280, height = 900 } = {}) {
+  const exe = await findChrome();
 
   const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cdp-'));
   const proc = spawn(
