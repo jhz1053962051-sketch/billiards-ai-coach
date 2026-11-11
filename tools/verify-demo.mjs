@@ -15,6 +15,18 @@ const CHROME =
 const URL = process.env.DEMO_URL ?? 'http://127.0.0.1:4173/demo/';
 const PORT = 9333;
 
+// 先确认静态服务在跑。少了这一步，页面加载失败会在后面某个 getContext 上炸成
+// 「TypeError: Cannot read properties of null」，把诊断一路引向「渲染崩了」，
+// 而真因只是没起服务。起服务是人的操作，这里只能把话说清楚然后退出。
+try {
+  const probe = await fetch(URL, { signal: AbortSignal.timeout(3000) });
+  if (!probe.ok) throw new Error(`HTTP ${probe.status}`);
+} catch (err) {
+  console.error(`静态服务没起来：${URL}（${err.message}）`);
+  console.error('先另开一个终端，在仓库根目录运行：node tools/serve.mjs 4173');
+  process.exit(2);
+}
+
 const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-chrome-'));
 
 const chrome = spawn(
@@ -130,6 +142,36 @@ await send(ws, 'Page.enable');
 
 await send(ws, 'Page.navigate', { url: URL });
 await sleep(2500);
+
+// 页面是不是真的起来了。ES module 被 CORS 拒、脚本 404、首帧抛错都会让
+// #table 根本不存在或 window.__app 没赋值；这两种情况下面每条断言都会以
+// 「null 上读属性」的形式散落一地，不如在这里一次说清。
+{
+  const ready = JSON.parse(
+    await evaluate(`(() => {
+      const c = document.getElementById('table');
+      return JSON.stringify({
+        table: Boolean(c),
+        width: c ? c.width : 0,
+        app: Boolean(window.__app),
+        title: document.title,
+      });
+    })()`)
+  );
+  if (!ready.table || !ready.app) {
+    console.error(`页面没加载起来：${URL}`);
+    console.error(`  #table=${ready.table}（宽 ${ready.width}） __app=${ready.app} 标题=${ready.title}`);
+    const collected = [...pageErrors, ...consoleErrors].slice(-10);
+    if (collected.length) {
+      console.error('  页面自己报的错：');
+      for (const line of collected) console.error('    ' + line);
+    }
+    ws.close();
+    chrome.kill();
+    process.exit(2);
+  }
+  check('页面加载出画布与 __app', ready.table && ready.app && ready.width > 0, JSON.stringify(ready));
+}
 
 // ------------------------------------------------------------ 练习模式
 
