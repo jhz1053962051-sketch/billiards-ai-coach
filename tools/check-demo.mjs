@@ -163,6 +163,37 @@ checked++;
   }
 }
 
+// 门禁本身也要有人看着：姿态页是独立入口，它没进 npm run verify 的时候，
+// CSP 漏一条就能让整页白屏而没人发现。另外 verify-pose 缺素材时会把三条路径
+// 全跳过却照样打印「全部通过」——那种假绿比没有门禁更害人。
+{
+  const allPath = path.join(root, 'tools/verify-all.mjs');
+  if (!fs.existsSync(allPath)) {
+    problems.push('tools/verify-all.mjs 不存在，一键门禁没了');
+  } else {
+    const all = fs.readFileSync(allPath, 'utf8');
+    checked++;
+    if (!/tools\/verify-pose\.mjs/.test(all)) {
+      problems.push('tools/verify-all.mjs: 没跑 tools/verify-pose.mjs —— 姿态页就不在门禁里了');
+    }
+  }
+
+  const posePath = path.join(root, 'tools/verify-pose.mjs');
+  if (!fs.existsSync(posePath)) {
+    problems.push('tools/verify-pose.mjs 不存在');
+  } else {
+    const pose = fs.readFileSync(posePath, 'utf8');
+    checked++;
+    if (!/passed\s*===\s*0/.test(pose)) {
+      problems.push('tools/verify-pose.mjs: 少了「一条都没验到就不算通过」的守卫，会假绿');
+    }
+    checked++;
+    if (!/function blankPng\(/.test(pose)) {
+      problems.push('tools/verify-pose.mjs: 缺 blankPng，素材缺失时整条链路没验');
+    }
+  }
+}
+
 console.log(`检查 ${checked} 项`);
 if (problems.length) {
   console.error('问题:\n' + problems.join('\n'));

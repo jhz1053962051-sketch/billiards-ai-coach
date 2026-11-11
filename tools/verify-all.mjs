@@ -1,13 +1,16 @@
-// 一键跑完三项门禁：单元测试 → 演示页静态检查 → 浏览器端到端验证。
+// 一键跑完四项门禁：单元测试 → 演示页静态检查 → 浏览器端到端验证 → 姿态页验证。
 //
-// 为什么需要它：AGENTS.md 写着「交付前所有测试和验证必须全部通过」，而三项分散在
-// 三个命令里，靠人记就会漏——漏掉的那次恰好是改坏了东西的那次。这里把顺序、
+// 为什么需要它：AGENTS.md 写着「交付前所有测试和验证必须全部通过」，而四项分散在
+// 四个命令里，靠人记就会漏——漏掉的那次恰好是改坏了东西的那次。这里把顺序、
 // 起服务的时机、收尾的清理都固定下来，只输出一句结论和一个退出码。
+//
+// 姿态页那一项曾经不在门禁里，结果 CSP 漏了 media-src 让整页白屏都没人发现。
 //
 // 用法：node tools/verify-all.mjs
 //       npm run verify
+//       SKIP_POSE=1 npm run verify   // 只改了解算或演示页时，跳过最慢的姿态页
 //
-// 注意：端到端那一步要启动 Chrome，必须在不限制命名管道的环境里跑
+// 注意：端到端与姿态页都要启动 Chrome，必须在不限制命名管道的环境里跑
 // （DSH 里是 sandbox_permissions: "danger-full-access"）；沙箱受限时它会失败，
 // 但那一步的失败是「环境不允许」而不是「代码坏了」，输出里会原样转述浏览器的报错。
 
@@ -61,19 +64,32 @@ async function startServer() {
   throw new Error(`临时静态服务没起来：${url}`);
 }
 
-console.log('=== 1/3 单元测试 ===');
+const skipPose = process.env.SKIP_POSE === '1';
+
+console.log('=== 1/4 单元测试 ===');
 const testCode = await run('单元测试', ['--test', '--test-isolation=none', 'test/*.test.js']);
 
-console.log('\n=== 2/3 演示页静态检查 ===');
+console.log('\n=== 2/4 演示页静态检查 ===');
 const checkCode = await run('演示页静态检查', ['tools/check-demo.mjs']);
 
-console.log('\n=== 3/3 浏览器端到端 ===');
+console.log('\n=== 3/4 浏览器端到端 ===');
 let serve = null;
 let demoCode = 1;
+let poseCode = 0;
 try {
   serve = await startServer();
   console.log(`临时静态服务：${serve.url}`);
   demoCode = await run('浏览器端到端', ['tools/verify-demo.mjs'], { DEMO_URL: serve.url });
+
+  if (skipPose) {
+    console.log('\n=== 4/4 姿态页验证（SKIP_POSE=1，跳过）===');
+    results.push({ name: '姿态页验证', code: 0, ms: 0, note: 'SKIP_POSE=1' });
+  } else {
+    console.log('\n=== 4/4 姿态页验证 ===');
+    // 它要下 20 MB 模型、跑 wasm，比前面几项都慢；但这一页是独立入口，
+    // 不进这里就等于没人看着。
+    poseCode = await run('姿态页验证', ['tools/verify-pose.mjs'], { POSE_BASE: serve.url });
+  }
 } catch (err) {
   console.error(err.message);
   results.push({ name: '浏览器端到端', code: 1, ms: 0, note: err.message });
@@ -87,9 +103,9 @@ for (const r of results) {
   const status = r.code === 0 ? '通过' : `失败（退出码 ${r.code}）`;
   console.log(`${status.padEnd(16)} ${r.name}  ${(r.ms / 1000).toFixed(1)}s${r.note ? `  ${r.note}` : ''}`);
 }
-const failed = [testCode, checkCode, demoCode].filter((c) => c !== 0).length;
+const failed = [testCode, checkCode, demoCode, poseCode].filter((c) => c !== 0).length;
 if (failed) {
   console.error(`\n${failed} 项没过，别交付。`);
   process.exit(1);
 }
-console.log('\n三项全过。');
+console.log('\n四项全过。');

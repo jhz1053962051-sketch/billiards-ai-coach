@@ -18,17 +18,27 @@
 //      → 这是**反例契约**：画面里没有人出杆时，必须老实返回 1 条
 //      「没识别出出杆」的 unknown，而不是从噪声里硬凑出 5 条结论。
 //      假动作比没有结论更有害，这条断言就是为了钉住它。
+//      照片缺失时（干净 clone）改喂一张就地生成的空白图，验「加载链路通不通」
+//      与「认不出人时不许编报告」——否则三条路径全跳过，脚本会打印
+//      「全部通过」却一项都没验。
+//      另外：一条 check 都没跑到时脚本退非零，不允许出现这种假绿。
 //
 // 必须在 sandbox_permissions: "danger-full-access" 下运行（Chrome 多进程要建命名管道）。
 
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { launch } from './cdp.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const BASE = process.env.POSE_BASE ?? 'http://127.0.0.1:4173';
-const PHOTO = path.join(ROOT, '_research', 'cand', 's01.png');
-const REAL_VIDEO = path.join(ROOT, '_research', 'vid', '41903.mp4');
+const PHOTO = process.env.POSE_PHOTO
+  ? path.resolve(ROOT, process.env.POSE_PHOTO)
+  : path.join(ROOT, '_research', 'cand', 's01.png');
+const REAL_VIDEO = process.env.POSE_VIDEO
+  ? path.resolve(ROOT, process.env.POSE_VIDEO)
+  : path.join(ROOT, '_research', 'vid', '41903.mp4');
 const SYNTH = path.join(ROOT, '_research', 'still-pose.webm');
 const SHOT_IMG = path.join(ROOT, '_research', 'pose-image.png');
 const SHOT_VID = path.join(ROOT, '_research', 'pose-video.png');
@@ -36,10 +46,13 @@ const SHOT_STILL = path.join(ROOT, '_research', 'pose-still.png');
 
 const fail = [];
 const skip = [];
+let passed = 0;
 const log = (s) => console.log(s);
 const check = (cond, msg) => {
-  if (cond) log(`  ✓ ${msg}`);
-  else {
+  if (cond) {
+    passed += 1;
+    log(`  ✓ ${msg}`);
+  } else {
     log(`  ✗ ${msg}`);
     fail.push(msg);
   }
@@ -120,6 +133,58 @@ const STILL_SCRIPT = (photoDataUrl) => `(async () => {
   return btoa(bin);
 })()`;
 
+/** 没有照片时的退路：就地生成一张纯白 PNG。
+ *
+ * 干净 clone 里没有 `_research/`（它被 gitignore），素材全都缺。以前三条路径
+ * 全跳过，脚本照样打印「全部通过」——一项没验却报绿，比没有门禁更害人。
+ *
+ * 但空白图也**进不了分析**：画面里没有人，页面会明确说「图片里没有检测到人」。
+ * 这恰恰是这条路径要钉的两件事：一是模型文件下载、wasm 编译、CSP 的
+ * `'wasm-unsafe-eval'` 这一整条链路真的通了（不通的话状态行会写「模型加载失败」）；
+ * 二是认不出人时页面老实说认不出，而不是凭空编一份报告出来。
+ */
+const CRC_TABLE = (() => {
+  const table = new Int32Array(256);
+  for (let n = 0; n < 256; n += 1) {
+    let c = n;
+    for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c;
+  }
+  return table;
+})();
+
+function crc32(buf) {
+  let c = -1;
+  for (let i = 0; i < buf.length; i += 1) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ -1) >>> 0;
+}
+
+function pngChunk(type, data) {
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length, 0);
+  const body = Buffer.concat([Buffer.from(type, 'ascii'), data]);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(body), 0);
+  return Buffer.concat([len, body, crc]);
+}
+
+/** 纯白 PNG（8 位 RGB，无 alpha，filter 全 0）。不引第三方库。 */
+function blankPng(w, h) {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0);
+  ihdr.writeUInt32BE(h, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 2; // colour type: truecolour
+  const raw = Buffer.alloc((w * 3 + 1) * h, 0xff);
+  for (let y = 0; y < h; y += 1) raw[y * (w * 3 + 1)] = 0;
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', zlib.deflateSync(raw)),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
 /** 等视频分析结束（用 seq 区分新旧报告，避免读到上一次的结果）。 */
 async function runVideo(page, file, timeout) {
   const baseSeq = await page.evaluate('window.__pose.seq');
@@ -132,8 +197,12 @@ async function runVideo(page, file, timeout) {
 
 const page = await launch({ width: 1280, height: 900 });
 try {
-  log(`打开 ${BASE}/demo/pose.html`);
-  await page.goto(`${BASE}/demo/pose.html`);
+  // BASE 允许给到站点根，也允许给到 /demo/（一键门禁那边传的就是演示页地址）。
+  // 早先直接拼 `${BASE}/demo/pose.html`，传 /demo/ 时就成了 /demo//demo/pose.html。
+  // 只取 origin 再走绝对路径，两种写法都对。
+  const PAGE_URL = new URL('/demo/pose.html', BASE).href;
+  log(`打开 ${PAGE_URL}`);
+  await page.goto(PAGE_URL);
   await page.waitFor('!!window.__pose', { timeout: 15000, label: '模块加载' });
 
   // ---------------------------------------------------------------- 图片
@@ -252,7 +321,25 @@ try {
   // ---------------------------------------------------------------- 反例：静止画面
   log('\n[3/3] 反例：静止画面不该编出结论');
   if (!hasPhoto) {
-    skipped('静止反例用的是同一张照片，照片缺失时无法合成');
+    // 干净 clone 里没有照片，也就没法合成「人在但不出杆」的录像（视频路径在没有
+    // 人的画面上会直接返回，拿不到报告）。改在图片路径上验同一件事的两面：
+    // 加载链路真的通了，以及认不出人时页面不编结论。
+    const blank = path.join(os.tmpdir(), 'dsh-blank-pose.png');
+    await fs.writeFile(blank, blankPng(240, 320));
+    log(`  （没有照片素材，改用生成的空白图 ${blank}）`);
+
+    await setFile(page, '#pickImage', blank);
+    const statusText = await page.waitFor(
+      `(() => {
+        const t = document.getElementById('status').textContent.trim();
+        if (/模型加载失败/.test(t)) throw new Error('模型没加载起来：' + t);
+        return /没有检测到人/.test(t) ? t : null;
+      })()`,
+      { timeout: 180000, label: '空白图判不出人' }
+    );
+    check(/没有检测到人/.test(statusText), `空白图说清认不出（${statusText}）`);
+    check((await page.evaluate('window.__pose.report === null')) === true, '没编出报告');
+    check((await page.evaluate('window.__pose.frames')) === 0, '没留下伪造的帧');
   } else {
     const photoB64 = (await fs.readFile(PHOTO)).toString('base64');
     const b64 = await page.evaluate(STILL_SCRIPT(`data:image/png;base64,${photoB64}`));
@@ -302,4 +389,10 @@ if (fail.length) {
   console.error(`失败 ${fail.length} 项：\n- ${fail.join('\n- ')}`);
   process.exit(1);
 }
-console.log('全部通过');
+// 一项都没跑就退 0，等于「没验的东西都算过」。干净 clone 缺素材时正是这样，
+// 以前会打印一句「全部通过」把人骗过去。
+if (passed === 0) {
+  console.error('一条都没验到（素材缺失或页面没起来），不能算通过。');
+  process.exit(1);
+}
+console.log(`全部通过（${passed} 项）`);
