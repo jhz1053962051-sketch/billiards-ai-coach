@@ -471,11 +471,18 @@ export function solveShot(table, balls, opts = {}) {
   // 直接解存在时这些解不会排到前面，算了也用不上。
   if (opts.extras !== false && candidates.length === 0) {
     const startedAt = Date.now();
-    // 挂钟预算，到点就 break，所以返回的候选数取决于这台机器跑多快。
-    // 凡是断言「一定算得出 N 个候选」的地方（测试、离线脚本）必须显式传
-    // budgetMs: Infinity，否则慢机器上会算出 0 个而误判成算法坏了；
-    // UI 侧保持 600 ms 的产品默认值，交互不能卡。
-    const budget = opts.budgetMs ?? 600;
+    // 上限是「尝试次数」，不是时间：maxCombos（默认 8）、maxBanks（默认 10）、
+    // maxBankTries（默认 80）已经把工作量框死了，所以同一个局面在任何机器上都该
+    // 给出同一份候选列表。
+    //
+    // 这里原来默认 600 ms 挂钟，到点就 break：快的机器算完、慢的机器被砍掉一半，
+    // 用户连点两次「求解」看到两组不同的备选，会以为程序在乱说。实测这套 extras
+    // 在这台机器上 62.7 ms（翻袋布局，2 个候选），慢十倍的机器就正好压在 600 ms 上。
+    // 现在默认不截断，由配额兜底。
+    //
+    // budgetMs 仍然可以显式传，传了就是「接受结果跟机器速度有关」，只给实验用；
+    // 传 -1 之类的负数可以当场验证截断这条路径本身是通的。
+    const budget = opts.budgetMs ?? Infinity;
     const extra = [
       ...comboCandidates(table, balls, cueId, targets, opts, startedAt, budget),
       ...bankCandidates(table, balls, cueId, targets, opts, startedAt, budget),

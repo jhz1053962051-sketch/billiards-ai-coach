@@ -614,6 +614,24 @@ test('组合球与翻袋：求解结果里这两类都带完整可执行参数',
   }
 });
 
+test('求解结果是确定的：默认设置算两遍，候选必须逐项相同', () => {
+  // 产品问题：同一个局面连点两次「求解」，备选方案个数不一样，用户会以为程序在乱说。
+  // 根因是默认预算曾经是 600 ms 挂钟 —— 快的机器算完，慢的机器被砍掉一半。
+  // 现在默认不截断，工作量由 maxCombos / maxBanks / maxBankTries 这些配额框住。
+  const key = (list) => list.map((c) => `${c.kind ?? 'direct'}|${c.pocketId}|${c.value}`).join(',');
+  const balls = bankLayout(); // 这个布局没有直接解，两遍都会走组合球/翻袋那条最贵的路
+
+  const first = solveShot(table, balls, { cueId: 'cue', allow: [9] });
+  const second = solveShot(table, balls, { cueId: 'cue', allow: [9] });
+  assert.ok(first.length > 0, '这个布局必须算得出候选，否则这条测试什么也没证明');
+  assert.equal(key(first), key(second), '同一局面两次求解给出了不同的候选');
+
+  // 默认设置不能截断：它跟「显式关掉预算」必须一模一样。
+  // 少了这一条，默认值悄悄回到挂钟也照样过 —— 上面的两遍在快机器上仍然相等。
+  const unbounded = solveShot(table, balls, { cueId: 'cue', allow: [9], ...NO_BUDGET });
+  assert.equal(key(first), key(unbounded), '默认设置截断了候选，结果会跟机器速度挂钩');
+});
+
 test('组合球与翻袋：预算到点就停，所以断言非空的用例必须显式关掉预算', () => {
   const balls = bankLayout();
   // budgetMs 取负数，循环第一次检查就成立，必定一个候选都算不出来。
