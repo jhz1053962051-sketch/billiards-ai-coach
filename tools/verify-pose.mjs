@@ -69,12 +69,15 @@ async function setFile(page, selector, file) {
  * 逼编码器每帧都出一帧。这个方块离人体极远，MediaPipe 的检测框根本不含它，
  * 关键点与静止时完全一致——人体区域仍然是严格静止的。
  */
-const STILL_SCRIPT = `(async () => {
+// 照片用 data URL 喂进去，不走 /_research/ 那条路。
+// 静态服务现在只开放 /demo /src /vendor 三个目录（见 serve.mjs 的白名单），
+// 素材目录是 403 的；这不是可以放宽的东西，改这条脚本才对。
+const STILL_SCRIPT = (photoDataUrl) => `(async () => {
   const img = await new Promise((res, rej) => {
     const i = new Image();
     i.onload = () => res(i);
     i.onerror = () => rej(new Error('照片加载失败'));
-    i.src = '/_research/cand/s01.png';
+    i.src = ${JSON.stringify(photoDataUrl)};
   });
   const W = 480;
   const H = Math.round(W * img.height / img.width);
@@ -251,7 +254,8 @@ try {
   if (!hasPhoto) {
     skipped('静止反例用的是同一张照片，照片缺失时无法合成');
   } else {
-    const b64 = await page.evaluate(STILL_SCRIPT);
+    const photoB64 = (await fs.readFile(PHOTO)).toString('base64');
+    const b64 = await page.evaluate(STILL_SCRIPT(`data:image/png;base64,${photoB64}`));
     const bytes = Buffer.from(b64, 'base64');
     await fs.writeFile(SYNTH, bytes);
     log(`  合成素材 ${path.relative(ROOT, SYNTH)}（${bytes.length} bytes，人体全程静止）`);

@@ -4,6 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>台球 AI 教练 · 击球几何与物理仿真</title>
+<!-- 禁止一切外部资源与内联脚本。页面自己只加载同源的 app.js / file-guard.js，
+     数据全在本机，没有任何联网需求——那就把这条允许写死，省得哪天某个
+     import 里混进一段外链脚本，页面还能安安静静跑下去。
+     style 放 'unsafe-inline' 是因为正文用了 46 处 style="..." 内联样式；
+     真要收紧得先把它们全挪进 <style>，对本地演示页不划算。
+     注意：meta 里的 CSP 不支持 frame-ancestors，写了也会被忽略，别以为挡得住套框。 -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
 <!-- 普通脚本、必须排在所有 module 之前：file:// 下模块会被 CORS 拒，只有它能说话 -->
 <script src="./file-guard.js"></script>
 <style>

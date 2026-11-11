@@ -10,7 +10,7 @@ const root = path.resolve(import.meta.dirname, '..');
 
 const PAGES = [
   { script: 'demo/app.js', html: 'demo/index.html' },
-  { script: 'demo/pose.js', html: 'demo/pose.html' },
+  { script: 'demo/pose.js', html: 'demo/pose.html', needsWasm: true },
 ];
 
 const IMPORT_RE = /import\s*\{([^}]+)\}\s*from\s*'([^']+)'/g;
@@ -100,6 +100,32 @@ for (const rel of dtFiles) {
 }
 if (hardDt.length) {
   problems.push(`这些地方把步长写死成 1/120，应 import SEARCH_DT：${hardDt.join('、')}`);
+}
+
+// CSP 必须在场，而且不许写 'unsafe-eval'。
+// 这个页面只加载同源的模块、不联网，没有理由放开 eval；pose.html 另外需要
+// 'wasm-unsafe-eval'（只放开 wasm 编译，不等于放开 eval），也必须写在里面。
+// 少了这条断言，哪天有人为了「先跑通」把 CSP 整行删掉，没有任何东西会提醒。
+checked++;
+for (const page of PAGES) {
+  const htmlPath = path.join(root, page.html);
+  if (!fs.existsSync(htmlPath)) continue;
+  const text = fs.readFileSync(htmlPath, 'utf8');
+  const cspMeta = text.match(/<meta http-equiv="Content-Security-Policy" content="([^"]+)"/);
+  if (!cspMeta) {
+    problems.push(`${page.html}: 缺少 Content-Security-Policy，页面会接受任意外链脚本`);
+    continue;
+  }
+  const csp = cspMeta[1];
+  if (!/script-src\s+'self'/.test(csp)) {
+    problems.push(`${page.html}: CSP 的 script-src 应只允许 'self'`);
+  }
+  if (/'unsafe-eval'/.test(csp)) {
+    problems.push(`${page.html}: CSP 里出现了 'unsafe-eval'，这不是必要项`);
+  }
+  if (page.needsWasm && !/wasm-unsafe-eval/.test(csp)) {
+    problems.push(`${page.html}: wasm 页面必须在 CSP 里写 'wasm-unsafe-eval'，否则模型加载失败`);
+  }
 }
 
 console.log(`检查 ${checked} 项`);

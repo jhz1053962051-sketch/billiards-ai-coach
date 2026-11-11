@@ -35,6 +35,10 @@ node tools/verify-all.mjs   # 三项门禁一次跑完（等价于 npm run verif
 
 浏览器调试端口原来是写死的（verify-demo 9333、`cdp.mjs` 的 `launch()` 9450、verify-pose 9461）。端口被占时 Chrome 起不来，但脚本照样去连那个端口——连上的是**别人家的**调试服务，于是验收脚本可能对着另一个浏览器里的别的页面一路全过。现在统一用 `freePort()` 现取一个空闲端口，导航后再核对 `location.origin` 确实是目标地址，防止重定向到别处还能假通过。
 
+两个页面都带了 CSP（`<meta http-equiv="Content-Security-Policy">`），`script-src` 只放 `'self'`，`object-src 'none'`。这台机器上的页面从不联网，也没有一处内联脚本或 `onclick`，把这条允许写死没有代价；写了之后哪天某个 import 里混进一段外链脚本，页面会直接拒绝执行而不是安静跑下去。`style-src` 留了 `'unsafe-inline'`，因为正文用了 46 处 `style="..."` 内联样式，收紧就得先把它们全挪进 `<style>`，对本地演示页不划算。`pose.html` 多两个必要例外：`'wasm-unsafe-eval'`（CSP 一旦写了 `script-src`，哪怕没有 `'unsafe-eval'`，WebAssembly 编译也会被拒，模型直接加载失败；这个关键字只放开 wasm 编译）和 `media-src 'self' blob:`（用户选的视频是 `URL.createObjectURL` 出来的 blob 地址，少了它 `<video>` 会安静地停在「`loadeddata` 永远不来」，看着像卡死）。`check:demo` 会断言两个页面的 CSP 都在、`script-src` 只放 `'self'`、没有 `'unsafe-eval'`，并在 wasm 页面里存在 `'wasm-unsafe-eval'`。
+
+CSP 只写在 `<meta>` 里，`frame-ancestors` 在 meta 中会被浏览器忽略——要防套框得靠响应头，本机开发服务器没做。这是刻意的取舍，写在这里免得被当成「已经防住了」。
+
 ---
 
 ## 系统要求
