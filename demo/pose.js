@@ -263,7 +263,30 @@ function renderReport(report) {
 
 // ---------------------------------------------------------------- 图片流程
 
+// 只收这三种：浏览器的 createImageBitmap 认它们，MediaPipe 也吃它们。
+// 之前 accept 写的是 image/*，iPhone 拍的 HEIC 能被选进来，然后在
+// createImageBitmap 里抛一句看不懂的错——用户只会觉得「这工具坏了」。
+const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
+const VIDEO_TYPES = new Set(['video/mp4', 'video/webm', 'video/quicktime']);
+
+/** 把 <input type=file> 的 accept 与这段判断绑在一起，别只靠输入框拦。 */
+function typeRejected(file, allowed, hint) {
+  const type = (file.type || '').toLowerCase();
+  if (allowed.has(type)) return null;
+  const kind = type ? type.replace(/^image\/|^video\//, '').toUpperCase() : '没有扩展名信息';
+  return `这个格式（${kind}）读不了。${hint}`;
+}
+
 async function handleImage(file) {
+  const rejected = typeRejected(
+    file,
+    IMAGE_TYPES,
+    '请用 PNG / JPEG / WebP；iPhone 的 HEIC 要先在相册里「导出」或截图成 JPEG。'
+  );
+  if (rejected) {
+    setStatus(rejected, 'err');
+    return;
+  }
   imageMode = 'image';
   frames = [];
   $('scrubCard').hidden = true;
@@ -319,6 +342,15 @@ function seekTo(t) {
 }
 
 async function handleVideo(file) {
+  const rejected = typeRejected(
+    file,
+    VIDEO_TYPES,
+    '请用 MP4 / WebM / MOV；手机录的原片一般可以直接用，转码后再试也行。'
+  );
+  if (rejected) {
+    setStatus(rejected, 'err');
+    return;
+  }
   imageMode = 'video';
   frames = [];
   bitmap = null;

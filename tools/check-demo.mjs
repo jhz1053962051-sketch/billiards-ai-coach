@@ -146,6 +146,23 @@ checked++;
   }
 }
 
+// 文件选择器不许写 image/* 这种通配：iPhone 的 HEIC 能被选进来，然后在
+// createImageBitmap 里抛一句看不懂的错。accept 与 pose.js 的白名单必须都在。
+checked++;
+{
+  const poseHtml = fs.readFileSync(path.join(root, 'demo/pose.html'), 'utf8');
+  const poseJs = fs.readFileSync(path.join(root, 'demo/pose.js'), 'utf8');
+  if (/accept="image\/\*"/.test(poseHtml)) {
+    problems.push('demo/pose.html: 图片选择器别写 accept="image/*"，HEIC 会被放进来再报一句看不懂的错');
+  }
+  if (!/accept="image\/png,image\/jpeg,image\/webp"/.test(poseHtml)) {
+    problems.push('demo/pose.html: 图片选择器要收 image/png,image/jpeg,image/webp');
+  }
+  if (!/IMAGE_TYPES\s*=\s*new Set\(/.test(poseJs) || !/typeRejected\(/.test(poseJs)) {
+    problems.push('demo/pose.js: 要有 IMAGE_TYPES 白名单与 typeRejected 兜底，别只靠输入框拦');
+  }
+}
+
 console.log(`检查 ${checked} 项`);
 if (problems.length) {
   console.error('问题:\n' + problems.join('\n'));
