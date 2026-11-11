@@ -102,7 +102,10 @@ if (already) {
 const browser = BROWSERS.find((p) => fs.existsSync(p));
 const url = `http://127.0.0.1:${PORT}/demo/`;
 
-if (browser) {
+if (process.env.NO_BROWSER === '1') {
+  // 测试用：只把服务起起来，不要弹窗口
+  console.log(`NO_BROWSER=1，不打开浏览器：${url}`);
+} else if (browser) {
   // detached：浏览器窗口不随本进程退出而关闭
   spawn(browser, ['--new-window', url], { detached: true, stdio: 'ignore' }).unref();
   console.log(`已在浏览器打开：${url}`);

@@ -119,7 +119,7 @@ demo/            浏览器演示（原生 ESM，直接 import ../src/*.js）
   save.js              存档的序列化与校验（只存局面，不存日志与撤销栈）
   index.html/app.js    击球求解 + 打一局 + 手动出杆 + 存档 + 键盘
   pose.html/pose.js    动作评估
-test/            307 个 node:test 用例
+test/            308 个 node:test 用例
 tools/           静态服务器、测试启动器、开机自检（status）、demo 自检、Chrome CDP 端到端验证
 vendor/pose/     MediaPipe Pose Landmarker（Apache-2.0）wasm + lite 模型
 ```
@@ -563,7 +563,7 @@ MediaPipe 的关键点是**回归**出来的，肢体被画面裁掉时它照样
 
 ## 测试
 
-307 个用例，覆盖：
+308 个用例，覆盖：
 
 **击球求解（64 个）**
 
@@ -608,9 +608,10 @@ MediaPipe 的关键点是**回归**出来的，肢体被画面裁掉时它照样
 - **防守重复求解结果一致**（同一局面两次求解的瞄准角、力度、打分完全相同，没有引入隐藏随机）
 - **存档校验**（坏存档、缺母球、号码重复、玩家人数不对都拒绝；**球位跑出台面、球台或玩法认不出来也整份丢掉**——文件头写着「越界就丢」，原来的代码只判了 `isFiniteNumber`，手改一个 `x=1e9` 照样读得回来；落袋球的坐标在袋口、本来就可能在 bounds 外，不能因此误判；好的存档能原样往返）
 
-**静态服务（9 个）**
+**静态服务（10 个）**
 
-- 正常放行（`/demo/index.html`、`/src/solver.js`、`/vendor/.../vision.wasm`；wasm 的 MIME 必须是 `application/wasm`，否则 `instantiateStreaming` 直接拒绝加载）
+- 正常放行（`/demo/index.html`、`/src/solver.js`、`/vendor/.../vision.wasm`；wasm 的 MIME 必须是 `application/wasm`，否则 `instantiateStreaming` 直接拒绝加载；**`.mjs` 必须当 JS 给**，否则姿态页 import `vision_bundle.mjs` 会被浏览器以「模块 MIME 不对」拒绝执行，表现是一直播转圈）
+- **一键启动真的能打开**（`node tools/start.mjs <空闲端口>` 起来后 `/demo/` 回 200 且是 HTML；`NO_BROWSER=1` 时不弹窗口）
 - 根路径 302 到 `/demo/`、`/favicon.ico` 回 204 不刷 404 噪音
 - **`.git/` 读不到**（`config`、`HEAD`、目录本身全 403）
 - **素材目录与会话记忆读不到**（`/_research/`、`/.deepseek-harness/memory/`、`/package.json`、`/README.md` 全 403）

@@ -8,7 +8,13 @@
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { spawn } from 'node:child_process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createStaticServer } from '../tools/serve.mjs';
+import { freePort } from '../tools/cdp.mjs';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 let server;
 let port;
@@ -64,6 +70,14 @@ test('静态服务：demo 页面、src 模块、vendor 模型都照常给', asyn
   const wasm = await request('/vendor/pose/wasm/vision_wasm_internal.wasm');
   assert.equal(wasm.status, 200);
   assert.equal(wasm.headers['content-type'], 'application/wasm');
+
+  // .mjs 也必须当 JS 给。姿态页 import 的是 vendor/pose/vision_bundle.mjs，
+  // 一旦回成 application/octet-stream，浏览器会以「模块 MIME 类型不对」拒绝执行，
+  // 表现是姿态页一直转圈、控制台只有一行看不懂的失败。
+  const mjs = await request('/vendor/pose/vision_bundle.mjs');
+  assert.equal(mjs.status, 200);
+  assert.match(mjs.headers['content-type'], /javascript/);
+  assert.ok(mjs.body.length > 1000, '模块内容要完整给出');
 });
 
 test('静态服务：根路径跳到 /demo/，favicon 回 204 不刷 404', async () => {
@@ -133,4 +147,48 @@ test('静态服务：开放目录里不存在的文件回 404，不泄露磁盘�
   const res = await request('/demo/nope.html');
   assert.equal(res.status, 404);
   assert.doesNotMatch(res.body, /D:\\|台球ai教练/);
+});
+
+test('一键启动：起服务后 /demo/ 真的能打开，且不弹浏览器', async () => {
+  // 产品问题是「用户拿不到」：直接双击 index.html 是白屏，所以必须有一个
+  // 傻瓜入口。这条守的是「node tools/start.mjs 起得来、页面真打开」，
+  // 而不只是 serve.mjs 自己 listen 成功。NO_BROWSER=1 避免测试时弹窗口。
+  const child = spawn(process.execPath, [path.join(ROOT, 'tools/start.mjs'), String(await freePort())], {
+    cwd: ROOT,
+    env: { ...process.env, NO_BROWSER: '1' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let out = '';
+  child.stdout.on('data', (d) => { out += d; });
+  child.stderr.on('data', (d) => { out += d; });
+
+  try {
+    const port = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`10 秒内没读出端口：${out}`)), 10000);
+      child.stdout.on('data', () => {
+        const m = out.match(/127\.0\.0\.1:(\d+)/);
+        if (m) { clearTimeout(timer); resolve(Number(m[1])); }
+      });
+      child.on('exit', (code) => { clearTimeout(timer); reject(new Error(`启动就退出了（${code}）：${out}`)); });
+    });
+
+    let resp = null;
+    for (let i = 0; i < 40 && !resp; i++) {
+      try {
+        resp = await fetch(`http://127.0.0.1:${port}/demo/`, { signal: AbortSignal.timeout(1000) });
+      } catch {
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    }
+    assert.ok(resp, `服务起来了但 /demo/ 打不开：${out}`);
+    assert.equal(resp.status, 200);
+    assert.match(resp.headers.get('content-type') ?? '', /text\/html/);
+    // 那行提示要等 start.mjs 走完 waitReady 才打出来，给它几秒
+    for (let i = 0; i < 25 && !/NO_BROWSER=1/.test(out); i++) {
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    assert.match(out, /NO_BROWSER=1/, '要说明这次没开浏览器');
+  } finally {
+    child.kill();
+  }
 });
