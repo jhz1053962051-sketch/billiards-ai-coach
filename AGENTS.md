@@ -9,7 +9,8 @@
 
 ## 怎么执行第 2 条
 
-- 单元测试：`npm test`（`node --test --test-isolation=none "test/*.test.js"`），覆盖击球求解、摆球与规则、物理、对手回合。
-- 演示页静态检查：`npm run check:demo`（`tools/check-demo.mjs`），校验 HTML/JS 的结构与文案。
-- 演示页端到端验证：`npm run verify:demo`（`tools/verify-demo.mjs`），用真实浏览器跑求解、打杆与整局流程。
+- 一键跑完三项：`npm run verify`（`tools/verify-all.mjs`，自己起临时服务、跑完收尾，最后只留一句结论和一个退出码）。
+- 单元测试：`npm test`（`node --test --test-isolation=none "test/*.test.js"`），覆盖击球求解、摆球与规则、物理、对手回合、模块加载顺序。
+- 演示页静态检查：`npm run check:demo`（`tools/check-demo.mjs`），校验每个演示脚本 import 的符号确实存在、用到的 DOM id 都在 HTML 里、`./file-guard.js` 排在所有 module 脚本之前、`src`/`demo` 里没有把物理步长写死成 `1/120`。
+- 演示页端到端验证：`npm run verify:demo`（`tools/verify-demo.mjs`），用真实浏览器跑求解、打杆与整局流程。它要启动 Chrome，必须在放得开命名管道的环境里跑。
 - 三项都通过后再提交；提交信息写清改了什么、为什么改。

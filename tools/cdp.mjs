@@ -10,6 +10,7 @@
 
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -50,8 +51,27 @@ export async function findChrome() {
   );
 }
 
-export async function launch({ port = 9450, width = 1280, height = 900 } = {}) {
+/**
+ * 找一个当前空闲的 TCP 端口。
+ *
+ * 三个脚本原来各写一个固定端口（verify-demo 9333 / launch 9450 / verify-pose 9461）。
+ * 端口被占时 Chrome 起不来，但脚本仍然会去连那个端口——连到的是「别人家的」
+ * 调试服务，于是验收脚本可能对着另一个浏览器里的别的页面一路全过。
+ */
+export async function freePort() {
+  const srv = net.createServer();
+  await new Promise((resolve, reject) => {
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', resolve);
+  });
+  const { port } = srv.address();
+  await new Promise((resolve) => srv.close(resolve));
+  return port;
+}
+
+export async function launch({ port = null, width = 1280, height = 900 } = {}) {
   const exe = await findChrome();
+  port = port ?? (await freePort());
 
   const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cdp-'));
   const proc = spawn(

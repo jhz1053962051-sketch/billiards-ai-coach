@@ -10,14 +10,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { findChrome } from './cdp.mjs';
+import { findChrome, freePort } from './cdp.mjs';
 
 // 浏览器路径原先写死了一条 Windows 路径，macOS/Linux 上、或 Chrome 装在别处时
 // 直接 spawn 失败。cdp.mjs 里已经有一份跨平台的发现逻辑（CHROME_PATH 优先），
 // 这里复用它，别再维护第二份。
 const CHROME = process.argv[2] ?? (await findChrome());
 const URL = process.env.DEMO_URL ?? 'http://127.0.0.1:4173/demo/';
-const PORT = 9333;
+const PORT = await freePort();
 
 // 先确认静态服务在跑。少了这一步，页面加载失败会在后面某个 getContext 上炸成
 // 「TypeError: Cannot read properties of null」，把诊断一路引向「渲染崩了」，
@@ -197,6 +197,18 @@ await send(ws, 'Page.enable');
 
 await send(ws, 'Page.navigate', { url: URL });
 await sleep(2500);
+
+// 连上的必须是我们自己要测的那个页面。端口改成随机之后这一条更用不上，
+// 但它是最后一道保险：万一浏览器把标签页重定向到别处（代理、插件、hosts），
+// 后面的断言会对着一个陌生页面全过，那比失败更糟。
+{
+  const origin = await evaluate('location.origin');
+  const want = new globalThis.URL(URL).origin;
+  if (origin !== want) {
+    console.error(`打开的页面不是目标地址：期望 ${want}，实际 ${origin}`);
+    process.exit(2);
+  }
+}
 
 // 页面是不是真的起来了。ES module 被 CORS 拒、脚本 404、首帧抛错都会让
 // #table 根本不存在或 window.__app 没赋值；这两种情况下面每条断言都会以

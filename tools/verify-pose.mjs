@@ -127,7 +127,7 @@ async function runVideo(page, file, timeout) {
   );
 }
 
-const page = await launch({ port: 9461, width: 1280, height: 900 });
+const page = await launch({ width: 1280, height: 900 });
 try {
   log(`打开 ${BASE}/demo/pose.html`);
   await page.goto(`${BASE}/demo/pose.html`);

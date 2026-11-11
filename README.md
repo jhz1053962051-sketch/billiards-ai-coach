@@ -22,13 +22,18 @@ node tools/serve.mjs        # 只起服务，然后手动打开 http://127.0.0.1
                             #   /demo/pose.html   动作评估
 node tools/test.mjs         # 跑测试（等价于 npm test）
 node tools/status.mjs       # 开机自检：服务、两个页面、控制台报错（等价于 npm run status）
+node tools/verify-all.mjs   # 三项门禁一次跑完（等价于 npm run verify）
 ```
+
+`verify-all.mjs` 按顺序跑单元测试 → 演示页静态检查 → 浏览器端到端，「三项全过」以前靠人记，漏掉的那次恰好是改坏了东西的那次。它自己起一个临时静态服务（端口现取，不占 4173），跑完收尾，最后只打一句结论和一个退出码。端到端那步要启动 Chrome，必须在放得开命名管道的环境里跑。
 
 `serve.mjs` 只开放 `/demo`、`/src`、`/vendor` 三个目录，也只认 `127.0.0.1` 与 `localhost` 这两个 Host。它是本机开发用的服务器，不是发布用的：仓库根上的 `.git/`（完整提交历史）、`_research/`（素材）、`.deepseek-harness/`（会话记忆）都不该被一个 GET 读走，所以按目录白名单拦在最前面，路径里出现以点开头的段（`.git`、`..`）直接 403。畸形编码（比如 `/%`）回 400，不会把进程带走——之前这里一次 `decodeURIComponent` 抛异常就能让服务退出，任意网页放一个 `<img src="/%">` 就够。
 
 `tools/test.mjs` 会按当前 Node 版本挑进程隔离开关——这个开关改过两次名字（22.8 的 `--experimental-test-isolation=none`、23.6 起叫 `--test-isolation=none`），写死在命令里就只能在某一段版本区间用。
 
 `tools/status.mjs` 和 `tools/verify-demo.mjs` 的分工：后者是逐项验收（116 项断言，改代码后跑），前者只回答「现在这一刻系统能不能用」——五条路由是否 200、两个页面是否真加载、求解是否出结果、控制台有没有报错。改完代码想知道有没有把页面弄坏，跑 status 十几秒就够；要验收细节才跑 verify-demo。
+
+浏览器调试端口原来是写死的（verify-demo 9333、`cdp.mjs` 的 `launch()` 9450、verify-pose 9461）。端口被占时 Chrome 起不来，但脚本照样去连那个端口——连上的是**别人家的**调试服务，于是验收脚本可能对着另一个浏览器里的别的页面一路全过。现在统一用 `freePort()` 现取一个空闲端口，导航后再核对 `location.origin` 确实是目标地址，防止重定向到别处还能假通过。
 
 ---
 
@@ -541,7 +546,7 @@ MediaPipe 的关键点是**回归**出来的，肢体被画面裁掉时它照样
 
 ## 测试
 
-300 个用例，覆盖：
+302 个用例，覆盖：
 
 **击球求解（62 个）**
 
@@ -597,6 +602,13 @@ MediaPipe 的关键点是**回归**出来的，肢体被画面裁掉时它照样
 - **Host 不在白名单回 421**（挡 DNS rebinding；`127.0.0.1:端口` 与 `localhost:端口` 放行）
 - 只接受 GET 与 HEAD（POST 回 405）
 - 开放目录里不存在的文件回 404，且响应体不泄露磁盘路径
+
+**模块加载（2 个）**
+
+- **先加载 `safety.js` 再加载 `solver.js`，两边都真的能用**
+- **先加载 `solver.js` 再加载 `safety.js`，结果一致**
+
+`solver.js` 与 `safety.js` 互相 import（solver 用 `solveSafety` 找防守，safety 用 `positionTolerance` 给局面打分）。ES module 允许循环，前提是被引用的绑定只在调用时读；谁在模块顶层真的用了它，就是 TDZ 崩溃，而且「换个入口 import 就崩」。平时所有测试都在一个进程里按固定顺序加载，恰好不会暴露这个变量，所以这两条开子进程分别按两种顺序加载，并真的各求一杆。
 
 **动作评估（55 个）**
 
