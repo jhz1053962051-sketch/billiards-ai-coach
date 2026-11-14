@@ -384,3 +384,38 @@ test('数值稳定：极端力度与极端打点都不产生 NaN', () => {
     }
   }
 });
+
+test('袋角：撞在护角上会被弹回台面，不会被「夹」死在袋口', () => {
+  // 旧实现把越过库面的球直接清掉法向速度——球一到袋角就停在原地，
+  // 接下来常常被当成落袋（实测那版在 (2.4996, 0.0592) 判进右下袋）。
+  // 新实现按护角橡皮的恢复系数弹回来，球要能跑回台面中间去。
+  const play = () => {
+    const world = createWorld(table, [createBall('cue', 2.53, 0.12, { number: 0 })]);
+    const b = world.balls[0];
+    b.vx = 1.2;
+    b.vy = -2.0;
+    const events = [];
+    let t = 0;
+    while (t < 8 && !allStopped(world)) {
+      stepWorld(world, 1 / 120, events);
+      t += 1 / 120;
+    }
+    return { b, jaws: events.filter((e) => e.type === 'jaw').length };
+  };
+
+  const kept = PHYS.jawRestitution;
+  try {
+    const now = play();
+    assert.ok(now.jaws > 0, '这一杆必须真的撞到护角，否则这条测试什么也没证明');
+    assert.equal(now.b.pocketed, false, '撞在护角上不该被吞进袋');
+    assert.ok(now.b.x < table.length - 0.5, `球没弹回台面：停在 x=${now.b.x}`);
+
+    // 对照组：恢复系数为 0 就等于旧行为（法向速度清零），这球会被吞掉。
+    // 少了这一条，上面两条在「袋角根本没参与」的实现下也可能过。
+    PHYS.jawRestitution = 0;
+    const old = play();
+    assert.equal(old.b.pocketed, true, '法向清零的旧行为会把这球吞掉，对照失败说明差别不是这里来的');
+  } finally {
+    PHYS.jawRestitution = kept;
+  }
+});

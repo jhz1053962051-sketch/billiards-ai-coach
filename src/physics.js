@@ -5,7 +5,7 @@
 //   参考 ctbot000/three-cushion-billiards (MIT)。本文件按其思路重写并扩展：
 //     · 支持带袋口的台面（原项目是开伦台，无袋）
 //     · 支持任意球台尺寸 / 球半径 / 质量
-//     · 增加袋口捕获、袋口夹球回弹与出界兜底
+//     · 增加袋口捕获、护角反弹与出界兜底
 //     · 改进库边反弹模型（库边硬度随速度变化）
 //   数值常数与"静止/滑动/滚动"状态划分对照 ekiefl/pooltool (Apache-2.0) 校核。
 //   tailuge/billiards 为 GPL-3.0，仅阅读对照，未复制任何实现。
@@ -29,15 +29,26 @@ const RAIL_EVENT_SPEED = 0.015;
  * stepWorld 用它把步长钳到「一子步位移 < 捕获半径」，见那里的注释。
  */
 const MIN_CAPTURE_R = 0.063;
+/**
+ * 侧旋对出库角的影响强度（`resolveCushion` 里的 spinKick 系数）。
+ * 0.15 对应侧旋带来的出库角偏移上限约 8-10°，实测值域 7-12°。
+ */
+const SIDE_SPIN_EFFECT = 0.15;
 
 // ---------------------------------------------------------------- 袋口几何
 //
-// 袋口只做两件事，都用同一套几何：捕获圆（球心进入即落袋）+ 袋角夹球
-// （越过库面却没进袋的球顶回台内）。刻意**不**加"袋口弧度的吸引力"这一类
-// 近似：曾经加过一版指向袋心的径向漏斗力（0.3 g、1.5 倍捕获半径内生效），
-// 实测把贴库平行滚过中袋的球和中远台擦边球全吸进袋，与台面几何自带的
-// 捕获圆判定重复，且没有任何校准数据支撑那两个常数——已删除。
-// 要更接近真实，正确做法是按袋角实际形状做接触求解，而不是叠加一个吸力。
+// 袋口只做两件事，都用同一套几何：捕获圆（球心进入即落袋）+ 护角反弹
+// （越过库面却没进袋的球，按袋角橡皮的恢复系数弹回台内，方向由入射角决定）。
+// 刻意**不**加"袋口弧度的吸引力"这一类近似：曾经加过一版指向袋心的径向漏斗力
+// （0.3 g、1.5 倍捕获半径内生效），实测把贴库平行滚过中袋的球和中远台擦边球
+// 全吸进袋，与台面几何自带的捕获圆判定重复，且没有任何校准数据支撑那两个常数
+// ——已删除。
+//
+// 护角那一半也返过工：最早是把越过库面的球法向速度直接清零，等于球一碰袋角
+// 就死在原地，接着常被当成落袋（实测把被挤进右下袋死角的球判成进袋）。
+// 现在复用库边响应，只把恢复系数换成 PHYS.jawRestitution（0.55，库面 0.85）
+// 并关掉侧旋增益——护角是粗糙实心橡皮，侧旋在那吃不住力。
+// 要更接近真实，正确做法是按护角实际斜面做接触求解，而不是叠加一个吸力。
 
 /**
  * @typedef {object} Ball
@@ -346,7 +357,7 @@ function findFirstEvent(world, horizon) {
  * @param {Cushion} cushion
  * @param {Array} [events]
  */
-function resolveCushion(b, cushion, events) {
+function resolveCushion(b, cushion, events, opts = {}) {
   const R = b.__R;
   const { axis, pos, normal } = cushion;
 
@@ -363,7 +374,7 @@ function resolveCushion(b, cushion, events) {
   const vt = b.vx * tx + b.vy * ty;
 
   // 改进的库边恢复系数模型：
-  // - 基础恢复系数 PHYS.cushionRestitution (0.85)
+  // - 基础恢复系数 PHYS.cushionRestitution (0.85)，袋角用 PHYS.jawRestitution (0.55)
   // - 速度越高，恢复系数越接近 1（库边更"硬"）
   // - 速度越低，恢复系数越低（库边更"软"，能量损失更多）
   //
@@ -371,11 +382,12 @@ function resolveCushion(b, cushion, events) {
   // v_reference = 4 m/s 是参考速度，大约是中高杆的力度
   //
   // 效果：
-  // - 轻碰 (|vn| = 0.5 m/s): e ≈ 0.86
-  // - 中力 (|vn| = 2 m/s):   e ≈ 0.895
-  // - 暴冲 (|vn| = 6 m/s):   e ≈ 0.95
+  // - 轻碰 (|vn| = 0.5 m/s): e ≈ 0.87
+  // - 中力 (|vn| = 2 m/s):   e ≈ 0.93
+  // - 暴冲 (|vn| = 6 m/s):   e ≈ 0.96
+  const baseE = opts.restitution ?? PHYS.cushionRestitution;
   const speedFactor = Math.min(1, Math.abs(vn) / 4);
-  const e = PHYS.cushionRestitution + (1 - PHYS.cushionRestitution) * speedFactor;
+  const e = baseE + (1 - baseE) * speedFactor;
   const vnAfter = -e * vn;
   const jn = vnAfter - vn;
 
@@ -388,16 +400,16 @@ function resolveCushion(b, cushion, events) {
   // - 这个速度通过摩擦转化为切向冲量
   // - 最终改变球的出库角度
   //
-  // 参数 tuning：SIDE_SPIN_EFFECT = 0.15 表示侧旋对出库角的最大影响约 8-10°
-  // （实测值范围 7-12°，取决于库边硬度和击球力度）
-  const SIDE_SPIN_EFFECT = 0.15;
+  // 侧旋对出库角的最大影响约 8-10°（实测值范围 7-12°，取决于库边硬度和击球力度）。
+  // 袋角连带 opts.spinKick === false 关掉这一项：护角是粗糙的实心橡皮，
+  // 侧旋在那里基本吃不住，再套库边的侧旋模型只会凭空造出角度。
   const ut = vt * PHYS.cushionRollSlip - R * b.wz;
   const jt = -Math.sign(ut) * Math.min(PHYS.cushionFriction * jn, Math.abs(ut) * (2 / 7));
   const vtAfter = vt + jt;
 
-  // 侧旋对出库角的影响：通过给切向速度一个额外的小脉冲
-  // 这个效应与侧旋角速度和法向冲量成正比
-  const spinKick = SIDE_SPIN_EFFECT * b.wz * R * Math.min(1, Math.abs(vn) / 3);
+  const spinKick = opts.spinKick === false
+    ? 0
+    : SIDE_SPIN_EFFECT * b.wz * R * Math.min(1, Math.abs(vn) / 3);
 
   b.vx = vnAfter * nx + (vtAfter + spinKick) * tx;
   b.vy = vnAfter * ny + (vtAfter + spinKick) * ty;
@@ -480,8 +492,8 @@ function resolveBallBall(a, b, events) {
 }
 
 /**
- * 袋口捕获 + 袋口夹球兜底。
- * 球心进入捕获圆 → 落袋；越过库面却没进袋（从袋角挤过去）→ 顶回台面，当作夹球。
+ * 袋口捕获 + 护角反弹。
+ * 球心进入捕获圆 → 落袋；越过库面却没进袋（从袋角挤过去）→ 按护角橡皮弹回台面。
  *
  * 这里只在子步结束时看球心位置，也就是说「一子步的位移必须小于捕获半径」。
  * 这条约束由 stepWorld 在入口钳制步长来保证，而不是在热循环里做线段判定——
@@ -506,15 +518,30 @@ function settlePockets(world, events) {
       continue;
     }
 
-    // 从袋角缝隙挤出台面：顶回边界并吃掉法向速度，模拟袋角夹球
+    // 从袋口缝隙挤出台面：这不是「掉出台面」，是撞在护角橡皮上。
+    // 以前只把法向速度清零，等于球一碰袋角就死在那里；真实的袋角会把球弹回来，
+    // 弹回来的方向由入射角决定——贴库薄球到底是被弹回台面还是滚进袋，
+    // 差的就是这一下。这里复用库边响应，只换恢复系数（袋角软得多）并关掉侧旋增益
+    // （护角是粗糙实心橡皮，侧旋在那吃不住力）。
     const { minX, maxX, minY, maxY } = table.bounds;
-    let clamped = false;
-    if (b.x < minX) { b.x = minX; if (b.vx < 0) b.vx = 0; clamped = true; }
-    else if (b.x > maxX) { b.x = maxX; if (b.vx > 0) b.vx = 0; clamped = true; }
-    if (b.y < minY) { b.y = minY; if (b.vy < 0) b.vy = 0; clamped = true; }
-    else if (b.y > maxY) { b.y = maxY; if (b.vy > 0) b.vy = 0; clamped = true; }
-    if (clamped && events && (b.vx !== 0 || b.vy !== 0)) {
-      events.push({ type: 'jaw', ball: b.id });
+    const rails = [];
+    if (b.x < minX) rails.push({ axis: 'x', pos: 0, normal: { x: 1, y: 0 } });
+    else if (b.x > maxX) rails.push({ axis: 'x', pos: table.length, normal: { x: -1, y: 0 } });
+    if (b.y < minY) rails.push({ axis: 'y', pos: 0, normal: { x: 0, y: 1 } });
+    else if (b.y > maxY) rails.push({ axis: 'y', pos: table.width, normal: { x: 0, y: -1 } });
+
+    for (const rail of rails) {
+      const vn = b.vx * rail.normal.x + b.vy * rail.normal.y;
+      const speedBefore = Math.sqrt(b.vx * b.vx + b.vy * b.vy);
+      resolveCushion(
+        b,
+        { id: 'jaw', ...rail },
+        null,
+        { restitution: PHYS.jawRestitution, spinKick: false }
+      );
+      if (events && vn < 0 && speedBefore > RAIL_EVENT_SPEED) {
+        events.push({ type: 'jaw', ball: b.id, speed: speedBefore });
+      }
     }
   }
 }
