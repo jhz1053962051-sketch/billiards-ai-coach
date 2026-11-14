@@ -1237,6 +1237,9 @@
           <button id="importGameSave">从文件读取</button>
         </div>
         <input id="gameSaveFile" type="file" accept=".json,application/json" hidden>
+        <!-- 另一个标签页存了新档时不自动换桌——正打到关键一杆时局面自己变掉
+             比丢存档更难受。但也不能只提示不给路，所以给一个按下去才生效的入口。 -->
+        <button id="takeOtherSave" class="hidden" style="margin-top:8px">读入另一个标签页存的</button>
         <p class="hint" style="margin-top:6px">导出的是一个 JSON 文件，换设备后「从文件读取」能接着打。文件里的球位会按球台尺寸校验，越界或玩法不认识就整份丢掉。</p>
       </div>
 

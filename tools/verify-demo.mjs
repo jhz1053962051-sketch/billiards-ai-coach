@@ -1461,6 +1461,55 @@ console.log('存档·两个标签页:', twoTab);
   );
 }
 
+// storage 事件不会在自己这页触发，所以这里直接派一个合成事件，
+// 验的是「监听器收到之后会不会给出一条能按的路」——只提示不给按钮，
+// 多开一个标签页就等于半残，玩家只能靠手动刷新把局面丢掉。
+const takeOther = await evaluate(`(() => {
+  const app = window.__app;
+  const key = 'pool-ai-coach/game/v1';
+  const btn = document.getElementById('takeOtherSave');
+  const before = {
+    hidden: btn.classList.contains('hidden'),
+    text: btn.textContent,
+  };
+  const saved = JSON.parse(localStorage.getItem(key));
+  saved.shots = 12;
+  saved.savedAt = saved.savedAt + 1000;
+  localStorage.setItem(key, JSON.stringify(saved));
+  window.dispatchEvent(new StorageEvent('storage', {
+    key,
+    newValue: JSON.stringify(saved),
+  }));
+  const after = {
+    hidden: btn.classList.contains('hidden'),
+    text: btn.textContent,
+    report: document.getElementById('report').textContent.slice(0, 110),
+  };
+  btn.click();
+  const adopted = {
+    shots: app.state.game?.shots ?? null,
+    report: document.getElementById('report').textContent.slice(0, 90),
+    hiddenAgain: btn.classList.contains('hidden'),
+  };
+  return JSON.stringify({ before, after, adopted });
+})()`);
+console.log('存档·读入对方那份:', takeOther);
+{
+  const r = JSON.parse(takeOther);
+  check('平时看不到「读入另一个标签页存的」按钮', r.before.hidden === true, JSON.stringify(r.before));
+  check(
+    '另一个标签页存过之后按钮出现，并说明那边存到第几杆',
+    r.after.hidden === false && r.after.text.includes('12'),
+    JSON.stringify(r.after)
+  );
+  check(
+    '按下去真的把对方那份读进来（局面换成第 12 杆）',
+    r.adopted.shots === 12 && r.adopted.report.includes('12'),
+    JSON.stringify(r.adopted)
+  );
+  check('读进来之后按钮自己收起来', r.adopted.hiddenAgain === true, JSON.stringify(r.adopted));
+}
+
 // ------------------------------------------------------------ 手动出杆
 //
 // 滑块存在的意义就是"用户能自己定这一杆"。这里验证：改力度 → 真的改变结果。

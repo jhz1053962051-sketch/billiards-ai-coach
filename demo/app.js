@@ -112,6 +112,9 @@ const state = {
   saveStamp: null,
   // 已经被提示过一次「存档被别人改过」，再点一次存档就是真要覆盖。
   saveOverwrite: false,
+  // 另一个标签页存的那份存档是第几杆；null = 没有待处理的对方存档。
+  // 只用来点亮「读入另一个标签页存的」那个按钮，不自动换桌。
+  otherSaveShots: null,
   // 撤销用：每一杆结算前的局面快照。只存球局，练习模式的「重置」已经是退路。
   history: [],
   // 手动出杆参数。求解会给"建议参数"，但滑块一旦被用户动过就不再被覆盖——
@@ -2114,6 +2117,8 @@ function saveGame() {
   const ok = writeSave(g);
   state.saveOverwrite = false;
   if (ok) {
+    // 这份存档已经是「我见过的那个」了，按钮上没有待处理的东西。
+    state.otherSaveShots = null;
     state.saveStamp = readSaveStamp();
     setReport(`已存档：第 ${g.shots} 杆，${g.balls.filter((b) => !b.pocketed && b.number !== 0).length} 颗目标球在台上。刷新页面后点「读取存档」能接着打。`);
     refreshSaveInfo();
@@ -2377,6 +2382,12 @@ function refreshSaveInfo() {
     return;
   }
   const who = info.turn === 0 ? '你' : '对手';
+  const takeBtn = $('takeOtherSave');
+  if (takeBtn) {
+    const pending = state.otherSaveShots;
+    takeBtn.classList.toggle('hidden', pending === null);
+    takeBtn.textContent = pending === null ? '读入另一个标签页存的' : `读入另一个标签页存的（第 ${pending} 杆）`;
+  }
   box.textContent = info.ended
     ? `存档：${info.tableId} · 第 ${info.shots} 杆 · 这一局已经结束（${who}赢）`
     : `存档：${info.tableId} · 第 ${info.shots} 杆 · ${info.onTable} 颗目标球在台上 · 轮到${who}`;
@@ -2575,6 +2586,16 @@ $('gameSaveFile').addEventListener('change', (e) => {
   importGameSaveFromFile(e.target.files?.[0] ?? null);
   e.target.value = '';
 });
+// 另一个标签页存了新档时，这个按钮才出现。按了才读——不自动换桌，
+// 但也不能只提示不给路，否则「多开一个标签页」就等于半残。
+$('takeOtherSave').addEventListener('click', () => {
+  const shots = state.otherSaveShots;
+  state.otherSaveShots = null;
+  loadGame();
+  // loadGame 不碰存档卡的状态栏，所以按钮要自己收起来——它已经兑现过一次了。
+  refreshSaveInfo();
+  setReport(`读入另一个标签页存的存档（第 ${shots ?? '?'} 杆）。这一边原来的局面被替换掉了。`);
+});
 
 // 另一个标签页动了存档。storage 事件只在**别的**标签页写入时触发（自己写不会
 // 回调自己），正好用来把「这份存档我见过的那版已经过期了」标出来。
@@ -2584,12 +2605,15 @@ window.addEventListener('storage', (e) => {
   state.saveOverwrite = false;
   if (e.newValue === null) {
     state.saveStamp = null;
+    state.otherSaveShots = null;
     setReport('另一个标签页把存档删掉了。这边不受影响。');
   } else {
     const theirs = describeSave();
+    state.otherSaveShots = theirs?.shots ?? 0;
     setReport(
       `另一个标签页刚存了一份新的（第 ${theirs?.shots ?? '?'} 杆）。` +
-        '这边接着打没问题，但点「存这一局」时会被先问一句，免得把它盖掉。'
+        '这边接着打没问题；想接着那边打，点「读入另一个标签页存的」。' +
+        '点「存这一局」时也会先问一句，免得把它盖掉。'
     );
   }
   refreshSaveInfo();
