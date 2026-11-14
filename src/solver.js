@@ -198,6 +198,17 @@ function positionQuality(positioning) {
 }
 
 /**
+ * 走位价值低于这个分（0–100）才肯加塞去救。
+ *
+ * 加塞在物理上确实能改变母球出库角（`physics.js` 的 SIDE_SPIN_EFFECT），
+ * 但它同时带来偏杆：瞄准同样多的角度，加塞的实际落点更散。
+ * 实测把加塞放进默认杆法池后，120 个散球布局里有 27% 的首推带塞，
+ * 而「加塞 vs 中杆」的下一杆容错是 16 好 16 差——没有系统性收益，
+ * 却把 p50 从 21.6 ms 抬到 36.3 ms。所以改成只有位置将就时才试。
+ */
+const SPIN_RETRY_QUALITY = 60;
+
+/**
  * 对一个几何候选做力度/瞄准微调，找到能真正打进的那组参数。
  * 搜索顺序：先扫力度（粗→细），每个力度下微调瞄准角 ±0.3°。
  * 找到就返回；找不到返回 null。
@@ -228,27 +239,65 @@ function verifyAndTune(table, balls, cueId, targetId, pocketId, baseAim, tip, se
     (b) => b.id !== cueId && b.id !== targetId && !b.pocketed && b.number !== 0 &&
       (!allow || allow.includes(b.number))
   );
-  const tips = remaining
-    ? [...new Map([
-      [tip.b, tip],
-      [-0.55, { ...tip, name: '低杆（控制母球回缩）', b: -0.55 }],
-      [0.55, { ...tip, name: '高杆（控制母球跟进）', b: 0.55 }],
-    ]).values()]
-    : [tip];
+  // 杆法候选：高低杆管母球撞完之后是跟进还是回缩，左右塞管它撞库之后往哪拐。
+  // 以前 a 恒为 0——物理核明明支持侧旋（`physics.js` 的出库角与撞击都读 wz），
+  // 求解器却从不试，于是「两库叫位」这类球永远算不出来，卡片上永远是「中杆」。
+  const tipNameOf = (b, a) => {
+    const vertical = b <= -0.4 ? '低杆' : b >= 0.4 ? '高杆' : '中杆';
+    const side = a > 0.05 ? '右塞' : a < -0.05 ? '左塞' : '';
+    return side ? `${vertical}${side}（管母球出库角）` : vertical;
+  };
+  const dedupeTips = (list) => {
+    const seen = new Map();
+    for (const t of list) seen.set(`${t.a ?? 0}|${t.b}`, t);
+    return [...seen.values()];
+  };
+  // 高低杆先试：它们不改变瞄准精度，是默认手段。
+  const centerTips = dedupeTips([
+    tip,
+    { ...tip, name: '低杆（控制母球回缩）', b: -0.55 },
+    { ...tip, name: '高杆（控制母球跟进）', b: 0.55 },
+  ]);
+  // 左右塞后试：它靠出库角换位置，但偏杆会让瞄准精度下降，不能当默认选项。
+  const spinTips = dedupeTips([
+    { ...tip, a: -0.35, name: tipNameOf(tip.b, -0.35) },
+    { ...tip, a: 0.35, name: tipNameOf(tip.b, 0.35) },
+  ]);
+  const tips = remaining ? centerTips : [tip];
 
   // 不只拿到第一组能进的参数：仍有目标球时，要在可进球的力度/杆法里
   // 比较实际母球停位，优先留下下一杆容错更大的局面。
   let best = null;
-  for (const candidateTip of tips) {
-    const candidateSpeeds = speeds.map((speed) => {
-      if (candidateTip.b === tip.b) return speed;
-      const impact = speed * Math.max(0.55, 1 - Math.abs(candidateTip.b - tip.b) * 0.14);
-      return Math.min(SPEED.break, Math.max(SPEED.min, impact));
-    });
-    for (const speed of candidateSpeeds) {
-      const result = tryOnce(speed, 0, candidateTip);
-      if (!result.ok) continue;
-      if (!remaining) {
+  const scanTips = (list) => {
+    for (const candidateTip of list) {
+      const candidateSpeeds = speeds.map((speed) => {
+        if (candidateTip.b === tip.b) return speed;
+        const impact = speed * Math.max(0.55, 1 - Math.abs(candidateTip.b - tip.b) * 0.14);
+        return Math.min(SPEED.break, Math.max(SPEED.min, impact));
+      });
+      for (const speed of candidateSpeeds) {
+        const result = tryOnce(speed, 0, candidateTip);
+        if (!result.ok) continue;
+        const positioning = assessPosition(table, result.balls, cueId, targetId, allow);
+        const quality = positionQuality(positioning);
+        // 同样的停位，不加塞更好打；只有加塞能换到更好的位置时才值得用。
+        const effort = speed + Math.abs(candidateTip.b) * 0.2 + Math.abs(candidateTip.a ?? 0) * 0.5;
+        if (
+          !best ||
+          quality > best.quality + 1e-8 ||
+          (Math.abs(quality - best.quality) <= 1e-8 && effort < best.effort)
+        ) {
+          best = { speed, tip: candidateTip, result, positioning, quality, effort };
+        }
+      }
+    }
+  };
+
+  if (!remaining) {
+    for (const candidateTip of [tip]) {
+      for (const speed of speeds) {
+        const result = tryOnce(speed, 0, candidateTip);
+        if (!result.ok) continue;
         return {
           speed,
           aimAngle: baseAim,
@@ -257,17 +306,14 @@ function verifyAndTune(table, balls, cueId, targetId, pocketId, baseAim, tip, se
           afterBalls: result.balls,
         };
       }
-      const positioning = assessPosition(table, result.balls, cueId, targetId, allow);
-      const quality = positionQuality(positioning);
-      const effort = speed + Math.abs(candidateTip.b) * 0.2;
-      if (
-        !best ||
-        quality > best.quality + 1e-8 ||
-        (Math.abs(quality - best.quality) <= 1e-8 && effort < best.effort)
-      ) {
-        best = { speed, tip: candidateTip, result, positioning, quality, effort };
-      }
     }
+  }
+  scanTips(tips);
+  // 加塞只在「位置将就」时才值得多花一轮：quality 越低说明下一杆越难打。
+  // 实测 120 个 6 球散球布局，这一步约三成局面触发，p50 从 21.6 涨到 36.3 ms；
+  // 无脑试塞是 27% 的局面都在用塞，代价翻倍而收益不见得更好。
+  if (remaining && best && best.quality !== null && best.quality < SPIN_RETRY_QUALITY) {
+    scanTips(spinTips);
   }
   if (best) {
     const route = trialShot(
@@ -286,9 +332,12 @@ function verifyAndTune(table, balls, cueId, targetId, pocketId, baseAim, tip, se
 
   // 再按"接近解析解优先"的顺序微调瞄准角
   const offsets = [0.15, -0.15, 0.3, -0.3, 0.45, -0.45];
+  // 走到这一步说明前面一组都没成功，杆法池就全打开（含加塞）：这时候是「有没有」，
+  // 不是「好不好」，多试两种不吃亏。
+  const widenTips = dedupeTips([...centerTips, ...spinTips]);
   let adjustedBest = null;
   for (const off of offsets) {
-    for (const candidateTip of tips) {
+    for (const candidateTip of widenTips) {
       for (const s of speeds) {
         const r = tryOnce(s, off, candidateTip);
         if (r.ok) {
@@ -304,7 +353,8 @@ function verifyAndTune(table, balls, cueId, targetId, pocketId, baseAim, tip, se
             };
           }
           const quality = positionQuality(positioning);
-          const effort = s + Math.abs(candidateTip.b) * 0.2 + Math.abs(off) * 0.01;
+          const effort = s + Math.abs(candidateTip.b) * 0.2 +
+            Math.abs(candidateTip.a ?? 0) * 0.5 + Math.abs(off) * 0.01;
           if (
             !adjustedBest ||
             quality > adjustedBest.quality + 1e-8 ||
@@ -829,6 +879,9 @@ function difficultyOf(c) {
   let d = 0.55 * (100 - tolScore) + 0.25 * cutScore + 0.2 * distScore;
   if (c.kind === 'combo') d += 12;
   if (c.kind === 'bank') d += 18;
+  // 加塞会带来偏杆（squirt），瞄准精度比中杆差一截。不加这点代价，
+  // 求解器会为了几厘米的停位差到处加塞——现实里没人这么打球。
+  if (Math.abs(c.tip?.a ?? 0) > 0.05) d += 6;
   if (c.scratchRisk) d = Math.min(100, d + 18);
   return Math.round(Math.min(100, d) * 10) / 10;
 }

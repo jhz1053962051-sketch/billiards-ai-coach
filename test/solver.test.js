@@ -23,10 +23,11 @@ import { createStandardRack } from '../src/rack.js';
 const table = createTable('pool9');
 const R = table.ballRadius;
 
-// 求解器的组合球 / 翻袋是「挂钟预算」驱动的：默认 600 ms 一到就 break。
-// 所以凡是断言「一定算得出 N 个候选」的用例，都必须显式关掉预算——
-// 否则在慢机器或 CI 上会算出 0 个，断言失败却与算法无关（实测 1 ms 预算时
-// 同一翻袋布局返回 0 个）。预算只决定「算多久」，不影响候选的正确性。
+// 求解器的组合球 / 翻袋可以按挂钟预算截断（`opts.budgetMs`，显式传入才生效；
+// 默认不截断，工作量由 maxCombos / maxBanks / maxBankTries 框住）。
+// 手动传了预算就随时可能 break，所以凡是断言「一定算得出 N 个候选」的用例
+// 都必须显式关掉预算——否则在慢机器或 CI 上会算出 0 个，断言失败却与算法无关
+// （实测 1 ms 预算时同一翻袋布局返回 0 个）。预算只决定「算多久」，不影响候选的正确性。
 const NO_BUDGET = Object.freeze({ budgetMs: Infinity });
 
 test('假想球：位于目标球指向袋心的反方向上，距离恰好一个直径', () => {
@@ -671,4 +672,53 @@ test('组合球与翻袋：预算到点就停，所以断言非空的用例必�
   // 而不是这个布局本来就无解。少了它，上面那条断言连「布局没有解」都拦不住。
   const full = solveShot(table, balls, { cueId: 'cue', allow: [9], ...NO_BUDGET }).filter((c) => c.kind === 'bank');
   assert.ok(full.length > 0, '关掉预算后同一布局应该算得出翻袋');
+});
+
+// 加塞（左右塞）以前根本没进过杆法池：`tip.a` 恒为 0。物理核是支持侧旋的
+// （`physics.js` 的出库角按 SIDE_SPIN_EFFECT 读 wz），求解器却从不试，
+// 于是「靠出库角换位置」这类球永远算不出来，卡片上永远是「中杆」。
+// 下面是 `_research/probe-spin.mjs` 扫 120 个散球布局时，少数几个
+// 「位置将就、加塞救得回来」的其中一个（seed 24）；坐标抄成固定值，
+// 免得测试依赖随机数。
+const spinLayout = () => [
+  createBall('cue', 0.8643, 0.2296, { number: 0 }),
+  createBall('b1', 0.5534, 0.2089, { number: 1 }),
+  createBall('b2', 0.5388, 0.7334, { number: 2 }),
+  createBall('b3', 1.4212, 0.655, { number: 3 }),
+  createBall('b4', 1.6031, 0.3162, { number: 4 }),
+  createBall('b5', 2.0527, 0.9889, { number: 5 }),
+];
+
+test('加塞：位置将就时才用，而且候选说清它管什么', () => {
+  const list = solveShot(table, spinLayout(), { cueId: 'cue' });
+  assert.ok(list.length > 0, '这个布局必须算得出候选，否则这条测试什么也没证明');
+  const top = list[0];
+  assert.ok(Math.abs(top.tip.a) > 0.05, `位置将就时首推应该带塞，实际 a=${top.tip.a}`);
+  assert.match(top.tip.name, /塞/, '杆法名字必须说出用了塞');
+  assert.match(top.tip.name, /出库角/, '名字要说清塞是干什么用的，否则用户不知道怎么练');
+});
+
+test('加塞：就算被选中，也只能是因为换到了更好的位置', () => {
+  // 塞不会让瞄准变准（反而更差），它唯一的价值是改母球出库角。
+  // 所以「带塞的方案排在中杆前面」必须伴随更高的走位分，否则就是白加。
+  const list = solveShot(table, spinLayout(), { cueId: 'cue' });
+  const top = list[0];
+  const centerBest = list.find((c) => Math.abs(c.tip.a) <= 0.05);
+  if (!centerBest) return; // 这个局面没有纯中杆解，抬塞是唯一选择
+  assert.ok(
+    (top.leaveScore ?? 0) >= (centerBest.leaveScore ?? 0),
+    `加塞排在中杆前面，走位反而更差：塞 ${top.leaveScore} vs 中杆 ${centerBest.leaveScore}`
+  );
+});
+
+test('加塞：位置本来就好的球不许无端加塞', () => {
+  const balls = [
+    createBall('cue', 0.5, 0.635, { number: 0 }),
+    createBall('b1', 1.0, 0.635, { number: 1 }),
+    createBall('b2', 2.4, 1.2, { number: 2 }),
+    createBall('b3', 2.3, 0.1, { number: 3 }),
+  ];
+  const top = solveShot(table, balls, { cueId: 'cue' })[0];
+  assert.ok(top, '简单直球必须算得出候选');
+  assert.ok(Math.abs(top.tip.a) <= 0.05, `位置很好却加了塞：a=${top.tip.a}`);
 });
