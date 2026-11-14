@@ -1652,6 +1652,12 @@ function runOpponentTurn(gen = state.generation) {
     if (r.next.ballInHand && r.next.turn === 0) {
       extra.push(`持球：${r.next.ballInHand.zone === 'kitchen' ? '在开球线后点一下放母球' : '在台面上点一下放母球'}`);
     }
+    // 两步选杆：让玩家看得见对手在想什么，而不是"它好像随便打了一杆"
+    const chosen = r.scores?.[0];
+    if (chosen) {
+      const tail = `打完留给你最好打的一杆容错 ±${chosen.opponentToleranceDeg.toFixed(2)}°`;
+      extra.push(r.scores.length > 1 ? `在 ${r.scores.length} 个能进的方案里挑的：${tail}` : tail);
+    }
     setReport(`<b>对手</b> · ${report.summary}${foulHtml}${extra.length ? '<div>' + extra.join(' · ') + '</div>' : ''}`);
 
     $('gRerack').classList.toggle('hidden', !r.next.requiresRerack);

@@ -6,8 +6,9 @@ import assert from 'node:assert/strict';
 import { createTable } from '../src/table.js';
 import { createBall, createWorld } from '../src/physics.js';
 import { createStandardRack, ballStyle } from '../src/rack.js';
-import { createGame, numbersOnTable, headStringX, placeCueBall } from '../src/rules.js';
-import { takeTurn, pickCueSpot } from '../src/opponent.js';
+import { createGame, numbersOnTable, headStringX, placeCueBall, legalTargetNumbers } from '../src/rules.js';
+import { planShot } from '../src/solver.js';
+import { takeTurn, pickCueSpot, choosePlan } from '../src/opponent.js';
 
 const table = createTable('pool9');
 
@@ -221,4 +222,81 @@ test('对手：自己跟自己打完一整局，能分出胜负', () => {
     const rest = numbersOnTable(g.balls);
     assert.ok(!rest.includes(8), `seed ${seed} 局结束时 8 号球还在台上`);
   }
+});
+
+// ---------------------------------------------------------------- 两步选杆
+
+// 固定布局（探针 seed 3）：求解器首选 5 号进 c-tl（单杆价值 7.2，最简单），
+// 但打完对方还剩 76.3 的易打程度；两步选杆改打 2 号进 m-t（价值 11.5，稍难一点），
+// 打完之后对方只剩 63.7。两个方案都真的能进——换的是"给对方留什么"，不是"放不放弃进球"。
+function lookaheadGame() {
+  const spec = [
+    { n: 0, x: 0.697, y: 0.687 },
+    { n: 1, x: 2.085, y: 0.922 },
+    { n: 2, x: 1.016, y: 1.011 },
+    { n: 3, x: 1.568, y: 0.52 },
+    { n: 4, x: 0.254, y: 0.897 },
+    { n: 5, x: 0.524, y: 0.936 },
+  ];
+  const balls = spec.map((s) =>
+    createBall(s.n === 0 ? 'cue' : `b${s.n}`, s.x, s.y, { number: s.n, ...ballStyle(s.n) })
+  );
+  createWorld(table, balls);
+  const g = createGame(table, balls, { kind: 'eightball', names: ['我', '对手'] });
+  g.breakShot = false;
+  return g;
+}
+
+test('两步：为了把对方藏起来，可以换一个"稍难但打完之后更难打"的球', () => {
+  const g = lookaheadGame();
+  const allow = legalTargetNumbers(g, numbersOnTable(g.balls));
+  const base = planShot(table, g, { allow });
+  const look = choosePlan(table, g, { allow });
+
+  assert.ok(base.plan && look.plan);
+  assert.notEqual(
+    `${base.plan.targetNumber}@${base.plan.pocketId}`,
+    `${look.plan.targetNumber}@${look.plan.pocketId}`,
+    '这个布局就是用来证明两步会改主意的，两个方案一样说明这条测试失效了'
+  );
+
+  const easeOf = (scores, plan) =>
+    scores.find((s) => s.targetNumber === plan.targetNumber && s.pocketId === plan.pocketId)?.opponentEase;
+  const easePlain = easeOf(look.scores, base.plan);
+  const easeLook = easeOf(look.scores, look.plan);
+  assert.ok(easeLook < easePlain, `换完应该更难打：原 ${easePlain} → 新 ${easeLook}`);
+
+  // 换掉的球必须还进得去：不能靠"这一杆本来就要丢"来换对方难打
+  const chosen = look.scores.find(
+    (s) => s.targetNumber === look.plan.targetNumber && s.pocketId === look.plan.pocketId
+  );
+  assert.equal(chosen.potted, true, '被选中的方案必须真的能进');
+  assert.equal(chosen.fouled, false, '被选中的方案不许犯规');
+});
+
+test('两步：结果可复现，不看运气', () => {
+  const g = lookaheadGame();
+  const allow = legalTargetNumbers(g, numbersOnTable(g.balls));
+  const a = choosePlan(table, g, { allow });
+  const b = choosePlan(table, g, { allow });
+  assert.deepEqual(a.scores, b.scores, '同一个局面两次选杆的打分必须一致');
+  assert.equal(a.plan.targetNumber, b.plan.targetNumber);
+  assert.equal(a.plan.pocketId, b.plan.pocketId);
+});
+
+test('两步：开球不参与，直接按求解器给的开球方案来', () => {
+  const g = newGame(1);
+  assert.equal(g.breakShot, true);
+  const r = takeTurn(table, g, {});
+  assert.equal(r.ok, true);
+  assert.equal(r.kind, 'break');
+  assert.deepEqual(r.scores, [], '开球没有"对方上手"这一步，不该有多余打分');
+});
+
+test('两步：只看前 N 个候选，N 越少越省时间但可能选不到最好的', () => {
+  const g = lookaheadGame();
+  const allow = legalTargetNumbers(g, numbersOnTable(g.balls));
+  const one = choosePlan(table, g, { allow, lookahead: 1 });
+  assert.equal(one.scores.length, 1, 'lookahead:1 只评一个候选');
+  assert.ok(one.plan, '只评一个候选也得给出方案');
 });

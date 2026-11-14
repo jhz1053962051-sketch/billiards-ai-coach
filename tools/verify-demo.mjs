@@ -754,6 +754,15 @@ check(
   `推进 ${autoShots - beforeAuto} 杆`
 );
 
+// 两步选杆要在界面上说出来：对手不是"随便打一杆"，而是在能进的方案里挑了一个
+// 让你最难上手的。这条只查播报里有没有这句话——选杆本身由 Node 侧的对手测试守着。
+const lookaheadNote = await evaluate(`document.getElementById('report').textContent`);
+check(
+  '对手出杆后说明它在几个方案里挑的',
+  /打完留给你最好打的一杆容错 ±[\d.]+°/.test(lookaheadNote),
+  (lookaheadNote || '').slice(0, 120)
+);
+
 // 对手回合时点「求解」应该被挡住。
 // 注意别去 dispatch 那个 checkbox 的 change——它自己会触发 maybeOpponentTurn，
 // 那样测到的就是"对手正在出杆"，而不是"玩家不该替对手算"。

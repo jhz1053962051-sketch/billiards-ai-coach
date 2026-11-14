@@ -845,6 +845,18 @@ function leaveScoreOf(tolDeg) {
 }
 
 /**
+ * 把「容错窗口多少度」换算成 0–100 的易打程度，给需要跨球员比较的地方用。
+ *
+ * 求解器内部按 `leaveScoreOf` 用，导出来是为了让对手评估「我这一杆打完之后，
+ * 对方还剩多好打」——两边必须用同一把尺子，否则比较没有意义。
+ *
+ * @param {number} tolDeg 容错窗口（度），0 表示一杆都打不了
+ */
+export function toleranceToEase(tolDeg) {
+  return leaveScoreOf(tolDeg);
+}
+
+/**
  * 综合价值 = 单杆难度 − 走位修正。
  *
  * 50 分走位算中性；当还有合法目标球时，走位修正最多 ±22.5 分，
