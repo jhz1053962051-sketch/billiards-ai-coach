@@ -37,6 +37,17 @@ import {
 // 两个文件在顶层都只定义常量与函数，没有一边依赖另一边的求值结果。
 // （真出问题的话 Node 会直接抛 ReferenceError，测试里能立刻看到。）
 import { solveSafety } from './safety.js';
+import { ballName as snookerBallName } from './snooker.js';
+
+/**
+ * 目标球的叫法。
+ *
+ * 黑八/九球是「几号球」，斯诺克的彩球没有号码概念（16–21 是本项目内部编号），
+ * 对球友说「16 号球」没人知道那是黄球。所以这里按号码分段取名字。
+ */
+export function ballLabel(number) {
+  return number >= 16 ? snookerBallName(number) : `${number} 号球`;
+}
 
 /** 力度档位，按需选最省力的那档 */
 const POWER_LEVELS = [
@@ -962,7 +973,7 @@ export function pocketName(id) {
 export function describeCandidate(c) {
   if (c.kind === 'break') {
     const parts = [
-      `开球：打顶点 ${c.targetNumber} 号球`,
+      `开球：打顶点 ${ballLabel(c.targetNumber)}`,
       `全力`,
       c.tip.name,
       `瞄准偏移 ${c.aimOffsetDeg.toFixed(2)}°`,
@@ -970,11 +981,11 @@ export function describeCandidate(c) {
     return parts.join(' · ');
   }
   if (c.kind === 'direct') {
-    return `没有进球机会，直接撞 ${c.targetNumber} 号球（保证合法碰球） · ${c.power.name}力`;
+    return `没有进球机会，直接撞 ${ballLabel(c.targetNumber)}（保证合法碰球） · ${c.power.name}力`;
   }
   if (c.kind === 'combo') {
     const parts = [
-      `组合球：打 ${c.viaNumber} 号球撞 ${c.targetNumber} 号球进${pocketName(c.pocketId)}`,
+      `组合球：打 ${ballLabel(c.viaNumber)}撞 ${ballLabel(c.targetNumber)}进${pocketName(c.pocketId)}`,
       `两级切角最大 ${c.cutDeg.toFixed(0)}°`,
       toleranceText(c),
       `${c.power.name}力`,
@@ -995,7 +1006,7 @@ export function describeCandidate(c) {
       xmax: '右库',
     }[c.bankRail] ?? c.bankRail;
     const parts = [
-      `翻袋：${c.targetNumber} 号球翻${railName}进${pocketName(c.pocketId)}`,
+      `翻袋：${ballLabel(c.targetNumber)}翻${railName}进${pocketName(c.pocketId)}`,
       `切角 ${c.cutDeg.toFixed(0)}°`,
       toleranceText(c),
       `${c.power.name}力`,
@@ -1011,7 +1022,7 @@ export function describeCandidate(c) {
   if (c.kind === 'safety') {
     // 防守不进球，所以没有"进哪个袋"，只能说清撞哪颗、切多薄、留成什么样
     const parts = [
-      `防守：打 ${c.targetNumber} 号球${
+      `防守：打 ${ballLabel(c.targetNumber)}${
         Math.abs(c.aimOffsetDeg) < 1 ? '（正对）' : `偏 ${c.aimOffsetDeg.toFixed(0)}°`
       }`,
       `${c.power.name}力`,
@@ -1028,7 +1039,7 @@ export function describeCandidate(c) {
     return parts.join(' · ');
   }
   const parts = [
-    `打 ${c.targetNumber} 号球进${pocketName(c.pocketId)}`,
+    `打 ${ballLabel(c.targetNumber)}进${pocketName(c.pocketId)}`,
     `切角 ${c.cutDeg.toFixed(0)}°`,
     toleranceText(c),
     `${c.power.name}力`,
@@ -1092,7 +1103,7 @@ function addPositioningAdvice(parts, candidate) {
   parts.push(cueRestText(candidate.table, candidate.cueRest));
   if (candidate.nextShot) {
     parts.push(
-      `下一杆打 ${candidate.nextShot.targetNumber} 号进${pocketName(candidate.nextShot.pocketId)}`
+      `下一杆打 ${ballLabel(candidate.nextShot.targetNumber)}进${pocketName(candidate.nextShot.pocketId)}`
     );
   } else {
     parts.push('剩余球暂无直接进球线');
@@ -1125,9 +1136,24 @@ export function solveBreak(table, balls, opts = {}) {
   // 压在底点（8 号点）上的是**正中的 9 号球**，于是开球会照着 9 号瞄——目标球选错，
   // 而且九球里开球直接打进 9 号是要判赢的，瞄正中那颗等于把巧球当常规打法。
   // 改成「离母球最近」对两个玩法都成立：架子摆在母球前方，最靠母球那颗就是顶点。
-  let apex = live[0];
+  // 斯诺克要从红球堆的顶点开球：粉球就摆在红球堆正前方，比顶点红球更靠近母球，
+  // 照着粉球瞄是把球打在彩球上（规则上直接犯规），所以先按号码把红球挑出来，
+  // 取最靠近开球区的那颗（红球堆按 x 从小到大排，x 最小的就是顶点）。
+  let candidates;
+  if (opts.kind === 'snooker') {
+    const reds = live.filter((b) => b.number >= 1 && b.number <= 15);
+    candidates = reds.length ? reds : live;
+  } else {
+    // 其它玩法：架子摆在 3/4 台长处，顶点球是「越过中线、离母球最近」那颗。
+    const halfway = table.length / 2;
+    const rackSide = live.filter((b) => b.x > halfway);
+    candidates = rackSide.length ? rackSide : live;
+  }
+  if (opts.kind === 'snooker') candidates = candidates.slice().sort((a, b) => a.x - b.x).slice(0, 1);
+
+  let apex = candidates[0];
   let bestD = Infinity;
-  for (const b of live) {
+  for (const b of candidates) {
     const d = Math.hypot(b.x - cue.x, b.y - cue.y);
     if (d < bestD - 1e-9 || (Math.abs(d - bestD) <= 1e-9 && b.x < apex.x)) {
       bestD = d;
@@ -1354,7 +1380,7 @@ export function planShot(table, game, opts = {}) {
   if (!cue) throw new Error('球局里找不到母球');
 
   if (game.breakShot) {
-    const plan = solveBreak(table, game.balls, { cueId: cue.id });
+    const plan = solveBreak(table, game.balls, { cueId: cue.id, kind: game.kind });
     return { plan, kind: 'break', alternatives: [] };
   }
 

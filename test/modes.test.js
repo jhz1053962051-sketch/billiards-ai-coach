@@ -69,7 +69,8 @@ test('玩法选择：黑八摆 16 颗三角，九球摆 10 颗菱形', () => {
 });
 
 test('玩法选择：createRack 不认识玩法就报错，不静默回退黑八', () => {
-  assert.throws(() => createRack('snooker', table, { seed: 3 }), /不认识的玩法：snooker/);
+  // 斯诺克现在是真的玩法了，所以「未知玩法」的例子换成十球（本项目不支持）。
+  assert.throws(() => createRack('tenball', table, { seed: 3 }), /不认识的玩法：tenball/);
   assert.throws(() => createRack('九球', table, { seed: 3 }), /不认识的玩法/);
   assert.throws(() => createRack('nine-ball', table, { seed: 3 }), /不认识的玩法/);
   // 缺省仍然是黑八，那是正常默认值，不能跟着报错
@@ -80,7 +81,7 @@ test('玩法选择：建局时把玩法记下来，未知值直接报错', () =>
   assert.equal(realGame('nineball').kind, 'nineball');
   assert.equal(realGame('eightball').kind, 'eightball');
   const balls = createStandardRack(table, { seed: 2 }).map((b) => createBall(b.id, b.x, b.y, b));
-  assert.throws(() => createGame(table, balls, { kind: 'snooker' }), /不认识的玩法：snooker/);
+  assert.throws(() => createGame(table, balls, { kind: 'tenball' }), /不认识的玩法：tenball/);
   assert.equal(createGame(table, balls, {}).kind, 'eightball', '不传玩法时默认黑八');
 });
 
@@ -140,7 +141,7 @@ test('存档：写成文件再读回来，过关卡也不走样', () => {
   assert.equal(sanitize(tampered), null);
   // 玩法名写错同理，别悄悄按黑八读进来。
   const wrongKind = JSON.parse(text);
-  wrongKind.kind = 'snooker';
+  wrongKind.kind = 'tenball';
   assert.equal(sanitize(wrongKind), null);
 });
 
@@ -224,7 +225,7 @@ test('存档：球跑出台面、球台或玩法认不出来，都要整份丢�
   assert.equal(sanitize(withBall({ x: 1e9 })), null, 'x 飞出台面必须丢');
   assert.equal(sanitize(withBall({ y: -5 })), null, 'y 落到库外必须丢');
   assert.equal(sanitize({ ...good, table: { id: 'no-such-table' } }), null, '认不出的球台必须丢');
-  assert.equal(sanitize({ ...good, kind: 'snooker' }), null, '认不出的玩法必须丢');
+  assert.equal(sanitize({ ...good, kind: 'tenball' }), null, '认不出的玩法必须丢');
 
   // 落袋的球坐标在袋口，本来就可能落在 bounds 之外，不能因此判坏档
   const potted = good.balls.find((b) => b.pocketed);

@@ -1069,6 +1069,78 @@ console.log('九球·开球求解:', nineTargets);
   check('九球开球打的是最低号或顶点球', r.target === r.lowest || r.kind === 'break', `target=${r.target} lowest=${r.lowest}`);
 }
 
+// ------------------------------------------------------------ 斯诺克
+//
+// 切到斯诺克之后要验三件事：球台自动换成 12 尺台、摆出 22 颗球、
+// 计分板从「剩几颗」变成「几分 + 该打什么球」。
+// 这三件里有任何一件没做，界面就会用黑八的方式显示一局斯诺克。
+
+const snookerGame = await evaluate(`(async () => {
+  const app = window.__app;
+  app.setMode('game');
+  const sel = document.getElementById('gameKind');
+  sel.value = 'snooker';
+  sel.dispatchEvent(new Event('change'));
+  await new Promise((r) => setTimeout(r, 400));
+  const g = app.state.game;
+  const onTable = g ? g.balls.filter((b) => !b.pocketed) : [];
+  return JSON.stringify({
+    kind: g?.kind ?? null,
+    balls: g?.balls.length ?? 0,
+    reds: onTable.filter((b) => b.number >= 1 && b.number <= 15).length,
+    colors: onTable.filter((b) => b.number >= 16).length,
+    table: app.table.preset,
+    scores: g?.snooker?.scores ?? null,
+    ballOn: g?.snooker?.ballOn ?? null,
+    scoreText: document.getElementById('score').textContent.replace(/\\s+/g, ' ').trim().slice(0, 80),
+    kindValue: sel.value,
+  });
+})()`);
+console.log('斯诺克·建局:', snookerGame);
+{
+  const r = JSON.parse(snookerGame);
+  check('切到斯诺克会换成 12 尺台', r.table === 'snooker', `table=${r.table}`);
+  check('斯诺克摆出 22 颗球（15 红 + 6 彩 + 母球）', r.balls === 22, `balls=${r.balls}`);
+  check('红球 15 颗、彩球 6 颗都在台上', r.reds === 15 && r.colors === 6, `reds=${r.reds} colors=${r.colors}`);
+  check('计分板显示比分', /0 分/.test(r.scoreText), r.scoreText);
+  check('计分板说清这一杆该打红球', /该打：红球/.test(r.scoreText), r.scoreText);
+}
+
+const snookerShot = await evaluate(`(async () => {
+  const app = window.__app;
+  app.gameSolve();
+  const sol = app.state.gSolution;
+  return JSON.stringify({
+    solved: Boolean(sol),
+    found: sol?.found ?? false,
+    kind: sol?.best?.kind ?? null,
+    advice: document.getElementById('gAdvice').textContent.slice(0, 90),
+  });
+})()`);
+console.log('斯诺克·求解:', snookerShot);
+{
+  const r = JSON.parse(snookerShot);
+  check('斯诺克局面也能求解（红球堆里没机会时给防守/直撞）', r.solved === true, JSON.stringify(r));
+  check('斯诺克卡的文案不是空的', r.advice.length > 6, r.advice);
+}
+
+// 收尾：台面和玩法都要切回去。切到斯诺克时球台会自动换成 12 尺台，
+// 只把玩法改回黑八的话，后面几段会拿着 3.569 米长的台面按 2.54 米的比例摆球，
+// 摆出来的局跟这几段假设的完全不一样（翻袋段就是这么变成直接解的）。
+await evaluate(`(async () => {
+  const app = window.__app;
+  const kind = document.getElementById('gameKind');
+  kind.value = 'eightball';
+  kind.dispatchEvent(new Event('change'));
+  await new Promise((r) => setTimeout(r, 300));
+  const tp = document.getElementById('tablePreset');
+  tp.value = 'pool9';
+  tp.dispatchEvent(new Event('change'));
+  await new Promise((r) => setTimeout(r, 300));
+  return JSON.stringify({ table: app.table.preset, kind: app.state.gameKind });
+})()`);
+await new Promise((r) => setTimeout(r, 400));
+
 // ------------------------------------------------------------ 防守
 //
 // 玩法：把台面做成"没有进攻机会"，打开防守开关，看求解器是不是真的给出

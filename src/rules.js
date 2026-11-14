@@ -78,7 +78,8 @@ import { groupOf, findFreeSpot, GAME_KINDS } from './rack.js';
 // 玩法登记表放在 rack.js（那边零依赖），这里转出去给调用方继续从 rules.js 取。
 export { GAME_KINDS };
 import { createBall, createWorld, stepWorld, allStopped, strike, createRollTracker } from './physics.js';
-import { SEARCH_DT, MAX_SHOT_TIME } from './constants.js';
+import { SEARCH_DT, MAX_SHOT_TIME, SNOOKER_SPOTS } from './constants.js';
+import { resolveSnooker, initialSnooker, snookerTargets, ballName as snookerBallName } from './snooker.js';
 
 /** 犯规代码。与 WPA 条文的对应写在每条的文字里。 */
 export const FOUL = {
@@ -87,6 +88,7 @@ export const FOUL = {
   NO_CONTACT: 'no_contact',
   WRONG_BALL_FIRST: 'wrong_ball_first',
   NO_RAIL: 'no_rail',
+  WRONG_BALL_POTTED: 'wrong_ball_potted',
 };
 
 const FOUL_TEXT = {
@@ -95,6 +97,7 @@ const FOUL_TEXT = {
   [FOUL.NO_CONTACT]: '母球没有碰到任何球（WPA 3.2）',
   [FOUL.WRONG_BALL_FIRST]: '母球先碰到的不是合法目标球（WPA 3.2）',
   [FOUL.NO_RAIL]: '碰球之后没有球再碰库、也没有球进袋（WPA 3.3）',
+  [FOUL.WRONG_BALL_POTTED]: '打进了不该进的球',
 };
 
 /**
@@ -162,6 +165,9 @@ export function createGame(table, balls, opts = {}) {
     // 九球 Regulation 16：非法开球后由接手方决定「照打」还是「让原方再打」。
     // 这里用 offer 表达这个待决状态，null 表示没有待决事项。
     pendingChoice: null,
+    // 斯诺克才有：比分、该打红球还是彩球。其他玩法为 null，
+    // 这样存档和播报都能用「有没有 snooker 字段」来判断，不用到处比 kind。
+    snooker: kind === 'snooker' ? initialSnooker(balls.filter((b) => b.number >= 1 && b.number <= 15).length) : null,
   };
   return game;
 }
@@ -174,6 +180,7 @@ export function cloneGame(game) {
     ballInHand: game.ballInHand ? { ...game.ballInHand } : null,
     log: game.log.slice(),
     pendingChoice: game.pendingChoice ? { ...game.pendingChoice } : null,
+    snooker: game.snooker ? { ...game.snooker, scores: game.snooker.scores.slice() } : null,
   };
 }
 
@@ -188,6 +195,9 @@ export function numbersOnTable(balls) {
  * @param {number[]} onTable 台面上还没落袋的目标球号
  */
 export function legalTargetNumbers(game, onTable) {
+  // 斯诺克：该打红球 / 任意彩球 / 特定彩球，规则在 snooker.js 里。
+  if (game.kind === 'snooker') return snookerTargets(game, onTable);
+
   if (game.breakShot) return onTable.slice();
 
   // 九球不分组，永远只能先碰台面上号码最小的那颗（WPA 3.2，经 5.7 引入）。
@@ -388,6 +398,7 @@ export function spotEight(game) {
  * @returns {{next:object, report:object}}
  */
 export function resolveShot(game, facts) {
+  if (game.kind === 'snooker') return resolveSnooker(game, facts);
   return game.kind === 'nineball' ? resolveNineBall(game, facts) : resolveEightBall(game, facts);
 }
 
@@ -848,6 +859,13 @@ export function placementAllowed(game, x, y) {
   if (!game.ballInHand) return true;
   if (!game.table.insideBounds(x, y)) return false;
   if (game.ballInHand.zone === 'kitchen') return x <= headStringX(game.table) + 1e-9;
+  if (game.ballInHand.zone === 'd') {
+    // 斯诺克的 D 是「开球线中点 + 半径」的半圆，开口朝开球端（x 更小的一侧）。
+    const { baulkX, dRadius } = { baulkX: SNOOKER_SPOTS.baulkX, dRadius: SNOOKER_SPOTS.dRadius };
+    const cy = game.table.width / 2;
+    if (x > baulkX + 1e-9) return false;
+    return Math.hypot(x - baulkX, y - cy) <= dRadius + 1e-9;
+  }
   return true;
 }
 

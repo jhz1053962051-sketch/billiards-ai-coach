@@ -25,3 +25,5 @@ Thumbs.db
 *.log
 # 后台起静态服务器时 nohup 留下的输出（本机运行态）
 nohup.out
+# 临时冒烟脚本
+.tmp-*.mjs

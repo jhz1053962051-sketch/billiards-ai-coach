@@ -22,8 +22,8 @@ import { GAME_KINDS } from '../src/rules.js';
 
 const KEY = 'pool-ai-coach/game/v1';
 
-/** 母球之外允许出现的号：黑八 1–15、九球 1–9。读档时按实际出现的号校验即可。 */
-const MAX_NUMBER = 15;
+/** 允许出现的最大号码：斯诺克彩球到 21（红球 1–15、彩球 16–21）。 */
+const MAX_NUMBER = 21;
 
 function isFiniteNumber(v) {
   return typeof v === 'number' && Number.isFinite(v);
@@ -86,9 +86,35 @@ export function sanitize(raw) {
   const kind = raw.kind === undefined ? 'eightball' : GAME_KINDS[raw.kind] ? raw.kind : null;
   if (!kind) return null;
 
-  const zone = raw.ballInHand && (raw.ballInHand.zone === 'kitchen' || raw.ballInHand.zone === 'anywhere')
-    ? raw.ballInHand.zone
-    : null;
+  const zone =
+    raw.ballInHand &&
+    (raw.ballInHand.zone === 'kitchen' ||
+      raw.ballInHand.zone === 'anywhere' ||
+      raw.ballInHand.zone === 'd')
+      ? raw.ballInHand.zone
+      : null;
+
+  // 斯诺克状态：比分、该打什么球。kind 不是 snooker 就整块丢掉，
+  // 免得一份黑八存档带着残留的比分被读进来。
+  let snooker = null;
+  if (kind === 'snooker') {
+    const s = raw.snooker;
+    const scores = Array.isArray(s?.scores) && s.scores.length === 2 ? s.scores : null;
+    if (!scores || !scores.every((v) => isFiniteNumber(v) && v >= 0)) return null;
+    const on = s?.ballOn;
+    const ballOn =
+      on === 'red' || on === 'color'
+        ? on
+        : isFiniteNumber(on) && on >= 16 && on <= 21
+          ? on
+          : null;
+    if (ballOn === null) return null;
+    snooker = {
+      scores: [Math.floor(scores[0]), Math.floor(scores[1])],
+      ballOn,
+      reds: isFiniteNumber(s?.reds) ? Math.max(0, Math.floor(s.reds)) : 0,
+    };
+  }
 
   return {
     table: { id: t.id },
@@ -112,6 +138,7 @@ export function sanitize(raw) {
     phase: raw.phase === 'ended' ? 'ended' : 'playing',
     winner: raw.winner === 0 || raw.winner === 1 ? raw.winner : null,
     shots: isFiniteNumber(raw.shots) ? Math.max(0, Math.floor(raw.shots)) : 0,
+    snooker,
     // 存下来是为了让别的标签页能判断「这份存档是不是我看过的那个」。
     // 不合法就当 0（比任何真实时间戳都旧），不会因此丢掉整份存档。
     savedAt: isFiniteNumber(raw.savedAt) ? raw.savedAt : 0,
@@ -149,6 +176,10 @@ export function serialize(game, now = Date.now()) {
     phase: game.phase,
     winner: game.winner,
     shots: game.shots,
+    // 斯诺克才有；其它玩法是 null，写进 JSON 也不占地方。
+    snooker: game.snooker
+      ? { scores: game.snooker.scores.slice(), ballOn: game.snooker.ballOn, reds: game.snooker.reds }
+      : null,
   };
 }
 

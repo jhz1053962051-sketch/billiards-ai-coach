@@ -24,7 +24,7 @@ import {
   planShot,
 } from '../src/solver.js';
 import { createRenderer, interpolateBallStates, sampleDampedCamera } from './render.js';
-import { ballStyle, groupOf, RACK_NUMBERS, createStandardRack, createRack } from '../src/rack.js';
+import { ballStyle, groupOf, RACK_NUMBERS, createStandardRack, createRack, GAME_KINDS } from '../src/rack.js';
 import {
   createGame,
   cloneGame,
@@ -40,6 +40,7 @@ import {
   handBackBreak,
 } from '../src/rules.js';
 import { takeTurn } from '../src/opponent.js';
+import { ballName as snookerBallName } from '../src/snooker.js';
 import { readSave, writeSave, clearSave, describeSave, readSaveStamp, serialize, sanitize, SAVE_KEY } from './save.js';
 import {
   appendPracticeResult,
@@ -1358,6 +1359,30 @@ function updateScore() {
   if (!g) return;
   const box = $('score');
   box.innerHTML = '';
+  // 斯诺克按分计，没有分组也没有「剩几颗」——直接显示比分和该打什么球。
+  if (g.snooker) {
+    for (let i = 0; i < 2; i++) {
+      const p = g.players[i];
+      const div = document.createElement('div');
+      div.className = 'who' + (g.turn === i && g.phase === 'playing' ? ' turn' : '');
+      div.innerHTML = `<span class="nm">${esc(p.name)}</span>
+        <span class="tag2">${g.snooker.scores[i]} 分</span>`;
+      box.appendChild(div);
+    }
+    const on = document.createElement('div');
+    on.className = 'who';
+    const onText =
+      g.phase === 'ended'
+        ? `本局结束 · ${esc(g.players[g.winner]?.name ?? '—')} 获胜`
+        : g.snooker.ballOn === 'red'
+          ? '该打：红球'
+          : g.snooker.ballOn === 'color'
+            ? '该打：任意彩球'
+            : `该打：${snookerBallName(g.snooker.ballOn)}`;
+    on.innerHTML = `<span class="nm">${onText}</span>`;
+    box.appendChild(on);
+    return;
+  }
   for (let i = 0; i < 2; i++) {
     const p = g.players[i];
     const div = document.createElement('div');
@@ -2138,6 +2163,8 @@ function applyLoadedGame(saved) {
   g.phase = saved.phase;
   g.winner = saved.winner;
   g.shots = saved.shots;
+  // 斯诺克的比分和「该打什么」不在 createGame 的默认值里，必须单独装回去。
+  if (saved.snooker && g.snooker) g.snooker = { ...saved.snooker, scores: saved.snooker.scores.slice() };
 
   state.generation += 1;
   state.game = g;
@@ -2404,9 +2431,17 @@ $('autoOpponent').addEventListener('change', (ev) => {
 });
 
 $('gameKind').addEventListener('change', (ev) => {
-  state.gameKind = ev.target.value === 'nineball' ? 'nineball' : 'eightball';
+  const v = ev.target.value;
+  state.gameKind = GAME_KINDS[v] ? v : 'eightball';
   // 换玩法等于换一套规则（能否分组、先碰哪颗、9 号进袋算不算赢），
   // 旧局不能就地续上，所以直接开新的一局。
+  // 斯诺克还得配斯诺克台：它的彩球点位（开球线 737 mm、黑球距顶库 324 mm）
+  // 是按 12 尺台算的，摆在 9 尺台上点位会挤在一起。
+  if (state.gameKind === 'snooker' && state.table?.id !== 'snooker') {
+    $('tablePreset').value = 'snooker';
+    $('tablePreset').dispatchEvent(new Event('change'));
+    return;
+  }
   newGame();
 });
 

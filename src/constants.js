@@ -47,6 +47,22 @@ export const TABLE_PRESETS = {
   },
 };
 
+/**
+ * 斯诺克台面的固定点位（WPBSA 器材规格，净台面 3569 × 1778 mm）。
+ *
+ * 放在这里而不是 rack.js / snooker.js，是因为两边都要用：摆球要知道点位，
+ * 规则要知道「彩球该回哪个点」。谁 import 谁都会绕出一个环，所以统一放常量层。
+ *
+ *   · 开球线（baulk line）距开球端库面 737 mm
+ *   · 半圆区（the D）半径 292 mm，圆心在开球线中点
+ *   · 黑球距顶库 324 mm
+ */
+export const SNOOKER_SPOTS = Object.freeze({
+  baulkX: 0.737,
+  dRadius: 0.2921,
+  blackFromTop: 0.324,
+});
+
 /** 球与台呢、球与库、球与球的相互作用参数。 */
 export const PHYS = {
   /** 重力加速度，物理核内部统一从这里取 */

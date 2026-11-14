@@ -31,7 +31,12 @@ for (const page of PAGES) {
   const src = fs.readFileSync(scriptPath, 'utf8');
 
   for (const match of src.matchAll(IMPORT_RE)) {
-    const names = match[1].split(',').map((s) => s.trim()).filter(Boolean);
+    const names = match[1]
+      .split(',')
+      // `import { x as y }` 的别名要剥掉，否则会拿整串「x as y」去模块里找导出，
+      // 明明存在也报缺失。
+      .map((s) => s.trim().split(/\s+as\s+/)[0].trim())
+      .filter(Boolean);
     const spec = match[2];
     const target = path.resolve(path.join(root, path.dirname(page.script)), spec);
     let mod;

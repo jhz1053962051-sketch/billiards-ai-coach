@@ -26,6 +26,8 @@
 //   搜索到的 15 个等价模板取其一；镜像（左右翻转）由 seed 决定，具体号码在
 //   组内洗牌，所以每次摆出的球不同，但花色分布始终是最优的。
 
+import { SNOOKER_SPOTS } from './constants.js';
+
 /** 标准球色（1–7 与 9–15 同色系，后者带白条）。 */
 const COLORS = {
   1: '#f2c230',
@@ -380,9 +382,100 @@ export function createNineBallRack(table, opts = {}) {
 export const GAME_KINDS = Object.freeze({
   eightball: { id: 'eightball', label: '黑八', balls: 15 },
   nineball: { id: 'nineball', label: '九球', balls: 9 },
+  snooker: { id: 'snooker', label: '斯诺克', balls: 21 },
 });
 
-/** 按玩法取对应的一副球。 */
+// ---------------------------------------------------------------- 斯诺克
+
+/** 斯诺克彩球：号码、颜色、中文名。红球统一是 1–15，球色一致。 */
+export const SNOOKER_COLORS = Object.freeze({
+  16: { hex: '#e8c227', cn: '黄球' },
+  17: { hex: '#127a3f', cn: '绿球' },
+  18: { hex: '#7a4a21', cn: '咖啡球' },
+  19: { hex: '#1f4fd8', cn: '蓝球' },
+  20: { hex: '#e87ba0', cn: '粉球' },
+  21: { hex: '#16181c', cn: '黑球' },
+});
+
+/** 红球颜色：所有红球同色，靠位置而不是条纹区分。 */
+export const SNOOKER_RED_HEX = '#c8281f';
+
+/**
+ * 建一副斯诺克：15 颗红球（1–15）+ 6 颗彩球（16–21）+ 母球。
+ *
+ * 摆位按 WPBSA 器材规格：彩球各就各位；红球三角阵的顶点紧贴粉球后方
+ * （差 3 mm，不接触），向顶库方向展开 5 排。
+ *
+ * @param {object} table
+ * @param {{seed?:number}} [opts]
+ */
+export function createSnookerRack(table, opts = {}) {
+  const R = table.ballRadius;
+  const L = table.length;
+  const W = table.width;
+  const cy = W / 2;
+  const baulkX = SNOOKER_SPOTS.baulkX;
+  const dRadius = SNOOKER_SPOTS.dRadius;
+  const pinkX = (L / 2 + L) / 2;
+
+  const rand = mulberry32(opts.seed ?? 1);
+  const order = shuffle(
+    Array.from({ length: 15 }, (_, i) => i + 1),
+    rand
+  );
+
+  const balls = [];
+  const apexX = pinkX + 2 * R + 0.003;
+  const rowGap = Math.sqrt(3) * R;
+  let k = 0;
+  for (let row = 0; row < 5; row++) {
+    for (let j = 0; j <= row; j++) {
+      const number = order[k++];
+      balls.push({
+        id: 'b' + number,
+        number,
+        x: apexX + row * rowGap,
+        y: cy + (j - row / 2) * 2 * R,
+        color: SNOOKER_RED_HEX,
+        stripe: false,
+      });
+    }
+  }
+
+  const colors = [
+    [16, baulkX, cy - dRadius],
+    [17, baulkX, cy + dRadius],
+    [18, baulkX, cy],
+    [19, L / 2, cy],
+    [20, pinkX, cy],
+    [21, L - SNOOKER_SPOTS.blackFromTop, cy],
+  ];
+  for (const [number, x, y] of colors) {
+    balls.push({
+      id: 'b' + number,
+      number,
+      x,
+      y,
+      color: SNOOKER_COLORS[number].hex,
+      stripe: false,
+    });
+  }
+
+  // 母球放在 D 里：距开球线 10 cm、避开中点，摆位不压线。
+  balls.unshift({
+    id: 'cue',
+    number: 0,
+    x: baulkX - 0.1,
+    y: cy,
+    color: ballStyle(0).color,
+    stripe: false,
+  });
+  return balls;
+}
+
+/**
+ * 按玩法取对应的一副球。
+ */
 export function createRack(kind, table, opts = {}) {
   // 认不出的玩法直接报错，不回落黑八。
   // 原来写成 `kind === 'nineball' ? 九球 : 黑八`，于是 'snooker'、'九球'（中文）、
@@ -392,7 +485,11 @@ export function createRack(kind, table, opts = {}) {
   if (!GAME_KINDS[id]) {
     throw new Error(`不认识的玩法：${String(kind)}（支持 ${Object.keys(GAME_KINDS).join(' / ')}）`);
   }
-  return id === 'nineball' ? createNineBallRack(table, opts) : createStandardRack(table, opts);
+  return id === 'nineball'
+    ? createNineBallRack(table, opts)
+    : id === 'snooker'
+      ? createSnookerRack(table, opts)
+      : createStandardRack(table, opts);
 }
 
 
