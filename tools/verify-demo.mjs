@@ -300,6 +300,30 @@ console.log('练习·求解:', solved);
   check('求解后状态行说清下一步', /点「进了」或「没进」/.test(hint), hint);
 }
 
+// 架杆：几何上能进不等于人打得着。母球贴库时杆尾要翘，教练卡必须说出来，
+// 否则用户按「很容易」去打，一杆下去完全不是那回事。
+{
+  const rail = await evaluate(`(() => {
+    const app = window.__app;
+    const t = app.table;
+    const cue = app.state.balls.find((b) => b.id === 'cue');
+    const before = { x: cue.x, y: cue.y };
+    cue.x = 0.9;
+    cue.y = t.bounds.minY + 0.012;
+    app.runSolve();
+    const advice = document.getElementById('advice').textContent;
+    cue.x = before.x;
+    cue.y = before.y;
+    app.runSolve();
+    const restored = document.getElementById('advice').textContent;
+    return JSON.stringify({ advice, restored });
+  })()`);
+  console.log('练习·贴库:', rail);
+  const r = JSON.parse(rail);
+  check('母球贴库时教练卡说明要翘杆', /杆尾要翘/.test(r.advice), r.advice);
+  check('挪回原位后不再提翘杆', !/杆尾要翘/.test(r.restored), r.restored);
+}
+
 // 切备选
 const altClick = await evaluate(`(() => {
   const rows = [...document.querySelectorAll('#alts .alt')];

@@ -15,7 +15,7 @@ import {
   firstBlocker,
   aimToleranceDeg,
 } from '../src/aim.js';
-import { solveShot, coach, describeCandidate, toleranceText, cueRestText, difficultyLabel, difficultyCaveat, LABEL_SIGMA_DEG, pocketName, solveBreak, solveDirectHit, planShot } from '../src/solver.js';
+import { solveShot, coach, describeCandidate, toleranceText, cueRestText, difficultyLabel, difficultyCaveat, LABEL_SIGMA_DEG, pocketName, solveBreak, solveDirectHit, planShot, cueComfort, difficultyOf, CUE_TIGHT, CUE_BACK } from '../src/solver.js';
 import { createGame } from '../src/rules.js';
 import * as rulesMod from '../src/rules.js';
 import { createStandardRack } from '../src/rack.js';
@@ -721,4 +721,72 @@ test('加塞：位置本来就好的球不许无端加塞', () => {
   const top = solveShot(table, balls, { cueId: 'cue' })[0];
   assert.ok(top, '简单直球必须算得出候选');
   assert.ok(Math.abs(top.tip.a) <= 0.05, `位置很好却加了塞：a=${top.tip.a}`);
+});
+
+// —— 架杆可达性：几何上能进的球，人也得够得着 ——
+
+test('架杆：母球贴库时，这一杆会被标成「杆尾要翘」', () => {
+  const rail = [
+    createBall('cue', 0.9, table.bounds.minY + 0.012, { number: 0 }),
+    createBall('b1', 1.6, 0.35, { number: 1 }),
+  ];
+  const list = solveShot(table, rail, { cueId: 'cue' });
+  assert.ok(list.length > 0, '这个布局必须算得出候选，否则这条测试什么也没证明');
+  for (const c of list) {
+    assert.ok(c.cueClearance < CUE_TIGHT, `母球离库只有 ${c.cueClearance} 米，应判为贴库`);
+    assert.ok(c.awkwardPenalty >= 8, '贴库必须记代价，否则备选排序会把没法架杆的球排在前面');
+    assert.match(c.awkwardNotes.join(' '), /贴库/);
+  }
+  assert.match(describeCandidate(list[0]), /杆尾要翘/, '难打的原因必须写在教练卡上，用户才知道要翘杆');
+});
+
+test('架杆：贴库的代价真的进了难度分', () => {
+  const rail = [
+    createBall('cue', 0.9, table.bounds.minY + 0.012, { number: 0 }),
+    createBall('b1', 1.6, 0.35, { number: 1 }),
+  ];
+  const top = solveShot(table, rail, { cueId: 'cue' })[0];
+  const withoutComfort = difficultyOf({ ...top, awkwardPenalty: 0 });
+  const expected = Math.min(100, Math.round((withoutComfort + 8) * 10) / 10);
+  assert.ok(
+    Math.abs(top.difficulty - expected) < 0.11,
+    `难度必须是「不算架杆的分 + 8」，实际 ${top.difficulty} vs ${expected}`
+  );
+});
+
+test('架杆：母球后面顶着一颗球时，后手拉不开要说出来', () => {
+  // 母球在 (1.6, 0.635)，往左打要给 1 号球调位，正后方 (1.85, 0.635) 卡着 2 号球
+  const balls = [
+    createBall('cue', 1.6, 0.635, { number: 0 }),
+    createBall('b1', 0.8, 0.635, { number: 1 }),
+    createBall('b2', 1.85, 0.635, { number: 2 }),
+  ];
+  const list = solveShot(table, balls, { cueId: 'cue' });
+  const blocked = list.filter((c) => c.backBlockedBy !== null);
+  assert.ok(blocked.length > 0, '母球正后方有球时必须判出「后手被挡」，否则这个提醒等于没写');
+  assert.equal(blocked[0].backBlockedBy, 2);
+  assert.match(describeCandidate(blocked[0]), /母球后面有2号球挡着/);
+});
+
+test('架杆：台面中间的空位不该被误报', () => {
+  const balls = [
+    createBall('cue', 0.635, 0.635, { number: 0 }),
+    createBall('b1', 1.6, 0.635, { number: 1 }),
+  ];
+  const list = solveShot(table, balls, { cueId: 'cue' });
+  assert.ok(list.length > 0);
+  for (const c of list) {
+    assert.deepEqual(c.awkwardNotes, [], `干净球位不该有任何架杆提醒，实际 ${c.awkwardNotes}`);
+    assert.equal(c.awkwardPenalty, 0);
+  }
+  assert.doesNotMatch(describeCandidate(list[0]), /杆尾要翘|后手拉不开/);
+});
+
+test('架杆：cueComfort 直接量出母球到库边的距离', () => {
+  const cue = createBall('cue', 1.0, table.bounds.minY + 0.02, { number: 0 });
+  const info = cueComfort(table, [cue], cue, 0, 'cue');
+  assert.ok(Math.abs(info.clearance - 0.02) < 1e-9, `贴合距离应为 0.02 米，实际 ${info.clearance}`);
+  assert.equal(info.blocked, null, '只有母球一颗球时不可能被挡');
+  assert.equal(info.penalty, 8);
+  assert.ok(CUE_TIGHT > 0 && CUE_BACK > 0);
 });

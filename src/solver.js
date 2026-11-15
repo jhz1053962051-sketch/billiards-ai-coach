@@ -49,6 +49,75 @@ export function ballLabel(number) {
   return number >= 16 ? snookerBallName(number) : `${number} 号球`;
 }
 
+/**
+ * 母球离库边多近就算「贴库」——杆尾必须翘起来打。
+ *
+ * 0.09 米约等于三个球半径。库边本身有高度，球杆要压到球心高度就得让杆尾翘起，
+ * 握把跟着抬高，出杆的直线度就差一截；这是球房里所有人的共同经验，
+ * 也是「贴库球比同距离的中台球难打」的来源。
+ */
+export const CUE_TIGHT = 0.09;
+
+/** 球杆要在母球背后留出的后手空间（米）。成人杆 1.45 米，握把加后手约这么长。 */
+export const CUE_BACK = 0.35;
+
+/**
+ * 这一杆「好不好架杆」——母球贴不贴库、后手有没有被别的球顶住。
+ *
+ * 为什么需要这东西：求解器原来只算几何，只要母球走得通、目标球进得去，
+ * 就当成和普通球一样好打。但真实台面上，母球贴着库边、或者母球正后方
+ * 顶着一颗球时，人是没法把杆拉开的，只能翘着杆、缩着后手打，命中率明显下降。
+ * 这类球在教练卡上必须说出来，否则用户按「很容易」去打，一杆下去完全不是那回事。
+ *
+ * 判定用的是两个近似（都不做接触求解）：
+ * - 贴库：球心到四条库边的最近距离小于 CUE_TIGHT。
+ * - 后手被挡：沿瞄准线反方向 CUE_BACK 这段里，有别的球心离这条线不到 2R。
+ *   2R 是「球杆擦着球面过」的距离，比球杆实际粗细宽得多，宁可多提醒。
+ *
+ * @returns {{clearance:number, blocked:object|null, notes:string[], penalty:number}}
+ */
+export function cueComfort(table, balls, cue, aimAngle, cueId) {
+  const R = table.ballRadius;
+  const clearance = Math.min(
+    cue.x - table.bounds.minX,
+    table.bounds.maxX - cue.x,
+    cue.y - table.bounds.minY,
+    table.bounds.maxY - cue.y
+  );
+  const notes = [];
+  let penalty = 0;
+
+  if (clearance < CUE_TIGHT) {
+    notes.push('母球贴库，杆尾要翘起来打');
+    penalty += 8;
+  }
+
+  // 后手空间：球杆从母球背后伸出去，被另一颗球顶住就只能缩着打
+  const back = aimAngle + Math.PI;
+  const ux = Math.cos(back);
+  const uy = Math.sin(back);
+  let blocked = null;
+  for (const b of balls) {
+    if (b.id === cueId || b.pocketed) continue;
+    const dx = b.x - cue.x;
+    const dy = b.y - cue.y;
+    const along = dx * ux + dy * uy;
+    // 只关心母球正后方这一段；along <= 0 是在母球前面（那是目标球的方向）
+    if (along <= 0 || along > CUE_BACK + 2 * R) continue;
+    const perp = Math.abs(dx * uy - dy * ux);
+    if (perp > 2 * R) continue;
+    blocked = b;
+    break;
+  }
+  if (blocked) {
+    const who = blocked.number >= 16 ? snookerBallName(blocked.number) : `${blocked.number}号球`;
+    notes.push(`母球后面有${who}挡着，后手拉不开`);
+    penalty += 6;
+  }
+
+  return { clearance, blocked, notes, penalty };
+}
+
 /** 力度档位，按需选最省力的那档 */
 const POWER_LEVELS = [
   { name: '轻', speed: SPEED.soft },
@@ -397,6 +466,25 @@ function verifyAndTune(table, balls, cueId, targetId, pocketId, baseAim, tip, se
 }
 
 /**
+ * 把「好不好架杆」写进每个候选，供难度评分与教练卡取用。
+ *
+ * 放在统一入口做，是因为直接球、组合球、翻袋的候选在三个不同的函数里构造，
+ * 各自算一遍迟早会漏掉一个——漏掉的那种候选就会显得比实际好打。
+ */
+function annotateComfort(list, table, balls, cueId) {
+  const cue = balls.find((b) => b.id === cueId);
+  if (!cue) return;
+  for (const c of list) {
+    if (typeof c.aimAngle !== 'number') continue;
+    const info = cueComfort(table, balls, cue, c.aimAngle, cueId);
+    c.cueClearance = info.clearance;
+    c.backBlockedBy = info.blocked ? info.blocked.number : null;
+    c.awkwardNotes = info.notes;
+    c.awkwardPenalty = info.penalty;
+  }
+}
+
+/**
  * 枚举所有可考虑的击球方案，并用仿真验证。
  *
  * @param {object} table
@@ -519,6 +607,7 @@ export function solveShot(table, balls, opts = {}) {
     }
   }
 
+  annotateComfort(candidates, table, balls, cueId);
   for (const c of candidates) c.difficulty = difficultyOf(c);
   for (const c of candidates) c.value = valueOf(c);
   // 排序键是「综合价值」，不是单杆难度：同样能进的两个袋，打完给下一杆
@@ -548,6 +637,7 @@ export function solveShot(table, balls, opts = {}) {
       ...comboCandidates(table, balls, cueId, targets, opts, startedAt, budget),
       ...bankCandidates(table, balls, cueId, targets, opts, startedAt, budget),
     ];
+    annotateComfort(extra, table, balls, cueId);
     for (const c of extra) c.difficulty = difficultyOf(c);
     for (const c of extra) c.value = valueOf(c);
     extra.sort((a, b) => a.value - b.value || b.toleranceDeg - a.toleranceDeg);
@@ -894,7 +984,7 @@ function valueOf(c) {
  * 所以折成加数而不是乘数——乘数会让容错很小的翻袋直接冲到 100 分封顶，
  * 失去"翻袋之间也有好坏之分"的信息。
  */
-function difficultyOf(c) {
+export function difficultyOf(c) {
   const tolScore = 100 * Math.min(1, Math.log10(1 + c.toleranceDeg / 0.02) / Math.log10(1 + 3 / 0.02));
   const cutScore = 100 * Math.min(1, (c.cutDeg / 80) ** 1.6);
   const distScore = 100 * Math.min(1, c.distanceCue / 2.6);
@@ -905,6 +995,9 @@ function difficultyOf(c) {
   // 加塞会带来偏杆（squirt），瞄准精度比中杆差一截。不加这点代价，
   // 求解器会为了几厘米的停位差到处加塞——现实里没人这么打球。
   if (Math.abs(c.tip?.a ?? 0) > 0.05) d += 6;
+  // 架杆不顺（母球贴库、后手被球顶住）是另一类代价：几何上还是那一条线，
+  // 但人出不了杆。加在难度里，备选排序才会把「虽然好进但没法架杆」的方案往后放。
+  d += c.awkwardPenalty ?? 0;
   if (c.scratchRisk) d = Math.min(100, d + 18);
   return Math.round(Math.min(100, d) * 10) / 10;
 }
@@ -965,6 +1058,11 @@ export function pocketName(id) {
   return map[id] ?? id;
 }
 
+/** 架杆不顺的提醒，接在教练卡末尾——用户得先知道这一杆要翘杆，再谈进不进 */
+function addComfortAdvice(parts, c) {
+  for (const note of c.awkwardNotes ?? []) parts.push(`⚠ ${note}`);
+}
+
 /**
  * 把一个候选方案说成一句人话。
  * 单独导出，是因为 UI 里切换备选方案时要用同一个说法，
@@ -981,7 +1079,12 @@ export function describeCandidate(c) {
     return parts.join(' · ');
   }
   if (c.kind === 'direct') {
-    return `没有进球机会，直接撞 ${ballLabel(c.targetNumber)}（保证合法碰球） · ${c.power.name}力`;
+    const parts = [
+      `没有进球机会，直接撞 ${ballLabel(c.targetNumber)}（保证合法碰球）`,
+      `${c.power.name}力`,
+    ];
+    addComfortAdvice(parts, c);
+    return parts.join(' · ');
   }
   if (c.kind === 'combo') {
     const parts = [
@@ -996,6 +1099,7 @@ export function describeCandidate(c) {
       const tag = c.leaveScore >= 55 ? '走位好' : c.leaveScore >= 30 ? '走位一般' : '走位差';
       parts.push(`${tag}（下一杆容错 ±${c.nextToleranceDeg.toFixed(2)}°）`);
     }
+    addComfortAdvice(parts, c);
     return parts.join(' · ');
   }
   if (c.kind === 'bank') {
@@ -1017,6 +1121,7 @@ export function describeCandidate(c) {
       const tag = c.leaveScore >= 55 ? '走位好' : c.leaveScore >= 30 ? '走位一般' : '走位差';
       parts.push(`${tag}（下一杆容错 ±${c.nextToleranceDeg.toFixed(2)}°）`);
     }
+    addComfortAdvice(parts, c);
     return parts.join(' · ');
   }
   if (c.kind === 'safety') {
@@ -1051,6 +1156,7 @@ export function describeCandidate(c) {
     const tag = c.leaveScore >= 55 ? '走位好' : c.leaveScore >= 30 ? '走位一般' : '走位差';
     parts.push(`${tag}（下一杆容错 ±${c.nextToleranceDeg.toFixed(2)}°）`);
   }
+  addComfortAdvice(parts, c);
   return parts.join(' · ');
 }
 
