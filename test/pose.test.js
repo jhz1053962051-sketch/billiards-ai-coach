@@ -498,6 +498,27 @@ test('segmentStroke：点太少直接放弃', () => {
   assert.equal(segmentStroke([{ i: 0, t: 0, x: 0, y: 0, z: 0 }]), null);
 });
 
+test('segmentStroke：静止画面里的毫米级噪声不许被当成出杆', () => {
+  // 真实工况：手定住不动，视频压缩与关键点回归让相邻帧差 1–2 毫米。
+  // 30 fps 下 2 毫米 ≈ 0.06 m/s 是噪声上限，但抖动形态会凑出「后摆—前摆」。
+  // 这里手工造一段振幅 1.2 毫米、周期不规则的小抖动，必须被判成没有出杆。
+  const run = [];
+  const jitter = [0, 0.0012, -0.0008, 0.0009, -0.0011, 0.0007, -0.0006, 0.001, -0.0009, 0.0005];
+  for (let i = 0; i < 40; i++) {
+    run.push({ i, t: i / 30, x: 0.5 + jitter[i % jitter.length], y: 0.3, z: 0 });
+  }
+  assert.equal(segmentStroke(run), null, '毫米级抖动不能算一杆');
+});
+
+test('segmentStroke：峰值手速有地板，慢到不可能的一杆不算', () => {
+  // 造一段形态完整、但峰值只有 2 cm/s 的「出杆」——真人做不到这么慢还叫出杆，
+  // 这种输入应当退回「没识别出出杆」，而不是给一堆分数。
+  const run = [];
+  for (let i = 0; i < 20; i++) run.push({ i, t: i / 60, x: 0.5, y: 0.3, z: 0 });
+  for (let i = 1; i <= 10; i++) run.push({ i: 20 + i, t: (20 + i) / 60, x: 0.5 + 0.0004 * i, y: 0.3, z: 0 });
+  assert.equal(segmentStroke(run), null);
+});
+
 test('evaluateStroke：合成一杆给出 5 条动态检查', () => {
   const frames = strokeFrames().map((f) => ({ t: f.t, pose: f.pose }));
   const { checks, segmented } = evaluateStroke(frames, { handedness: 'right' });

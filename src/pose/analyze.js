@@ -94,6 +94,16 @@ function denseRuns(path) {
  * @returns {null|{run:Array, iBackStart:number, iFwdStart:number, iContact:number,
  *                 iFwdEnd:number, forward:object, medianSpeed:number, medianStep:number}}
  */
+/**
+ * 一次真实出杆的峰值手速不会低于这个值（米/秒）。
+ *
+ * 静止画面里手是定住的，但视频压缩、关键点回归噪声会让相邻帧差出
+ * 一两个毫米，换算成速度大约 1e-3 m/s 量级——原来只卡 1e-4，这种噪声
+ * 就够「凑出」一次后摆加前摆，于是静止素材被报成「出杆不直」。真人
+ * 哪怕很轻的一杆也有几十厘米每秒，5 cm/s 这个地板上方才是有效信号。
+ */
+const MIN_STROKE_SPEED = 0.05;
+
 export function segmentStroke(run) {
   if (!run || run.length < 5) return null;
 
@@ -112,7 +122,7 @@ export function segmentStroke(run) {
   // 峰值速度必须显著高于中位速度，否则这段只是手在慢慢挪
   const sorted = [...speeds].sort((a, b) => a - b);
   const medianSpeed = sorted[Math.floor(sorted.length / 2)] || 0;
-  if (speeds[peak] < 1e-4 || speeds[peak] < medianSpeed * 2.2) return null;
+  if (speeds[peak] < MIN_STROKE_SPEED || speeds[peak] < medianSpeed * 2.2) return null;
 
   // 峰值那一步的方向就是击球方向
   const iContact = peak + 1; // 对应 run 的下标
