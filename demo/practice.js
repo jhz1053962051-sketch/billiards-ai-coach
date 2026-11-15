@@ -226,6 +226,25 @@ export function clearPracticeLog(store = defaultStore()) {
   }
 }
 
+/**
+ * 撤销最后一条记录。
+ *
+ * 「实战打进 / 实战没进」是挨着的两个按钮，点错的代价不该是清空全部记录——
+ * 原来只有 clearPracticeLog 一条路，误点一次就只能导出备份手改 JSON。
+ * 返回是否真的删掉了一条：没有记录时不许装作成功。
+ */
+export function popLastPracticeResult(store = defaultStore()) {
+  if (!store) return false;
+  const records = readPracticeLog(store);
+  if (!records.length) return false;
+  try {
+    store.setItem(KEY, JSON.stringify({ v: 1, records: records.slice(0, -1) }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function exportPracticeBackup(records, exportedAt = Date.now()) {
   const valid = Array.isArray(records) ? records.map(sanitizeRecord).filter(Boolean).slice(-MAX_RECORDS) : [];
   return JSON.stringify({ v: 1, exportedAt, records: valid }, null, 2);

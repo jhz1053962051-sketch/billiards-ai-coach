@@ -1064,6 +1064,16 @@ function addComfortAdvice(parts, c) {
 }
 
 /**
+ * 走位标签：直接球、组合球、翻袋三条分支要说同一句话。
+ * 阈值只写在这里一处——原来三份拷贝，改一处忘两处就会前后矛盾。
+ */
+function addLeaveAdvice(parts, c) {
+  if (c.leaveScore === null || c.leaveScore === undefined) return;
+  const tag = c.leaveScore >= 55 ? '走位好' : c.leaveScore >= 30 ? '走位一般' : '走位差';
+  parts.push(`${tag}（下一杆容错 ±${c.nextToleranceDeg.toFixed(2)}°）`);
+}
+
+/**
  * 把一个候选方案说成一句人话。
  * 单独导出，是因为 UI 里切换备选方案时要用同一个说法，
  * 不能在页面里另写一份拼字符串的逻辑——那样两边迟早不一致。
@@ -1095,10 +1105,7 @@ export function describeCandidate(c) {
       c.tip.name,
     ];
     addPositioningAdvice(parts, c);
-    if (c.leaveScore !== null && c.leaveScore !== undefined) {
-      const tag = c.leaveScore >= 55 ? '走位好' : c.leaveScore >= 30 ? '走位一般' : '走位差';
-      parts.push(`${tag}（下一杆容错 ±${c.nextToleranceDeg.toFixed(2)}°）`);
-    }
+    addLeaveAdvice(parts, c);
     addComfortAdvice(parts, c);
     return parts.join(' · ');
   }
@@ -1117,10 +1124,7 @@ export function describeCandidate(c) {
       c.tip.name,
     ];
     addPositioningAdvice(parts, c);
-    if (c.leaveScore !== null && c.leaveScore !== undefined) {
-      const tag = c.leaveScore >= 55 ? '走位好' : c.leaveScore >= 30 ? '走位一般' : '走位差';
-      parts.push(`${tag}（下一杆容错 ±${c.nextToleranceDeg.toFixed(2)}°）`);
-    }
+    addLeaveAdvice(parts, c);
     addComfortAdvice(parts, c);
     return parts.join(' · ');
   }
@@ -1152,10 +1156,7 @@ export function describeCandidate(c) {
   ];
   if (c.scratchRisk) parts.push('⚠ 母球有摔袋风险');
   addPositioningAdvice(parts, c);
-  if (c.leaveScore !== null && c.leaveScore !== undefined) {
-    const tag = c.leaveScore >= 55 ? '走位好' : c.leaveScore >= 30 ? '走位一般' : '走位差';
-    parts.push(`${tag}（下一杆容错 ±${c.nextToleranceDeg.toFixed(2)}°）`);
-  }
+  addLeaveAdvice(parts, c);
   addComfortAdvice(parts, c);
   return parts.join(' · ');
 }

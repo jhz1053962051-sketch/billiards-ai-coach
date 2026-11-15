@@ -395,6 +395,18 @@ check('演示一杆报告进球', Boolean(afterShoot && afterShoot.startsWith('�
   const afterSecond = await evaluate(`window.__app.practiceCount()`);
   check('同一个球位连记第二杆', afterSecond === before + 2, `${before} → ${afterSecond}`);
 
+  // 点错了不该只能清空整本记录：撤销按钮撤掉最新那条，其余不动
+  const undone = await evaluate(`(() => {
+    const b = document.getElementById('practiceUndo');
+    const wasDisabled = b.disabled;
+    b.click();
+    return JSON.stringify({ wasDisabled, after: window.__app.practiceCount(), text: document.getElementById('practiceMessage').textContent });
+  })()`);
+  const u = JSON.parse(undone);
+  check('撤销按钮平时是可点的', u.wasDisabled === false, undone);
+  check('撤销只删掉最新那条', u.after === before + 1, `${before + 2} → ${u.after}`);
+  check('撤销后说清楚撤了多少条', /撤销/.test(u.text) && /→/.test(u.text), u.text);
+
   // 统计一坨折起来了，但「今天练了几杆」必须还看得见，否则折叠等于藏掉进度
   const stats = await evaluate(`(() => {
     const d = document.getElementById('practiceStats');

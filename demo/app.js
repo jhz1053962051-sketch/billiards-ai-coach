@@ -52,6 +52,7 @@ import {
   exportPracticeCsv,
   MAX_BACKUP_BYTES,
   MIN_CALIBRATION_SAMPLES,
+  popLastPracticeResult,
   PRACTICE_DRILLS,
   PRACTICE_DRILL_VARIATIONS,
   PRACTICE_GOALS,
@@ -885,6 +886,7 @@ function updatePracticeLog() {
   const missSummary = summarizeMissReasons(records);
   const practiceFocus = summarizePracticeFocus(records);
   $('clearPractice').disabled = records.length === 0;
+  $('practiceUndo').disabled = records.length === 0;
   $('exportPractice').disabled = records.length === 0;
   $('practiceHistorySummary').textContent = records.length
     ? `查看最近 5 条（共 ${records.length} 条）`
@@ -2283,6 +2285,24 @@ function importGameSaveFromFile(file) {
   reader.readAsText(file);
 }
 
+/**
+ * 撤销刚才那一条实战记录。
+ *
+ * 点错「打进 / 没进」不必清空整本记录，也不必导出 JSON 手改。
+ * 撤销后把 practiceRecorded 放回 false，状态行重新提示「可以直接记下一杆」。
+ */
+function undoLastPracticeRecord() {
+  const before = readPracticeLog().length;
+  if (!popLastPracticeResult()) {
+    updatePracticeFeedback('没有可撤销的记录。');
+    return false;
+  }
+  state.practiceRecorded = false;
+  updatePracticeLog();
+  updatePracticeFeedback(`已撤销刚才那条记录（${before} → ${before - 1} 条）。`);
+  return true;
+}
+
 function removePracticeLog() {
   if (!window.confirm('确定清空本机保存的实战练习记录吗？')) return;
   const ok = clearPracticeLog();
@@ -2549,6 +2569,7 @@ $('shootManual').addEventListener('click', shootManual);
 $('practiceMade').addEventListener('click', () => recordPracticeOutcome(true));
 $('practiceMissed').addEventListener('click', () => recordPracticeOutcome(false));
 $('clearPractice').addEventListener('click', removePracticeLog);
+$('practiceUndo').addEventListener('click', undoLastPracticeRecord);
 $('exportPractice').addEventListener('click', exportPracticeRecords);
 $('backupPractice').addEventListener('click', downloadPracticeBackup);
 $('restorePractice').addEventListener('click', () => $('practiceBackupFile').click());
@@ -2835,6 +2856,7 @@ window.__app = {
   // 手动出杆 / 存档：端到端脚本直接调，不必去模拟拖滑块
   shootManual,
   recordPracticeOutcome,
+  undoLastPracticeRecord,
   updatePracticeLog,
   // 端到端脚本要能数「记了几杆」，不用去解析 localStorage
   practiceCount: () => readPracticeLog().length,

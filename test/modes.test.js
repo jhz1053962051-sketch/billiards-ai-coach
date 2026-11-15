@@ -26,6 +26,7 @@ import {
   practiceDrillLayout,
   parsePracticeBackup,
   MIN_CALIBRATION_SAMPLES,
+  popLastPracticeResult,
   readPracticeLog,
   readPracticeGoal,
   replacePracticeLog,
@@ -314,6 +315,26 @@ function practiceResult(overrides = {}) {
     ...overrides,
   };
 }
+
+test('实战记录：点错了能只撤销最后一条，不必清空整本记录', () => {
+  const store = fakeStore();
+  // 没记录时不许假装成功——按钮据此决定要不要亮起来
+  assert.equal(popLastPracticeResult(store), false);
+
+  assert.equal(appendPracticeResult(practiceResult({ timestamp: 1_800_000_000_000, made: true }), store), true);
+  assert.equal(appendPracticeResult(practiceResult({ timestamp: 1_800_000_000_001, made: false }), store), true);
+  assert.equal(readPracticeLog(store).length, 2);
+
+  assert.equal(popLastPracticeResult(store), true);
+  const left = readPracticeLog(store);
+  assert.equal(left.length, 1);
+  assert.equal(left[0].made, true, '撤掉的必须是最新那条，不能撤错');
+  assert.equal(left[0].timestamp, 1_800_000_000_000);
+
+  assert.equal(popLastPracticeResult(store), true);
+  assert.deepEqual(readPracticeLog(store), []);
+  assert.equal(popLastPracticeResult(store), false);
+});
 
 test('实战记录：跨刷新持久化，只汇总手动录入的真实结果', () => {
   const store = fakeStore();
