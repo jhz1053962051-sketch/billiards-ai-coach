@@ -346,6 +346,52 @@ test('袋口：正对袋心打，任何步长都必须进袋', () => {
   }
 });
 
+test('性能：静止球占多数时，跑一步既不会凭空进袋，也不会被挪动', () => {
+  // settlePockets 会跳过「静止且已在台面内」的球（每子步都过一遍全部球太贵）。
+  // 跳过必须是无害的：静止球既不可能刚滚进捕获圆，也不可能撞护角。
+  // 这条测试就是钉住这个前提——摆一堆静止球（含贴库、含袋口旁边），跑一步，
+  // 位置必须一点不动、也不许冒出任何进球事件。
+  const balls = [
+    createBall('cue', 0.6, 0.635),
+    createBall('b1', 1.2, 0.4, { number: 1 }),
+    createBall('b2', 2.4, 0.1, { number: 2 }), // 右下袋口外侧
+    createBall('b3', 0.05, 0.635, { number: 3 }), // 贴左库
+  ];
+  const w = freshWorld(balls);
+  const before = w.balls.map((b) => `${b.x},${b.y}`);
+  const events = [];
+  stepWorld(w, 1 / 120, events);
+  assert.deepEqual(
+    w.balls.map((b) => `${b.x},${b.y}`),
+    before,
+    '静止球不许被挪动'
+  );
+  assert.equal(
+    events.filter((e) => e.type === 'pocket').length,
+    0,
+    '静止球不许被凭空判进袋'
+  );
+});
+
+test('性能：只让运动球参与求交，也不许漏掉真正的相撞', () => {
+  // findFirstEvent 改成「只拿在动的球去和别的球求交」，静止球之间不再互相看。
+  // 这条测试摆三颗球同时跑向同一处，必须报出球撞球事件，且撞完位置要变。
+  const a = createBall('a', 0.7, 0.635, { number: 1 });
+  const b = createBall('b', 1.7, 0.635, { number: 2 });
+  const c = createBall('c', 1.2, 0.2, { number: 3 });
+  const w = freshWorld([a, b, c]);
+  strike(a, { angle: 0, speed: 1.4, tip: { a: 0, b: 0 } });
+  strike(b, { angle: Math.PI, speed: 1.4, tip: { a: 0, b: 0 } });
+  strike(c, { angle: Math.PI / 2, speed: 1.0, tip: { a: 0, b: 0 } });
+  const events = [];
+  // 三颗球相距约 1 米、相对速度 2.8 m/s，一颗子步不够碰面，跑到撞上为止
+  for (let i = 0; i < 120 && !events.some((e) => e.type === 'ball'); i++) {
+    stepWorld(w, 1 / 120, events);
+  }
+  const hits = events.filter((e) => e.type === 'ball');
+  assert.ok(hits.length > 0, '三颗球对着跑，必须至少发生一次相撞');
+});
+
 test('一杆到底：所有球停下，时间有限，事件流按时间单调', () => {
   const cue = createBall('cue', 0.6, 0.635);
   const obj = createBall('b1', 1.9, 0.635, { number: 1 });

@@ -316,8 +316,18 @@ function findFirstEvent(world, horizon) {
   let best = null;
   const { balls, table } = world;
 
-  for (const b of balls) {
-    if (b.pocketed || !isMoving(b)) continue;
+  // 每子步都要跑一遍，是全流程最热的地方（CPU profile 里占 30%）。
+  // 旧写法对每一对球都算一次 TOI：15 颗球就是 105 对，而大多数时刻只有一颗在动。
+  // 这里先挑出「在动」的那几颗，只让运动球去和别的球求交——静止球之间永远不会相撞。
+  // 代价是一次 O(n) 的筛选，换掉 O(n²) 的求交。
+  const moving = [];
+  for (let i = 0; i < balls.length; i++) {
+    const b = balls[i];
+    if (!b.pocketed && isMoving(b)) moving.push(b);
+  }
+  if (!moving.length) return null;
+
+  for (const b of moving) {
     for (const c of table.cushions) {
       const t = cushionTOI(b, c, horizon);
       if (t < 0) continue;
@@ -329,13 +339,12 @@ function findFirstEvent(world, horizon) {
     }
   }
 
-  for (let i = 0; i < balls.length; i++) {
-    const a = balls[i];
-    if (a.pocketed) continue;
-    for (let j = i + 1; j < balls.length; j++) {
+  // 两颗都在动时这一对会被看两遍（a→b 一次、b→a 一次），取最小值的结果不变；
+  // 换来的是不必再为「谁是第几号」做一次查表。
+  for (const a of moving) {
+    for (let j = 0; j < balls.length; j++) {
       const b = balls[j];
-      if (b.pocketed) continue;
-      if (!isMoving(a) && !isMoving(b)) continue;
+      if (b === a || b.pocketed) continue;
       const t = ballTOI(a, b, horizon);
       if (t >= 0 && (best === null || t < best.t)) {
         best = { t, kind: 'ball', a, b };
@@ -506,8 +515,18 @@ function resolveBallBall(a, b, events) {
  */
 function settlePockets(world, events) {
   const { table, balls } = world;
+  const { minX, maxX, minY, maxY } = table.bounds;
   for (const b of balls) {
     if (b.pocketed) continue;
+
+    // 静止且已经在台面内的球：既不可能刚滚进袋口，也不可能撞在护角上。
+    // 这个函数每子步都要把所有球过一遍，而绝大多数时刻只有一两颗在动——
+    // 省掉静止球的那次 pocketAt（6 个袋口各一次距离判断）和越界判断。
+    // 唯一的边界情形是「球在某个子步里刚好停在捕获圆内」：那一步它就会被判进袋，
+    // 所以下一子步进来时它要么已 pocketed，要么在圆外。
+    if (b.vx === 0 && b.vy === 0 && b.x >= minX && b.x <= maxX && b.y >= minY && b.y <= maxY) {
+      continue;
+    }
 
     const p = table.pocketAt(b.x, b.y);
     if (p) {
@@ -523,7 +542,6 @@ function settlePockets(world, events) {
     // 弹回来的方向由入射角决定——贴库薄球到底是被弹回台面还是滚进袋，
     // 差的就是这一下。这里复用库边响应，只换恢复系数（袋角软得多）并关掉侧旋增益
     // （护角是粗糙实心橡皮，侧旋在那吃不住力）。
-    const { minX, maxX, minY, maxY } = table.bounds;
     const rails = [];
     if (b.x < minX) rails.push({ axis: 'x', pos: 0, normal: { x: 1, y: 0 } });
     else if (b.x > maxX) rails.push({ axis: 'x', pos: table.length, normal: { x: -1, y: 0 } });
