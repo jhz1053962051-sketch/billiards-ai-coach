@@ -355,13 +355,19 @@ function verifyAndTune(table, balls, cueId, targetId, pocketId, baseAim, tip, se
         const impact = speed * Math.max(0.55, 1 - Math.abs(candidateTip.b - tip.b) * 0.14);
         return Math.min(SPEED.break, Math.max(SPEED.min, impact));
       });
+      // 这两项与速度无关，先算好：每个速度档都要用，而速度档有一摞。
+      const tipCost = Math.abs(candidateTip.b) * 0.2 + Math.abs(candidateTip.a ?? 0) * 0.5;
       for (const speed of candidateSpeeds) {
+        // 走位分已经到顶（100）时，这一档再试也白试：quality 不可能更高，
+        // 而 effort 里 speed 越大越差。既然它已经不比自己手里的便宜，更快的档只会更贵。
+        // 这是排序键本身的性质，不是近似。
+        if (best !== null && best.quality === 100 && speed + tipCost >= best.effort) break;
         const result = tryOnce(speed, 0, candidateTip);
         if (!result.ok) continue;
         const positioning = assessPosition(table, result.balls, cueId, targetId, allow);
         const quality = positionQuality(positioning);
         // 同样的停位，不加塞更好打；只有加塞能换到更好的位置时才值得用。
-        const effort = speed + Math.abs(candidateTip.b) * 0.2 + Math.abs(candidateTip.a ?? 0) * 0.5;
+        const effort = speed + tipCost;
         if (
           !best ||
           quality > best.quality + 1e-8 ||
