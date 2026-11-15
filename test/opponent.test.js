@@ -247,11 +247,71 @@ function lookaheadGame() {
   return g;
 }
 
-test('两步：为了把对方藏起来，可以换一个"稍难但打完之后更难打"的球', () => {
+function threePlyGame() {
+  // 探针挑出来的固定布局：两步与三步在这里选的球不一样
+  const spec = [
+    { n: 0, x: 1.637, y: 0.641 },
+    { n: 1, x: 0.998, y: 0.352 },
+    { n: 2, x: 0.734, y: 0.802 },
+    { n: 3, x: 1.156, y: 0.747 },
+    { n: 4, x: 1.667, y: 0.465 },
+    { n: 5, x: 0.245, y: 0.296 },
+  ];
+  const balls = spec.map((s) =>
+    createBall(s.n === 0 ? 'cue' : `b${s.n}`, s.x, s.y, { number: s.n, ...ballStyle(s.n) })
+  );
+  createWorld(table, balls);
+  const g = createGame(table, balls, { kind: 'eightball', names: ['我', '对手'] });
+  g.breakShot = false;
+  return g;
+}
+
+test('三步：会算「对手回我一杆之后」我有多难打，并且因此换方案', () => {
+  const g = threePlyGame();
+  const allow = legalTargetNumbers(g, numbersOnTable(g.balls));
+  const two = choosePlan(table, g, { allow, plies: 2 });
+  const three = choosePlan(table, g, { allow });
+  assert.ok(two.plan && three.plan);
+
+  const keyOf = (p) => `${p.targetNumber}@${p.pocketId}`;
+  assert.notEqual(
+    keyOf(two.plan),
+    keyOf(three.plan),
+    '这个布局是专门找出来的：两步选 3@c-tl，三步选 1@c-bl，两个一样说明这条测试失效了'
+  );
+
+  const chosen = three.scores.find(
+    (s) => s.targetNumber === three.plan.targetNumber && s.pocketId === three.plan.pocketId
+  );
+  assert.equal(chosen.plies, 3, '被选中的方案必须真的算过第三层');
+  assert.ok(
+    typeof chosen.myEase === 'number' && chosen.myEase < 60,
+    `算过第三层就该知道我很难接着打，实际 myEase=${chosen.myEase}`
+  );
+
+  const twoChosen = two.scores[0];
+  assert.equal(twoChosen.myEase, null, '两步不看这一层，不许假装看过');
+});
+
+test('三步：只有前两名进深度重排，后面的还是两步打分', () => {
+  const g = threePlyGame();
+  const r = choosePlan(table, g, {});
+  const deep = r.scores.filter((s) => s.plies === 3).length;
+  assert.equal(deep, Math.min(2, r.scores.length), '深度那一层只对前两名做，否则每回合要多花一倍时间');
+});
+
+test('三步：结果可复现，不看运气', () => {
+  const g = threePlyGame();
+  const a = choosePlan(table, g, {});
+  const b = choosePlan(table, g, {});
+  assert.deepEqual(a.scores, b.scores, '同一个局面两次选杆的打分必须一致');
+});
+
+test('两步（plies: 2）：为了把对方藏起来，可以换一个"稍难但打完之后更难打"的球', () => {
   const g = lookaheadGame();
   const allow = legalTargetNumbers(g, numbersOnTable(g.balls));
   const base = planShot(table, g, { allow });
-  const look = choosePlan(table, g, { allow });
+  const look = choosePlan(table, g, { allow, plies: 2 });
 
   assert.ok(base.plan && look.plan);
   assert.notEqual(
