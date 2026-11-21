@@ -7,6 +7,13 @@
 //     （这是 table.js 头注释里写明的设计约束）；
 //   · pocketAt / insideBounds / cushionAt 的判定边界一律是「含端点」，差 1e-9 就翻面。
 //
+// 三处曾「实现与注释错位」的语义，本轮各自定死一边并写进 table.js 的注释，
+// 下面的用例逐条锁住（改实现或改注释都会让这里变红）：
+//   · pocketAt 闭圆、边界只沿轴向精确（table.js:160）；
+//   · insideBounds 只判 bounds 矩形、不查袋口（table.js:181）；
+//   · cushionAt 的 pos 用 === 精确比较（table.js:204）；
+//   · createTable 拒绝几何上画不出台面的参数，不再静默接受反向库边段（table.js:31）。
+//
 // 所以任何一处几何量被改动（改半径、改 jaw、改袋位、改库边端点），这里都会立刻红。
 
 import test from 'node:test';
@@ -199,8 +206,8 @@ test('pocketAt：圆心与半径边界都算进袋（<= 含端点），出圆 1e
   assert.equal(t.pocketAt(corner.captureR, 0), corner);
   assert.equal(t.pocketAt(0, corner.captureR), corner);
   // 对角线方向：|dx|=|dy|≈0.7r（圆内），不能被外接正方形预筛误杀。
-  // 注意不能取恰好 r/√2：2*(r/√2)² 可能比 r² 大 1 ulp，那一点实际落在圆外，
-  // 边界只有沿轴向才是精确可判的。
+  // 契约已明确为「闭圆、边界只沿轴向精确」，见 table.js:160：不能取恰好 r/√2，
+  // 2*(r/√2)² 可能比 r² 大 1 ulp，那一点的两个浮点坐标真实距离确实略大于 r。
   const diag = corner.captureR * 0.7;
   assert.equal(t.pocketAt(diag, diag), corner);
 
@@ -267,14 +274,24 @@ test('insideBounds：tol 正数放宽、负数收缩（solver 用 -R/2 收缩）
   assert.equal(t.insideBounds(b.minX, b.minY), t.insideBounds(b.minX, b.minY, 0));
 });
 
-test('insideBounds：注释说「不含袋口」，但实现不查袋口（已知语义错位）', () => {
+test('insideBounds：只判 bounds 矩形、不查袋口（契约已明确，见 table.js:181）', () => {
   const t = createTable('pool9');
   const R = t.ballRadius;
-  // (R,R) 明明落在左下角袋的捕获圆里（见上一条 pocketAt 断言），insideBounds 仍返回 true。
-  // 这不是本测试引入的行为，是现有实现与注释不一致：insideBounds 只判矩形，不管袋口。
-  // 物理核不靠它判进袋（用的是 pocketAt），所以现状不影响落袋；如实钉住，等有人修注释或实现。
+  // 契约：insideBounds 回答的是"球心在矩形可行域内吗"，进袋由 pocketAt 回答。
+  // (R,R) 同时落在左下角袋的捕获圆里，两条判定给出不同答案——这是设计如此，不是错位：
+  //   · solver.js:818 拿它当组合球假想点的矩形检查（tol=-R/2），加袋口排除会丢候选；
+  //   · rules.js:867 拿它当持球摆位合法性，加袋口排除会改规则。
+  // 所以这里断言的是"两者答案不同且各自都符合注释"，任何一边被改动都会红。
   assert.equal(t.pocketAt(R, R)?.id, 'c-bl');
   assert.equal(t.insideBounds(R, R), true);
+
+  // 反向锁：台面中部两者都判"在内/不在袋里"，说明差异只在袋口附近
+  const midX = t.length / 2;
+  const midY = t.width / 2;
+  assert.equal(t.pocketAt(midX, midY), null);
+  assert.equal(t.insideBounds(midX, midY), true);
+  // 出矩形就一定 false，与袋口无关
+  assert.equal(t.insideBounds(t.bounds.minX - 1e-6, t.bounds.minY - 1e-6), false);
 });
 
 test('nearestPocket：返回最近的袋心与欧氏距离，与逐袋硬算一致', () => {
@@ -339,7 +356,9 @@ test('cushionAt：闭区间含两端，中袋缺口与角袋缺口都返回 null
   // 位置对但轴不对 / 位置不对
   assert.equal(t.cushionAt('x', 0.5, 1), null);
   assert.equal(t.cushionAt('y', 0.5, 1), null);
-  // pos 是严格相等比较，浮点抖动过不去（不做容差匹配）
+  // pos 是严格相等比较（契约见 table.js:204）：pos 只取库面所在的台面边界值
+  // 0 / t.length / t.width，不是球坐标重算出来的量，所以这里不做容差匹配。
+  // 这条用例锁的是"传进去一个算出来近似 0 的值，就该判不在库上"。
   assert.equal(t.cushionAt('y', 0.1 + 0.2 - 0.3, 1), null);
 });
 
@@ -379,11 +398,8 @@ test('createTable：未知预设 / null / 袋口不大于球 / 尺寸非正 都�
   assert.equal(custom.cushions.length, 6);
 });
 
-test('已知缺口：参数校验不检查袋口之间是否还留得下库边（线段会反向）', () => {
-  // 校验只要求 cornerJaw/middleJaw > ballRadius，没有要求
-  // halfL - middleJaw > cornerJaw。极端参数下库边段 from > to，
-  // cushionAt 永远命不中，等于这一段库整段消失。如实钉住现状，不在本任务里改语义。
-  const t = createTable({
+test('createTable：反向库边段必须抛错（原「已知缺口」已封，契约见 table.js:31）', () => {
+  const base = {
     id: 'tiny',
     label: '退化台',
     length: 0.3,
@@ -392,8 +408,61 @@ test('已知缺口：参数校验不检查袋口之间是否还留得下库边�
     ballMass: 0.1,
     cornerJaw: 0.12,
     middleJaw: 0.12,
-  });
-  const seg = t.cushions.find((c) => c.id === 'rail-b-l');
-  assert.ok(seg.from > seg.to, '极端参数下库边段会反向');
-  assert.equal(t.cushionAt('y', 0, 0.1), null);
+  };
+  // 上一轮这张台是"能建出来、但 rail-b-l 的 from > to"的：极端参数下库边段反向，
+  // cushionAt 永远命不中，等于这一段库整段消失，球从缺口直接滚出台面。
+  // 现在建台时就抛错，不再静默接受。
+  assert.throws(() => createTable(base), /球台参数非法/);
+
+  // 只违反长库条件（halfL - middleJaw <= cornerJaw），短库仍然合法——隔离出这一条校验
+  assert.throws(
+    () => createTable({ ...base, length: 0.3, width: 0.3, cornerJaw: 0.1, middleJaw: 0.1 }),
+    /halfL - middleJaw .* 必须大于 cornerJaw/
+  );
+  // 恰好相等 = 零长库边段，同样非法
+  assert.throws(
+    () => createTable({ ...base, length: 0.3, width: 1, cornerJaw: 0.05, middleJaw: 0.1 }),
+    /halfL - middleJaw/
+  );
+  // 只违反短库条件（cornerJaw >= W/2）
+  assert.throws(
+    () => createTable({ ...base, length: 1, width: 0.2, cornerJaw: 0.1, middleJaw: 0.03 }),
+    /短库边段会反向/
+  );
+});
+
+test('createTable：袋口重叠 / 装不下球 也抛错，三个预设全部通过新校验', () => {
+  const base = {
+    id: 'custom',
+    label: '自定义台',
+    length: 1,
+    width: 0.5,
+    ballRadius: 0.02,
+    ballMass: 0.1,
+    cornerJaw: 0.03,
+    middleJaw: 0.025,
+  };
+  // 基线合法：否则下面每条都可能被别的原因挡下，测试就抓不到对应的回归
+  assert.doesNotThrow(() => createTable(base));
+
+  // 上下中袋捕获圆相交：W <= 2*middleJaw（此处恰好相等）
+  assert.throws(() => createTable({ ...base, width: 0.4, middleJaw: 0.2 }), /上下中袋捕获圆相交/);
+  // 球心可行域为空：L <= 2R
+  assert.throws(() => createTable({ ...base, length: 0.04 }), /装不下直径/);
+  assert.throws(() => createTable({ ...base, width: 0.04 }), /装不下直径/);
+
+  // 非有限 / 非正：有限性单独成一条，避免 NaN 落到别的比较上给出误导性信息
+  assert.throws(() => createTable({ ...base, length: Infinity }), /length 必须是正的有限数/);
+  assert.throws(() => createTable({ ...base, width: NaN }), /width 必须是正的有限数/);
+  assert.throws(() => createTable({ ...base, cornerJaw: NaN }), /cornerJaw 必须是正的有限数/);
+  assert.throws(() => createTable({ ...base, middleJaw: -0.01 }), /middleJaw 必须是正的有限数/);
+  assert.throws(() => createTable({ ...base, ballRadius: -0.02 }), /ballRadius 必须是正的有限数/);
+
+  // 真实预设 + 合法自定义台：每段库边都必须正向且落在台面跨度内
+  for (const t of [...PRESET_IDS.map((id) => createTable(id)), createTable(base)]) {
+    for (const c of t.cushions) {
+      assert.ok(c.from < c.to, `${t.preset}/${c.id}: 库边段反向（${c.from} >= ${c.to}）`);
+      assert.ok(c.to <= (c.axis === 'x' ? t.width : t.length), `${t.preset}/${c.id}: 线段越出台面`);
+    }
+  }
 });

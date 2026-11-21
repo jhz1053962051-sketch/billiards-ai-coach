@@ -17,6 +17,9 @@ import { TABLE_PRESETS } from './constants.js';
 
 /**
  * 建一张球台。
+ *
+ * 参数不做静默钳制：几何上画不出台面的参数直接抛错。原因见下面校验段的注释。
+ *
  * @param {keyof typeof TABLE_PRESETS|object} preset 预设 id 或自定义参数
  */
 export function createTable(preset = 'pool9') {
@@ -24,8 +27,57 @@ export function createTable(preset = 'pool9') {
   if (!cfg) throw new Error(`未知球台预设: ${preset}`);
 
   const { length: L, width: W, ballRadius: R, cornerJaw, middleJaw } = cfg;
-  if (!(L > 0 && W > 0 && R > 0 && cornerJaw > R && middleJaw > R)) {
+
+  // ── 参数自洽性校验 ──────────────────────────────────────────────────
+  // 必须在建台时抛错，而不是建出一张"看着正常、几何已经坏了"的台：极端参数不会让
+  // 任何一行代码报错，只会让库边段 from > to 反向；线段反向之后 cushionAt 永远
+  // 命不中，那一段库就静默消失，球会从缺口直接滚出台面，而没有任何一处提示。
+  //
+  // 下面每条都只拒绝"几何上画不出台面"的参数。现有全部调用点（三个预设、
+  // demo/app.js 的换台、demo/save.js 的读档、测试里的自定义台）都满足，
+  // 所以这些校验拒绝的是坏数据，不是任何现有玩法。
+  const dims = [
+    ['length', L],
+    ['width', W],
+    ['ballRadius', R],
+    ['cornerJaw', cornerJaw],
+    ['middleJaw', middleJaw],
+  ];
+  for (const [name, v] of dims) {
+    // 有限性先判：NaN/Infinity 参与下面的比较恒为 false，会落到别的检查上给出误导性的报错
+    if (!Number.isFinite(v) || v <= 0) {
+      throw new Error(`球台参数非法：${name} 必须是正的有限数（收到 ${String(v)}）`);
+    }
+  }
+  if (!(cornerJaw > R && middleJaw > R)) {
     throw new Error('球台参数非法：袋口必须比球大');
+  }
+
+  const halfL = L / 2;
+
+  // 球心可行域 bounds 必须非空：minX=R < maxX=L-R
+  if (!(L > 2 * R && W > 2 * R)) {
+    throw new Error(`球台参数非法：台面 ${L}×${W} 装不下直径 ${2 * R} 的球`);
+  }
+  // 短库（rail-l / rail-r）跨度 = W - 2*cornerJaw，必须为正
+  if (!(cornerJaw < W / 2)) {
+    throw new Error(
+      `球台参数非法：cornerJaw ${cornerJaw} 不小于台宽的一半 ${W / 2}，短库边段会反向`
+    );
+  }
+  // 长库左段 = [cornerJaw, halfL - middleJaw]，必须为正。
+  // 这条与"角袋与中袋的捕获圆不相交"是同一个不等式（两袋心距 halfL）。
+  if (!(halfL - middleJaw > cornerJaw)) {
+    throw new Error(
+      `球台参数非法：halfL - middleJaw (${halfL - middleJaw}) 必须大于 cornerJaw (${cornerJaw})，` +
+        '否则长库左段反向、角袋与中袋捕获圆相交'
+    );
+  }
+  // 上下两个中袋的捕获圆（袋心距 W）不能相交
+  if (!(W > 2 * middleJaw)) {
+    throw new Error(
+      `球台参数非法：middleJaw ${middleJaw} 不小于台宽的一半 ${W / 2}，上下中袋捕获圆相交`
+    );
   }
 
   /** @type {Pocket[]} */
@@ -38,7 +90,6 @@ export function createTable(preset = 'pool9') {
     { id: 'm-t', kind: 'middle', x: L / 2, y: W, captureR: middleJaw, captureRSq: middleJaw * middleJaw },
   ];
 
-  const halfL = L / 2;
   /** @type {Cushion[]} */
   const cushions = [
     // 下库 y = 0，被中袋缺口切成两段
@@ -65,7 +116,12 @@ export function createTable(preset = 'pool9') {
     /** 球心允许活动的矩形范围（贴库时球心仍在内侧一个半径处） */
     bounds: { minX: R, maxX: L - R, minY: R, maxY: W - R },
 
-    /** 球心到最近袋心的距离 */
+    /**
+     * 球心到最近袋心的距离。
+     *
+     * 生产代码里零调用点（只有测试在用）；保留是因为它是袋口几何的自检工具，
+     * 测试靠它把"库边端点必须抵到袋口捕获圆"这条约束钉死。
+     */
     nearestPocket(x, y) {
       let best = null;
       let bestSq = Infinity;
@@ -100,6 +156,12 @@ export function createTable(preset = 'pool9') {
      * 正确性：袋口捕获判定本来就是"≤ r"的圆形包含关系，换成平方比较是恒等变换，
      * 不是近似。台球坐标范围（< 4 m）内 dx²+dy² 不可能溢出双精度，
      * 也不存在 Math.hypot 那套溢出保护要解决的场景。
+     *
+     * 边界（契约已明确，见 test/table.test.js 的对应用例）：判定是**闭圆**，
+     * 恰好等于 r 仍算进袋，而且这条只沿轴向精确——45° 方向取 (r/√2, r/√2) 时
+     * 2·(r/√2)² 可能比 r² 大 1 ulp，于是该点落在圆外。那不是判定错误：这两个浮点
+     * 坐标的真实距离确实略大于 r。物理核按 27.5 mm/子步推进，不可能依赖"恰好压线"
+     * 这一测度零集合，所以这里不加容差去放大捕获区（加了反而是没有依据的放宽）。
      */
     pocketAt(x, y) {
       for (let i = 0; i < pockets.length; i++) {
@@ -113,16 +175,44 @@ export function createTable(preset = 'pool9') {
       return null;
     },
 
-    /** 球心是否在台面内（含贴库，不含袋口） */
+    /**
+     * 球心是否在 bounds 矩形内（含贴库，**不查袋口**）。
+     *
+     * "不含袋口"是刻意契约，不是漏检查：这里的语义是"球心落在矩形可行域内"，
+     * 进袋是另一件事，由 pocketAt 判（physics.js 的 settlePockets 每子步用它）。
+     * 两个生产调用点都依赖这条纯矩形语义，改成"再排除袋口"会改变玩法：
+     *
+     *   · solver.js:818 组合球的假想点检查（tol = -R/2）——假想点落在袋口捕获圆
+     *     附近是正常的进攻几何，加袋口排除会把袋口附近的组合球候选整条丢掉，
+     *     求解结果随之改变；
+     *   · rules.js:867 placementAllowed 的持球摆位合法性——加袋口排除就收窄了
+     *     可摆位范围，那是规则变化，不是纠错。
+     *
+     * 所以袋口附近的球"算不算出台"不在这里回答；能否落下由物理核判。
+     *
+     * @param {number} tol 正数放宽、负数收缩（solver 传 -R/2）
+     */
     insideBounds(x, y, tol = 0) {
       return (
         x >= R - tol && x <= L - R + tol && y >= R - tol && y <= W - R + tol
       );
     },
 
-    /** 找到给定库边线段上、给定坐标处的有效库边；不在任何线段上则返回 null（即袋口） */
+    /**
+     * 找到给定库边线段上、给定坐标处的有效库边；不在任何线段上则返回 null（即袋口）。
+     *
+     * pos 按 `===` 精确比较，这是刻意的：pos 是**库面所在的台面边界值**，
+     * 只有 0 / table.length / table.width 三个合法取值，由调用方从台面常量取，
+     * 不是球坐标累加出来的量。用容差比较等于允许"差不多在这条库上"的坐标混进来，
+     * 那会把袋口外的点误判成库边。
+     *
+     * 目前零生产调用点（src/ / demo/ / tools/ 全部 grep 过，只有 table.test.js 在用）：
+     * 库边碰撞走的是 physics.js 自己的 axis/pos 判定，不经过这里。若将来接进物理核，
+     * 传进来的 pos 必须回读 `c.pos` 之类的原值，不要用球坐标重算。
+     */
     cushionAt(axis, pos, along) {
-      for (const c of cushions) {
+      for (let i = 0; i < cushions.length; i++) {
+        const c = cushions[i];
         if (c.axis === axis && c.pos === pos && along >= c.from && along <= c.to) {
           return c;
         }
