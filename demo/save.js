@@ -13,12 +13,19 @@
 //   players —— 名字、分组、连续犯规、是否已被提醒两犯（三犯判负的前提）
 //   turn / breakShot / open / ballInHand / requiresRerack / phase / winner / shots
 //
-// 不存的：
-//   log     —— 战绩流水，重新开一局就该重来；留着反而让"第 N 杆"对不上。
-//   history —— 撤销栈。存了会让人以为能一路退到上一局的起点。
+// 从 v2 起，「对局记录」（log）与「撤销栈」（history）也一起存：
+//   log     —— 进场时压成 [杆号, 谁打的, 文案, 犯规码] 四元组，不写字段名。
+//   history —— 交给 state.js 的 packHistory 压成每步一行，坐标只留 3 位小数
+//              （1 mm），且带体积预算，超了从最旧的开始丢并记下丢了几步。
+// 这两样以前是故意不存的，理由是「重新开一局就该重来」；真机实测发现代价更
+// 大——刷新页面读档之后「对局记录」是空的、撤销按钮是灰的，看着像读档失败。
+//
+// 向后兼容：v1 的老存档没有这两个字段，读到就当空历史（读档时提示一句），
+// 不许因为它没有就整份丢掉。
 
 import { createTable } from '../src/table.js';
 import { GAME_KINDS } from '../src/rules.js';
+import { packHistory } from './state.js';
 
 const KEY = 'pool-ai-coach/game/v1';
 
@@ -27,6 +34,72 @@ const MAX_NUMBER = 21;
 
 function isFiniteNumber(v) {
   return typeof v === 'number' && Number.isFinite(v);
+}
+
+/**
+ * 战绩流水：存档里是 [杆号, 谁打的, 文案, 犯规码] 四元组（省掉键名）；
+ * 也认早期手写/手工编辑的 {shot, shooter, summary, fouls} 对象形状。
+ * 单条读不懂就跳过那一条，绝不因为一条流水丢掉整份存档。
+ */
+function readLog(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const e of raw) {
+    if (Array.isArray(e)) {
+      out.push({
+        shot: isFiniteNumber(e[0]) ? e[0] : out.length + 1,
+        shooter: e[1] === 1 ? 1 : 0,
+        summary: typeof e[2] === 'string' ? e[2] : '',
+        fouls: Array.isArray(e[3]) ? e[3].filter((c) => typeof c === 'string') : [],
+      });
+    } else if (e && typeof e === 'object') {
+      out.push({
+        shot: isFiniteNumber(e.shot) ? e.shot : out.length + 1,
+        shooter: e.shooter === 1 ? 1 : 0,
+        summary: typeof e.summary === 'string' ? e.summary : '',
+        fouls: Array.isArray(e.fouls) ? e.fouls.filter((c) => typeof c === 'string') : [],
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * 杆史载荷的轻校验：结构对不上就整块当作没有（当空历史处理）。
+ * 这里只保证「装进 state.js 的 unpackHistory 不会炸」，不做数值合理性检查——
+ * 那是解码之后按当前局面的球序还原时才可能发现的事，届时丢那一步即可。
+ */
+function readHistory(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const ids = Array.isArray(raw.b) ? raw.b.filter((id) => typeof id === 'string') : null;
+  if (!ids || ids.length === 0 || !Array.isArray(raw.s)) return null;
+  const num = (v, fallback = 0) => (isFiniteNumber(v) ? v : fallback);
+  const pair = (v) => (Array.isArray(v) ? [num(v[0]), num(v[1])] : [0, 0]);
+  const steps = [];
+  for (const step of raw.s) {
+    if (!step || typeof step !== 'object' || !Array.isArray(step.x)) continue;
+    const x = step.x;
+    if (x.length !== ids.length * 3 || !x.every(isFiniteNumber)) continue;
+    const compact = {
+      s: num(step.s),
+      t: step.t === 1 ? 1 : 0,
+      k: step.k ? 1 : 0,
+      o: step.o ? 1 : 0,
+      h: num(step.h),
+      r: step.r ? 1 : 0,
+      e: step.e ? 1 : 0,
+      w: num(step.w, -1),
+      g: pair(step.g),
+      f: pair(step.f),
+      n: pair(step.n),
+      l: num(step.l),
+      x: x.slice(),
+    };
+    if (Array.isArray(step.c)) compact.c = [num(step.c[0]), num(step.c[1]), num(step.c[2]), num(step.c[3])];
+    steps.push(compact);
+  }
+  if (steps.length === 0) return null;
+  return { b: ids, s: steps, d: isFiniteNumber(raw.d) ? Math.max(0, Math.floor(raw.d)) : 0 };
 }
 
 /**
@@ -139,16 +212,28 @@ export function sanitize(raw) {
     winner: raw.winner === 0 || raw.winner === 1 ? raw.winner : null,
     shots: isFiniteNumber(raw.shots) ? Math.max(0, Math.floor(raw.shots)) : 0,
     snooker,
+    // 老存档没有这两项：读到的是 [] 与 null，读档流程据此提示「更早的步数未随
+    // 存档保存」，而不是把它当坏档。
+    log: readLog(raw.log),
+    history: readHistory(raw.history),
     // 存下来是为了让别的标签页能判断「这份存档是不是我看过的那个」。
     // 不合法就当 0（比任何真实时间戳都旧），不会因此丢掉整份存档。
     savedAt: isFiniteNumber(raw.savedAt) ? raw.savedAt : 0,
   };
 }
 
-/** 把一局压成可存的形状（只留需要的字段，别把 table 对象整个塞进去）。 */
-export function serialize(game, now = Date.now()) {
-  return {
-    v: 1,
+/**
+ * 把一局压成可存的形状（只留需要的字段，别把 table 对象整个塞进去）。
+ *
+ * @param {object} game
+ * @param {number} [now] 写入时间戳
+ * @param {object[]} [history] 撤销栈（app 的 state.history）；空就一个字节都不写
+ */
+export function serialize(game, now = Date.now(), history = []) {
+  const log = Array.isArray(game.log) ? game.log : [];
+  const packed = packHistory(history);
+  const out = {
+    v: 2,
     savedAt: now,
     table: { id: game.table.preset },
     balls: game.balls.map((b) => ({
@@ -181,6 +266,11 @@ export function serialize(game, now = Date.now()) {
       ? { scores: game.snooker.scores.slice(), ballOn: game.snooker.ballOn, reds: game.snooker.reds }
       : null,
   };
+  // 空的两个键一个都不写：开局第一次存档的体积要尽量小，而且「没有历史」
+  // 这件事本身就该能从键的缺席上看出来。
+  if (log.length > 0) out.log = log.map((e) => [e.shot, e.shooter, e.summary, e.fouls ?? []]);
+  if (packed.s.length > 0) out.history = packed;
+  return out;
 }
 
 /**
@@ -197,10 +287,10 @@ function defaultStore() {
 }
 
 /** 写存档。存储不可用（隐私模式 / 配额满）时返回 false，不抛。 */
-export function writeSave(game, store = defaultStore(), { now = Date.now() } = {}) {
+export function writeSave(game, store = defaultStore(), { now = Date.now(), history = [] } = {}) {
   if (!store) return false;
   try {
-    store.setItem(KEY, JSON.stringify(serialize(game, now)));
+    store.setItem(KEY, JSON.stringify(serialize(game, now, history)));
     return true;
   } catch {
     return false;

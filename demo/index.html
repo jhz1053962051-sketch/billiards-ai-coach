@@ -890,6 +890,23 @@
     header nav { margin-left: 0; }
     main { flex: none; flex-direction: column; min-height: auto; }
     #stage { flex: none; height: min(58vh, 500px); min-height: 300px; padding: 16px; }
+    /* 力度条：窄屏下从台面左侧挪到台面下方，改成横铺的一条。
+       轨道本身必须保持竖直——app.js 用 track 的 rect.height 和 clientY 算力度，
+       还往 fill/handle 写 height%/bottom%，横过来就得改 JS，那是这一轮的禁区。
+       所以只把外层换成行布局、把轨道压短，拖拽的几何一点没变。 */
+    .cue-power-meter {
+      position: static; transform: none; width: auto;
+      margin: 10px 12px 6px; flex-direction: row;
+      align-items: center; justify-content: space-between; gap: 14px;
+      padding: 8px 14px; border-radius: 14px;
+    }
+    .power-meter-header { width: auto; flex: none; align-items: flex-start; gap: 2px; }
+    .power-meter-body { flex: 1 1 auto; width: auto; padding: 0; }
+    .power-track { width: 22px; height: 104px; }
+    /* 渐变原本按 220px 写死，轨道压短后不跟着缩就只剩最底下那段绿色 */
+    .power-fill { background-size: 100% 100%; }
+    .power-meter-presets { width: auto; flex: none; margin-top: 0; }
+    .power-meter-chip { padding: 5px 10px; font-size: 11px; }
     aside { width: 100%; max-height: none; overflow: visible; border-left: 0; border-top: 1px solid var(--line); padding: 14px; }
     footer { flex-wrap: wrap; gap: 4px 16px; padding: 8px 14px; }
   }
@@ -936,38 +953,15 @@
 
 <main>
   <div id="stage">
-    <!-- 经典游戏级垂直拉杆力度槽 (参考 8 Ball Pool / 腾讯桌球) -->
-    <div id="cuePowerMeter" class="cue-power-meter" title="拖拽或点击拉杆调整击球力度 (快捷键: ↑ / ↓)">
-      <div class="power-meter-header">
-        <span class="power-meter-title">击球力度</span>
-        <div class="power-meter-badge-row">
-          <span id="powerMeterLevel" class="power-tier-badge">轻力</span>
-          <span id="powerMeterPct" class="power-pct-text">27%</span>
-        </div>
-        <div id="powerMeterSpeed" class="power-speed-text">2.20 m/s</div>
-      </div>
-      <div class="power-meter-body">
-        <div id="powerMeterTrack" class="power-track">
-          <div id="powerMeterFill" class="power-fill"></div>
-          <div class="power-scale-marks">
-            <span class="scale-mark mark-100" data-pct="100"><i>爆</i></span>
-            <span class="scale-mark mark-75" data-pct="75"><i>发</i></span>
-            <span class="scale-mark mark-50" data-pct="50"><i>中</i></span>
-            <span class="scale-mark mark-25" data-pct="25"><i>轻</i></span>
-          </div>
-          <div id="powerMeterHandle" class="power-handle">
-            <div class="handle-grip"></div>
-          </div>
-        </div>
-      </div>
-      <div class="power-meter-presets">
-        <button type="button" class="power-meter-chip" data-speed="2.05" title="轻力 25% (2.05 m/s)">轻</button>
-        <button type="button" class="power-meter-chip" data-speed="3.55" title="中力 50% (3.55 m/s)">中</button>
-        <button type="button" class="power-meter-chip" data-speed="5.10" title="发力 75% (5.10 m/s)">发</button>
-        <button type="button" class="power-meter-chip" data-speed="6.60" title="爆杆 100% (6.60 m/s)">爆</button>
-      </div>
+    <!-- 自动出杆提示条：撤销 / 读档之后先停住对手，免得「刚恢复的局面 1 秒后
+         自己变了」被当成读档失败。显示与否、文案、要不要给「继续」按钮全由
+         app.js 的 updateAutoPauseBar 决定（判断本身在 state.js 的 autoPauseHint，
+         那一条要能在 Node 里单测）。
+         定位一律走行内样式：这次只加结构，不动 <style> 里的布局规则。 -->
+    <div id="autoPauseBar" class="hidden" style="position:absolute;left:50%;top:10px;transform:translateX(-50%);z-index:6;display:flex;align-items:center;gap:10px;padding:8px 14px;border-radius:999px;background:rgba(15,23,42,.92);border:1px solid rgba(245,158,11,.55);color:#fef3c7;font-size:13px;line-height:1.4;max-width:calc(100% - 32px);box-shadow:0 8px 24px rgba(0,0,0,.35);">
+      <span id="autoPauseText">已暂停对手自动出杆 —— 点此继续</span>
+      <button id="autoPauseResume" type="button" style="padding:4px 10px;border-radius:999px;border:1px solid rgba(245,158,11,.7);background:rgba(245,158,11,.18);color:#fde68a;font-size:13px;cursor:pointer;white-space:nowrap;">点此继续</button>
     </div>
-
     <div class="stage-controls">
       <button id="viewToggle" class="view-toggle-btn" title="切换第一人称视角 / 俯视视角 (快捷键: V)">
         <span class="vt-icon">🎥</span>
@@ -976,6 +970,41 @@
       </button>
     </div>
     <canvas id="table"></canvas>
+  </div>
+
+  <!-- 经典游戏级垂直拉杆力度槽 (参考 8 Ball Pool / 腾讯桌球)。
+       放在 #stage 之外、main 之内：宽屏下 main 与 #stage 同起点同高度，absolute
+       定位算出来的位置与放在 #stage 里分毫不动；窄屏下 main 变成纵向流，它就落到
+       台面下方，不再压住球桌。真正的窄屏样式在 @media (max-width: 900px) 里。 -->
+  <div id="cuePowerMeter" class="cue-power-meter" title="拖拽或点击拉杆调整击球力度 (快捷键: ↑ / ↓)">
+    <div class="power-meter-header">
+      <span class="power-meter-title">击球力度</span>
+      <div class="power-meter-badge-row">
+        <span id="powerMeterLevel" class="power-tier-badge">轻力</span>
+        <span id="powerMeterPct" class="power-pct-text">27%</span>
+      </div>
+      <div id="powerMeterSpeed" class="power-speed-text">2.20 m/s</div>
+    </div>
+    <div class="power-meter-body">
+      <div id="powerMeterTrack" class="power-track">
+        <div id="powerMeterFill" class="power-fill"></div>
+        <div class="power-scale-marks">
+          <span class="scale-mark mark-100" data-pct="100"><i>爆</i></span>
+          <span class="scale-mark mark-75" data-pct="75"><i>发</i></span>
+          <span class="scale-mark mark-50" data-pct="50"><i>中</i></span>
+          <span class="scale-mark mark-25" data-pct="25"><i>轻</i></span>
+        </div>
+        <div id="powerMeterHandle" class="power-handle">
+          <div class="handle-grip"></div>
+        </div>
+      </div>
+    </div>
+    <div class="power-meter-presets">
+      <button type="button" class="power-meter-chip" data-speed="2.05" title="轻力 25% (2.05 m/s)">轻</button>
+      <button type="button" class="power-meter-chip" data-speed="3.55" title="中力 50% (3.55 m/s)">中</button>
+      <button type="button" class="power-meter-chip" data-speed="5.10" title="发力 75% (5.10 m/s)">发</button>
+      <button type="button" class="power-meter-chip" data-speed="6.60" title="爆杆 100% (6.60 m/s)">爆</button>
+    </div>
   </div>
   <aside>
     <!-- 练习模式 -->
@@ -991,6 +1020,16 @@
         <div id="advice" class="empty">点「求解最佳方案」开始。</div>
         <div id="verdict"></div>
         <div id="verdictNote" class="verdict-note"></div>
+      </div>
+
+      <!-- 备选路线紧跟在「AI 击球战术」下面，不排在专项训练之后：这是教练给出的
+           第二层价值（换一条路线怎么打），原来要往下滚才看得到，1440×900 首屏外。
+           顺序调整纯属排版，卡片内容与 id 都没动。 -->
+      <div class="card alts-card" style="margin-bottom:12px">
+        <h2>备选进球路线</h2>
+        <!-- 鼠标悬停有变色，触屏没有；不写一句话，手机上看着就是一列文字 -->
+        <div class="hint" style="margin-bottom:6px">点某一条就换成那个方案（球杆会跟着转过去）。</div>
+        <div id="alts" class="empty">—</div>
       </div>
 
       <div class="card" style="margin-bottom:12px;border-left:3px solid #34d399">
@@ -1072,13 +1111,6 @@
           <div id="practiceHistory" class="log empty">—</div>
           <p class="hint">只保存在本机浏览器。容错分组按求解器给出的角度统计，不代表自动测得的个人瞄准误差。</p>
         </details>
-      </div>
-
-      <div class="card alts-card" style="margin-bottom:12px">
-        <h2>备选进球路线</h2>
-        <!-- 鼠标悬停有变色，触屏没有；不写一句话，手机上看着就是一列文字 -->
-        <div class="hint" style="margin-bottom:6px">点某一条就换成那个方案（球杆会跟着转过去）。</div>
-        <div id="alts" class="empty">—</div>
       </div>
 
       <div class="card tune-card" style="margin-bottom:12px">

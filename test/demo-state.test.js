@@ -12,24 +12,32 @@ import assert from 'node:assert/strict';
 
 import { createTable } from '../src/table.js';
 import { createBall } from '../src/physics.js';
-import { createGame, numbersOnTable, legalTargetNumbers } from '../src/rules.js';
+import { cloneGame, createGame, numbersOnTable, legalTargetNumbers } from '../src/rules.js';
 
 import {
   HISTORY_LIMIT,
+  autoPauseHint,
   captureBallFrame,
   clamp,
   copyBallsForShot,
   currentAim,
   describeManualShot,
   getPowerTier,
+  packHistory,
   practiceHint,
   practiceReady,
   pushHistoryEntry,
+  reduceAutoPause,
   restoreGameState,
   restorePositions,
+  saveCoord,
+  shouldAutoShoot,
   snapshotPositions,
   undoLabel,
+  unpackHistory,
+  utf8Bytes,
 } from '../demo/state.js';
+import { readSave, sanitize, serialize, writeSave } from '../demo/save.js';
 
 const table = createTable('pool9');
 
@@ -542,4 +550,272 @@ test('restoreGameState：存档里没有 snooker 就不动原有的那份', () =
     shots: 1,
   });
   assert.deepEqual(game.snooker.scores, before);
+});
+
+// ------------------------------------------------------- 存档里的杆史（v2）
+
+/**
+ * 造一段能当撤销栈用的历史：每步存「打这一杆之前」的局面，
+ * 再推进出一个「打完之后」的新局面，返回 { history, game: 最新局面 }。
+ * 母球坐标故意留到 5 位小数，用来验证存档只对齐到 3 位、而不是逐位相同。
+ */
+function makeHistory(steps, limit = 100) {
+  const history = [];
+  let cur = makeGame(0);
+  for (let i = 0; i < steps; i += 1) {
+    pushHistoryEntry(history, cur, limit);
+    const pre = history[history.length - 1];
+    assert.equal(pre.shots, i, '撤销栈里存的是「这一杆之前」');
+
+    const next = cloneGame(pre);
+    next.shots = i + 1;
+    next.turn = (i + 1) % 2;
+    next.balls[0].x += 0.03714;
+    next.balls[0].y += 0.01111;
+    const victim = next.balls[1 + (i % 2)];
+    victim.pocketed = true;
+    victim.pocket = 'c-bl';
+    next.log.push({ shot: i + 1, shooter: i % 2, summary: `第 ${i + 1} 杆 · 没有球进袋`, fouls: [] });
+    cur = next;
+  }
+  return { history, game: cur };
+}
+
+/** 内存版 localStorage，够 writeSave / readSave 用。 */
+function memoryStore() {
+  const data = new Map();
+  return {
+    getItem: (key) => (data.has(key) ? data.get(key) : null),
+    setItem: (key, value) => data.set(key, String(value)),
+    removeItem: (key) => data.delete(key),
+  };
+}
+
+test('packHistory / unpackHistory：往返等价，球位只对齐到 3 位小数', () => {
+  const { history, game } = makeHistory(4);
+  const packed = packHistory(history);
+
+  assert.equal(packed.d, 0, '没超预算不该丢步');
+  assert.equal(packed.s.length, 4);
+  assert.deepEqual(packed.b, game.balls.map((b) => b.id), '球顺序按 id 表固定，不用每步重复写');
+
+  // 走一遍真实的序列化/反序列化：数组编码不能中途变成别的东西
+  const { entries, dropped } = unpackHistory(JSON.parse(JSON.stringify(packed)), game);
+  assert.equal(dropped, 0);
+  assert.equal(entries.length, 4);
+
+  for (let i = 0; i < entries.length; i += 1) {
+    const want = history[i];
+    assert.equal(entries[i].shots, want.shots);
+    assert.equal(entries[i].turn, want.turn);
+    assert.deepEqual(
+      entries[i].players.map((p) => [p.name, p.group, p.fouls]),
+      want.players.map((p) => [p.name, p.group, p.fouls]),
+      '比分/分组/犯规要跟着杆史一起还原',
+    );
+    assert.equal(entries[i].log.length, want.log.length);
+
+    for (let j = 0; j < want.balls.length; j += 1) {
+      const got = entries[i].balls[j];
+      const src = want.balls[j];
+      assert.equal(got.id, src.id);
+      // 3 位小数：不逐位相同，但误差不超过 0.5mm，且正好落在 saveCoord 上
+      assert.ok(Math.abs(got.x - src.x) <= 0.0005 + 1e-9, `x 误差越界：${got.x} vs ${src.x}`);
+      assert.ok(Math.abs(got.y - src.y) <= 0.0005 + 1e-9, `y 误差越界：${got.y} vs ${src.y}`);
+      assert.equal(got.x, saveCoord(src.x));
+      assert.equal(got.y, saveCoord(src.y));
+      assert.equal(got.pocketed, src.pocketed);
+      assert.equal(got.pocket ?? null, src.pocket ?? null);
+    }
+  }
+
+  // 最新一步的母球坐标有 5 位小数（夹具故意加的），存进去必须被对齐到 3 位
+  const last = history.length - 1;
+  assert.notEqual(
+    entries[entries.length - 1].balls[0].x,
+    history[last].balls[0].x,
+    '源坐标有 5 位小数，存进去必须被对齐',
+  );
+});
+
+test('packHistory：超过体积预算时从最旧的开始丢，并记下丢了几步', () => {
+  const { history } = makeHistory(10);
+  const full = packHistory(history);
+  const tight = packHistory(history, { budget: Math.floor(full.bytes / 2) });
+
+  assert.ok(tight.bytes <= Math.floor(full.bytes / 2), `预算内还有 ${tight.bytes} > ${Math.floor(full.bytes / 2)}`);
+  assert.ok(tight.s.length < 10, '预算减半必须真的丢步');
+  assert.equal(tight.d, 10 - tight.s.length, '丢的步数要如实上报，读档后才能提示用户');
+  assert.equal(tight.b.length, full.b.length, '球 id 表不属于可裁剪部分');
+
+  // 丢的是最旧的：留下的第一步应当是原始历史里的第 d 步
+  const { entries } = unpackHistory(tight, history[history.length - 1]);
+  assert.equal(entries[0].shots, history[10 - tight.s.length].shots);
+  assert.equal(entries[entries.length - 1].shots, history[9].shots, '最新一步必须留着');
+});
+
+test('packHistory：只保留最近 HISTORY_LIMIT 步，多出来的算丢掉', () => {
+  const { history } = makeHistory(HISTORY_LIMIT + 5);
+  assert.equal(history.length, HISTORY_LIMIT + 5, '夹具本身要够长');
+
+  const packed = packHistory(history);
+  assert.equal(packed.s.length, HISTORY_LIMIT);
+  assert.equal(packed.d, 5);
+  const { entries, dropped } = unpackHistory(packed, history[history.length - 1]);
+  assert.equal(dropped, 5);
+  assert.equal(entries[0].shots, 5, '丢的是最旧五步');
+  assert.equal(entries[entries.length - 1].shots, HISTORY_LIMIT + 4);
+});
+
+test('packHistory：一步都没有时给空载荷，不写空壳', () => {
+  const packed = packHistory([]);
+  assert.deepEqual(packed.s, []);
+  assert.deepEqual(packed.b, []);
+  assert.equal(packed.d, 0);
+  assert.ok(packed.bytes >= 0);
+});
+
+test('utf8Bytes：按 UTF-8 算字节，中文不是一字符一字节', () => {
+  assert.equal(utf8Bytes('abc'), 3);
+  assert.equal(utf8Bytes('台球'), 6);
+  assert.equal(utf8Bytes(''), 0);
+});
+
+test('老存档兼容：没有 log / history 字段也要能读，读成空历史而不是报错', () => {
+  const base = makeGame(1);
+
+  // 缺字段：直接当作没有
+  assert.deepEqual(unpackHistory(null, base), { entries: [], dropped: 0 });
+  assert.deepEqual(unpackHistory(undefined, base), { entries: [], dropped: 0 });
+
+  // v1 存档（真的把两个键删掉）走 sanitize 也要活
+  const raw = serialize(base, 1700000000000, []);
+  assert.equal('history' in raw, false, '空杆史不该写键');
+  assert.equal('log' in raw, false, '空流水不该写键');
+  const back = sanitize(JSON.parse(JSON.stringify(raw)));
+  assert.ok(back, 'v1 老存档必须读得回来');
+  assert.equal(back.history, null);
+  assert.deepEqual(back.log, []);
+  assert.equal(back.balls[0].x, base.balls[0].x, '球位仍是原精度，别顺手把它砍成 3 位');
+
+  // 杆史字段被写坏时只丢杆史，不废整份存档
+  const broken = sanitize({ ...raw, history: { b: ['cue'], s: [{ x: [1, 2] }] } });
+  assert.ok(broken, '杆史坏了也别把局面一起否掉');
+  assert.equal(broken.history, null);
+  assert.ok(unpackHistory(broken.history, base).entries.length === 0);
+});
+
+test('存档往返：杆史与对局记录一起存，撤销一步回到上一杆（球位/杆数/轮次都对）', () => {
+  const { history, game } = makeHistory(3);
+  const store = memoryStore();
+
+  assert.equal(serialize(game, 1700000000000, history).v, 2, '新存档要带版本号，方便下次再演进');
+  assert.equal(writeSave(game, store, { now: 1700000000000, history }), true);
+  const saved = readSave(store);
+  assert.ok(saved, '存完必须读得回来');
+  assert.equal(saved.log.length, game.log.length, '对局记录要跟着存档走');
+  assert.ok(saved.history && saved.history.s.length === 3, '杆史要跟着存档走');
+  assert.equal(saved.shots, 3);
+
+  // 模拟 app 的读档：按存档重建一局，再把进程态与杆史装回去
+  const balls = saved.balls.map((b) => createBall(b.id, b.x, b.y, b));
+  const g = createGame(table, balls, { names: saved.players.map((p) => p.name), kind: saved.kind });
+  restoreGameState(g, saved);
+  assert.equal(g.log.length, game.log.length, '读档后「对局记录」不能显示为 —');
+
+  const { entries, dropped } = unpackHistory(saved.history, g);
+  assert.equal(dropped, 0);
+  assert.equal(entries.length, 3);
+
+  // 撤销一次拿到的就是栈顶那一步
+  const prev = entries[entries.length - 1];
+  const before = history[history.length - 1];
+  assert.equal(prev.shots, g.shots - 1, '杆数要退回上一杆');
+  assert.equal(prev.turn, before.turn);
+  assert.notEqual(prev.turn, g.turn, '轮次要跟着换回去');
+  for (let i = 0; i < prev.balls.length; i += 1) {
+    assert.equal(prev.balls[i].x, saveCoord(before.balls[i].x));
+    assert.equal(prev.balls[i].y, saveCoord(before.balls[i].y));
+    assert.equal(prev.balls[i].pocketed, before.balls[i].pocketed);
+    assert.equal(prev.balls[i].pocket ?? null, before.balls[i].pocket ?? null);
+  }
+});
+
+// --------------------------------------------------- 撤销 / 读档后的自动出杆暂停
+
+test('reduceAutoPause：读档与撤销进暂停，「用户击球」和「点此继续」才恢复', () => {
+  const running = { autoPaused: false, autoPauseReason: null };
+
+  const afterUndo = reduceAutoPause(running, 'undo');
+  assert.deepEqual(afterUndo, { autoPaused: true, autoPauseReason: 'undo' });
+  const afterLoad = reduceAutoPause(running, 'load');
+  assert.deepEqual(afterLoad, { autoPaused: true, autoPauseReason: 'load' });
+
+  // 用户自己出手 = 已经接手这一局，暂停到此为止
+  assert.deepEqual(reduceAutoPause(afterLoad, 'user-shot'), { autoPaused: false, autoPauseReason: null });
+  assert.deepEqual(reduceAutoPause(afterLoad, 'resume'), { autoPaused: false, autoPauseReason: null });
+  assert.deepEqual(reduceAutoPause(afterLoad, 'new-game'), { autoPaused: false, autoPauseReason: null });
+
+  // 不认识的动作不许悄悄解开暂停，也不许把原因抹掉
+  assert.deepEqual(reduceAutoPause(afterLoad, 'whatever'), afterLoad);
+  assert.deepEqual(reduceAutoPause(afterLoad, undefined), afterLoad);
+
+  // 暂停里再读一次档：原因要更新成最新那次，文案才不会说错动作
+  assert.deepEqual(reduceAutoPause(afterUndo, 'load'), { autoPaused: true, autoPauseReason: 'load' });
+});
+
+test('shouldAutoShoot：暂停、开关、回合、动画几道闸全过才会自己出杆', () => {
+  const opponentTurn = { ...makeGame(1), turn: 1 };
+  const base = {
+    game: opponentTurn,
+    autoOpponent: true,
+    autoPaused: false,
+    animating: false,
+    opponentThinking: false,
+  };
+
+  assert.equal(shouldAutoShoot(base), true, '默认设置下该轮到对手自己打');
+  assert.equal(shouldAutoShoot({ ...base, autoPaused: true }), false, '读档/撤销后的暂停不能自己出杆');
+  assert.equal(shouldAutoShoot({ ...base, autoPaused: true, autoPauseReason: 'load' }), false);
+  assert.equal(shouldAutoShoot({ ...base, autoOpponent: false }), false);
+  assert.equal(shouldAutoShoot({ ...base, animating: true }), false);
+  assert.equal(shouldAutoShoot({ ...base, opponentThinking: true }), false, '已经在算这一杆时别再起一杆');
+  assert.equal(shouldAutoShoot({ ...base, game: { ...opponentTurn, turn: 0 } }), false);
+  assert.equal(shouldAutoShoot({ ...base, game: { ...opponentTurn, phase: 'ended' } }), false);
+  assert.equal(shouldAutoShoot({ ...base, game: null }), false);
+  assert.equal(shouldAutoShoot(null), false);
+});
+
+test('autoPauseHint：暂停时给可点的恢复入口，关掉开关时说清对手为什么不动', () => {
+  const opponentTurn = { ...makeGame(1), turn: 1 };
+
+  const paused = autoPauseHint({ game: opponentTurn, autoOpponent: true, autoPaused: true, autoPauseReason: 'load' });
+  assert.equal(paused.level, 'paused');
+  assert.equal(paused.canResume, true);
+  assert.match(paused.text, /已暂停对手自动出杆/);
+  assert.match(paused.text, /读档/);
+
+  const undone = autoPauseHint({ game: opponentTurn, autoOpponent: true, autoPaused: true, autoPauseReason: 'undo' });
+  assert.match(undone.text, /撤销/);
+  assert.notEqual(undone.text, paused.text, '两种原因要给出不同文案，否则用户不知道刚发生了什么');
+
+  // 暂停优先于「开关关掉」：那是用户刚做的动作，先解释它
+  const both = autoPauseHint({ game: opponentTurn, autoOpponent: false, autoPaused: true, autoPauseReason: 'undo' });
+  assert.equal(both.level, 'paused');
+
+  // 开关关掉且轮到对手：必须说清为什么没人动，但不能给「继续」的假按钮
+  const off = autoPauseHint({ game: opponentTurn, autoOpponent: false, autoPaused: false });
+  assert.equal(off.level, 'off');
+  assert.equal(off.canResume, false);
+  assert.match(off.text, /对手自动出杆已关闭/);
+
+  // 暂停提示不按回合隐藏：读档时轮到玩家也要说「已暂停」，否则用户下次看到
+  // 对手不动时就没有线索去查开关；这条提示会在用户出手或点继续后自己消失。
+  assert.equal(autoPauseHint({ game: { ...opponentTurn, turn: 0 }, autoOpponent: true, autoPaused: true }).level, 'paused');
+  // 但「开关关掉」那条只在轮到对手时才有意义
+  assert.equal(autoPauseHint({ game: { ...opponentTurn, turn: 0 }, autoOpponent: false, autoPaused: false }), null);
+  // 一局结束 / 没开局：不要在台面上压一条常驻提示
+  assert.equal(autoPauseHint({ game: { ...opponentTurn, phase: 'ended' }, autoOpponent: false, autoPaused: false }), null);
+  assert.equal(autoPauseHint({ game: null, autoOpponent: true, autoPaused: true }), null);
+  assert.equal(autoPauseHint(null), null);
 });

@@ -44,6 +44,7 @@ import { readSave, writeSave, clearSave, describeSave, readSaveStamp, serialize,
 // 不碰 DOM 的那部分状态逻辑住在 ./state.js：它是能在 Node 单测里跑的那一层。
 // 这里只留「读什么状态、画什么、什么时候拦下来」。
 import {
+  autoPauseHint,
   captureBallFrame,
   clamp,
   copyBallsForShot,
@@ -53,10 +54,13 @@ import {
   practiceHint,
   practiceReady,
   pushHistoryEntry,
+  reduceAutoPause,
   restoreGameState,
   restorePositions,
+  shouldAutoShoot,
   snapshotPositions,
   undoLabel,
+  unpackHistory,
 } from './state.js';
 import {
   appendPracticeResult,
@@ -134,6 +138,13 @@ const state = {
   otherSaveShots: null,
   // 撤销用：每一杆结算前的局面快照。只存球局，练习模式的「重置」已经是退路。
   history: [],
+  // 撤销 / 读档之后先停住自动出杆。真机实测：默认开着「对手自动出杆」时，
+  // 撤销或读档后 1–2 秒对手自己又打了一杆，球位立刻变掉，看着像读档失败。
+  // 转移规则在 state.js 的 reduceAutoPause 里（纯函数，能单测）。
+  autoPaused: false,
+  autoPauseReason: null,
+  // 读档时杆史没跟着存下来时的一句话说明（球桌上方与「对局记录」共用）。
+  historyNote: null,
   // 手动出杆参数。求解会给"建议参数"，但滑块一旦被用户动过就不再被覆盖——
   // 否则每点一次「求解」就把人刚调好的力度冲掉，那是很恼人的。
   manual: { speed: 2.2, aimOffsetDeg: 0, tipB: 0, tipA: 0, touched: false },
@@ -762,8 +773,9 @@ canvas.addEventListener('pointerdown', (ev) => {
 
   // 球局模式下有持球：点哪儿就把母球放哪儿
   if (state.mode === 'game' && state.game?.ballInHand) {
-    // 对手持球时由 takeTurn 自己摆位，玩家不能替它放
-    if (state.autoOpponent && state.game.turn === 1) {
+    // 对手持球时由 takeTurn 自己摆位，玩家不能替它放——除非自动出杆正被暂停
+    // （撤销 / 读档之后），那时它就是不会动，拦着只会和提示条自相矛盾。
+    if (state.autoOpponent && !state.autoPaused && state.game.turn === 1) {
       setReport('现在是对手持球，它会自己摆母球。');
       return;
     }
@@ -1313,6 +1325,9 @@ function newGame() {
   state.animating = false;
   state.opponentThinking = false;
   state.history = [];
+  // 新的一局不该带着上一局留下的暂停：这是用户主动重开，算 'new-game'。
+  Object.assign(state, reduceAutoPause(state, 'new-game'));
+  state.historyNote = null;
   updateUndoButton();
   setReport(
     kind === 'nineball'
@@ -1326,6 +1341,7 @@ function newGame() {
   $('gChoice').classList.add('hidden');
   updateScore();
   updateLog();
+  updateAutoPauseBar();
   render();
 }
 
@@ -1387,11 +1403,23 @@ function updateScore() {
 function updateLog() {
   const g = state.game;
   const box = $('log');
+  // 读档时杆史被体积预算裁过的话，这里留一句话——否则用户只会看到
+  // 「对局记录」比记忆里少几杆，又以为读档丢了东西。样式走行内属性，
+  // 因为这次不碰 index.html 的 <style>（另一个 worker 正在改布局）。
+  let note = null;
+  if (state.historyNote) {
+    note = document.createElement('div');
+    note.setAttribute('data-role', 'history-note');
+    note.setAttribute('style', 'color:#f59e0b;margin-bottom:4px;');
+    note.textContent = state.historyNote;
+  }
   if (!g || !g.log.length) {
-    box.textContent = '—';
+    box.innerHTML = '';
+    box.appendChild(note ?? document.createTextNode('—'));
     return;
   }
   box.innerHTML = '';
+  if (note) box.appendChild(note);
   for (const entry of g.log.slice(-40).reverse()) {
     const d = document.createElement('div');
     d.textContent = `第 ${entry.shot} 杆 · ${entry.summary}`;
@@ -1400,13 +1428,50 @@ function updateLog() {
   box.scrollTop = 0;
 }
 
+/**
+ * 球桌上方的「自动出杆已暂停 / 已关闭」提示条。
+ *
+ * 显示什么、要不要给「点此继续」全部由 state.js 的 autoPauseHint 决定，
+ * 这里只负责把它贴到 DOM 上——那条判断是要单测的，不能长在 DOM 边上。
+ */
+function updateAutoPauseBar() {
+  const bar = $('autoPauseBar');
+  if (!bar) return;
+  const hint = state.mode === 'game' ? autoPauseHint(state) : null;
+  if (!hint) {
+    bar.classList.add('hidden');
+    return;
+  }
+  bar.classList.remove('hidden');
+  const text = $('autoPauseText');
+  if (text) text.textContent = hint.text;
+  const btn = $('autoPauseResume');
+  if (btn) btn.classList.toggle('hidden', !hint.canResume);
+}
+
+/** 提示条上的「点此继续」：用户明确要求恢复自动出杆。 */
+function resumeAutoOpponent() {
+  Object.assign(state, reduceAutoPause(state, 'resume'));
+  if (!state.autoOpponent) {
+    // 提示条也可能是「开关关着」那一档：点继续等于把开关打开。
+    state.autoOpponent = true;
+    const box = $('autoOpponent');
+    if (box) box.checked = true;
+  }
+  updateAutoPauseBar();
+  setReport('已恢复对手自动出杆。');
+  maybeOpponentTurn();
+}
+
 function gameSolve() {
   const g = state.game;
   if (!g || g.phase === 'ended') return;
   // 对手回合的判断要排在 animating 之前：对手正在出杆动画里时 g.turn 还是 1
   // （runOpponentTurn 是先回放再结算），玩家这时点「求解」应该看到"它自己会打"，
   // 而不是什么都不发生。
-  if (state.autoOpponent && g.turn === 1) {
+  // 暂停态（撤销 / 读档之后）是例外：那时对手不会自己出杆，用户想算这一杆
+  // 完全合理，拦下来只会像按钮坏了。
+  if (state.autoOpponent && !state.autoPaused && g.turn === 1) {
     $('gAdvice').textContent = '现在是对手回合，不用你算——它会自己打。';
     $('gAdvice').className = 'empty';
     $('gVerdict').textContent = '';
@@ -1466,7 +1531,8 @@ function gameSolve() {
 function gameShoot() {
   const g = state.game;
   if (!g || g.phase === 'ended') return;
-  if (state.autoOpponent && g.turn === 1) return;
+  // 同 shootGameWith：暂停态下对手不会自己出杆，玩家可以替它打。
+  if (state.autoOpponent && !state.autoPaused && g.turn === 1) return;
   if (state.animating) return;
   if (g.requiresRerack) {
     $('gAdvice').textContent = '上一杆开球不合法，先点「重摆开球」。';
@@ -1518,6 +1584,9 @@ function gameShoot() {
     updateScore();
     updateLog();
     render();
+    // 用户亲手打了这一杆 = 他已经接手这一局，撤销/读档留下的暂停到此为止。
+    Object.assign(state, reduceAutoPause(state, 'user-shot'));
+    updateAutoPauseBar();
     maybeOpponentTurn();
   });
 }
@@ -1565,7 +1634,12 @@ function undoGame() {
   updateLog();
   updateUndoButton();
   render();
-  // 撤销到对手回合时不要自动接着打——用户刚退回来看局面，立刻又被打乱了。
+  // 撤销之后暂停自动出杆：用户刚退回来是要看清局面，1–2 秒后对手自己出杆
+  // 会把刚恢复的球位又改掉——真机实测里这条最容易被当成「撤销没生效」。
+  // 恢复只有三条路：自己打一杆、点提示条上的「点此继续」、重开一局。
+  state.opponentThinking = false;
+  Object.assign(state, reduceAutoPause(state, 'undo'));
+  updateAutoPauseBar();
 }
 
 // ---------------------------------------------------------------- 对手回合
@@ -1582,8 +1656,10 @@ function undoGame() {
  */
 function maybeOpponentTurn() {
   const g = state.game;
-  if (!g || g.phase === 'ended' || state.animating) return;
-  if (!state.autoOpponent || g.turn !== 1) return;
+  // 「这一帧能不能让对手自己打」整条判断在 state.js 的 shouldAutoShoot 里：
+  // 暂停态（撤销 / 读档之后）、开关、回合、动画都在那一条判完，好让单测能钉住
+  // 「读档之后不许自己出杆」这种最容易被改坏的地方。
+  if (!shouldAutoShoot(state)) return;
   if (g.requiresRerack) {
     setReport('对手开球不合法，需要重摆——点「重摆开球」继续。');
     $('gRerack').classList.remove('hidden');
@@ -1668,6 +1744,7 @@ function runOpponentTurn(gen = state.generation) {
     updateScore();
     updateLog();
     render();
+    updateAutoPauseBar();
 
     if (r.next.phase === 'ended') {
       $('gAdvice').textContent = '这一局结束了。';
@@ -1707,6 +1784,9 @@ function doRerack() {
   updateScore();
   updateLog();
   render();
+  // 点「重摆开球」是用户主动接手，和手动出杆一样结束暂停。
+  Object.assign(state, reduceAutoPause(state, 'resume'));
+  updateAutoPauseBar();
   maybeOpponentTurn();
 }
 
@@ -1877,7 +1957,9 @@ function shootPracticeWith(shot, aim) {
 function shootGameWith(shot, aim) {
   const g = state.game;
   if (!g || g.phase === 'ended') return;
-  if (state.autoOpponent && g.turn === 1) return;
+  // 暂停态（撤销 / 读档之后）下允许玩家替对手打这一杆：那时对手不会自己动，
+  // 拦下来只会像「按钮坏了」。
+  if (state.autoOpponent && !state.autoPaused && g.turn === 1) return;
   if (g.requiresRerack) {
     $('gAdvice').textContent = '上一杆开球不合法，先点「重摆开球」。';
     return;
@@ -1926,6 +2008,9 @@ function finishGameShot(next, report, gen) {
   updateLog();
   updateUndoButton();
   render();
+  // 玩家亲手打了一杆（手打或求解打）= 他已接手，撤销/读档留下的暂停到此为止。
+  Object.assign(state, reduceAutoPause(state, 'user-shot'));
+  updateAutoPauseBar();
   if (gen === state.generation) maybeOpponentTurn();
 }
 
@@ -1979,7 +2064,8 @@ function saveGame() {
     refreshSaveInfo();
     return;
   }
-  const ok = writeSave(g);
+  // 撤销栈一起存：不带它的话刷新页面之后「对局记录」和撤销按钮都是空的。
+  const ok = writeSave(g, undefined, { history: state.history });
   state.saveOverwrite = false;
   if (ok) {
     // 这份存档已经是「我见过的那个」了，按钮上没有待处理的东西。
@@ -2034,9 +2120,20 @@ function applyLoadedGame(saved) {
   state.opponentThinking = false;
   state.placing = Boolean(g.ballInHand);
   canvas.classList.toggle('placing', state.placing);
-  state.history = [];
+  // 杆史（撤销栈）一起读回来：不进内存的话读档后「对局记录」是空的、撤销按钮
+  // 是灰的，看着就像读档只成功了一半（真机实测报的就是这条）。
+  // 老存档没有 history 字段：unpackHistory 返回空，走下面的 missing 分支给提示。
+  const decoded = unpackHistory(saved.history, g);
+  state.history = decoded.entries;
+  // 存档只带最近几步，更早的是真丢了：d 是存档自己记的（超预算裁掉的），
+  // shots - 读到的步数 补上「存档里压根没装」的那部分，两个取大。
+  const missing = Math.max(decoded.dropped, saved.shots - decoded.entries.length);
+  state.historyNote = missing > 0 ? `更早的 ${missing} 步未随存档保存` : null;
   state.saveStamp = saved.savedAt;
   state.saveOverwrite = false;
+  // 读档之后先停住自动出杆：1–2 秒后对手自己又打一杆会把刚恢复的球位改掉，
+  // 用户只会看到「读档没成功」。恢复要他自己出手或点提示条。
+  Object.assign(state, reduceAutoPause(state, 'load'));
   updateUndoButton();
   $('gRerack').classList.toggle('hidden', !g.requiresRerack);
   $('gAdvice').textContent = '—';
@@ -2047,6 +2144,7 @@ function applyLoadedGame(saved) {
   updateScore();
   updateLog();
   render();
+  updateAutoPauseBar();
   maybeOpponentTurn();
 }
 
@@ -2065,7 +2163,7 @@ function removeSave() {
 function exportGameText(now = Date.now()) {
   const g = state.game;
   if (!g) return null;
-  return JSON.stringify(serialize(g, now), null, 2);
+  return JSON.stringify(serialize(g, now, state.history), null, 2);
 }
 
 /**
@@ -2288,6 +2386,7 @@ function setMode(mode) {
       : '标准黑八 15 颗 + 母球 · 按 WPA 规则判分组、犯规与胜负';
   if (mode === 'game' && !state.game) newGame();
   render();
+  updateAutoPauseBar();
   if (mode === 'game') maybeOpponentTurn();
 }
 
@@ -2312,8 +2411,14 @@ $('showCone').addEventListener('change', render);
 $('showGhost').addEventListener('change', render);
 $('autoOpponent').addEventListener('change', (ev) => {
   state.autoOpponent = ev.target.checked;
+  // 手动把开关打开 = 用户明确要对手自己打，暂停到此为止（'resume'）。
+  // 注意反过来「关掉开关」不改暂停态：关掉本来就不会自动出杆。
+  if (state.autoOpponent) Object.assign(state, reduceAutoPause(state, 'resume'));
+  updateAutoPauseBar();
   if (state.autoOpponent) maybeOpponentTurn();
 });
+
+$('autoPauseResume').addEventListener('click', resumeAutoOpponent);
 
 $('gameKind').addEventListener('change', (ev) => {
   const v = ev.target.value;
@@ -2720,6 +2825,9 @@ window.__app = {
   saveGame,
   loadGame,
   removeSave,
+  // 撤销 / 读档之后自动出杆是暂停的：端到端脚本要能点「继续」恢复它，
+  // 不然「暂停」看起来就像「对手卡住了」。
+  resumeAutoOpponent,
   // 导出/导入到文件：端到端脚本直接喂文本，不必去模拟文件选择器与下载
   exportGameText,
   importGameText,
