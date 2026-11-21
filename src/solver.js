@@ -9,7 +9,7 @@
 //   实测：只靠解析解的推荐杆成功率 65%；加上仿真验证后能到 95% 以上。
 //   一次仿真 0.8 ms，验证十几次也就十几毫秒，完全付得起。
 
-import { PHYS, SPEED, MAX_TIP_OFFSET, SEARCH_DT, SOLVE_MAX_TIME, TUNE_MAX_TIME, MAX_CUT_ATTACK_DEG } from './constants.js';
+import { PHYS, SPEED, MAX_TIP_OFFSET, SEARCH_DT, SOLVE_MAX_TIME, TUNE_MAX_TIME, MAX_CUT_ATTACK_DEG, SOLVE_PRUNE_K, SOLVE_PRUNE_FALLBACK } from './constants.js';
 import { V, DEG } from './geometry.js';
 import {
   createBall,
@@ -427,6 +427,159 @@ function verifyAndTune(table, balls, cueId, targetId, pocketId, baseAim, tip, se
 }
 
 /**
+ * 解析走位估计：不跑仿真，猜「这一杆打完母球大概停哪」，再看下一杆多好打。
+ *
+ * 母线撞完目标球后沿切线走（`cueBallTangentDirection`），速度是
+ * `speed·sin(切角)`，靠滚动摩擦衰减到停下（`cueBallTravelAfter`），
+ * 路上先碰到袋或库就截断（`traceRay`）。这个停位跟真实仿真的差别在
+ * 撞库后的反弹角、塞的影响，量级是几十厘米——所以只当排序用的粗估，
+ * 不写进候选（候选里的 cueRest/leaveScore 仍然只来自真仿真）。
+ *
+ * @returns {number|null} 下一杆容错分 0–100；null 表示没有下一杆可叫（走位不计分）
+ */
+function leaveEstimate(table, balls, cueId, g, allowArr) {
+  let remaining = false;
+  for (const b of balls) {
+    if (b.id === cueId || b.id === g.target.id || b.pocketed || b.number === 0) continue;
+    if (allowArr && !allowArr.includes(b.number)) continue;
+    remaining = true;
+    break;
+  }
+  if (!remaining) return null;
+  if (g.seedPath.kind === 'pocket') return 0;
+  // 只喂 bestNextShot 真正会读的字段（id/x/y/number/pocketed），不改造真实球对象，
+  // 也不让这些临时对象进物理核——physics.js 那条「别给球动态加字段」的教训管的是内核。
+  const pseudo = [{ id: cueId, number: 0, x: g.seedPath.point.x, y: g.seedPath.point.y, pocketed: false }];
+  for (const b of balls) {
+    if (b.id === cueId || b.id === g.target.id || b.pocketed) continue;
+    pseudo.push({ id: b.id, number: b.number, x: b.x, y: b.y, pocketed: false });
+  }
+  const next = bestNextShot(table, pseudo, cueId, allowArr);
+  return leaveScoreOf(next ? next.toleranceDeg : 0);
+}
+
+/**
+ * 一级排序分：与 `difficultyOf` / `valueOf` 完全同构，但只用解析量。
+ *
+ * 分数越低越该先细扫。刻意不取整、不封顶 100：排的是顺序，不是给人看的分数。
+ */
+function analyticScore(table, balls, cueId, g, allowArr) {
+  const tolScore = 100 * Math.min(1, Math.log10(1 + g.tol / 0.02) / Math.log10(1 + 3 / 0.02));
+  const cutScore = 100 * Math.min(1, (g.cutDeg / 80) ** 1.6);
+  const distScore = 100 * Math.min(1, g.d1 / 2.6);
+
+  let score = 0.55 * (100 - tolScore) + 0.25 * cutScore + 0.2 * distScore;
+  // 种子杆法的偏杆代价（difficultyOf 里同一项，用解析给的初始杆法估）
+  if (Math.abs(g.tip.a ?? 0) > 0.05) score += 6;
+  // 架杆不顺：与 annotateComfort 同一个函数、同一个惩罚
+  score += cueComfort(table, balls, g.cue, g.baseAim, cueId).penalty;
+  // 母球撞完沿切线跑，路上先碰到袋就是摔袋
+  if (g.seedPath.kind === 'pocket') score += 18;
+  // 走位修正：与 valueOf 同一个 ±22.5 换算
+  const leave = leaveEstimate(table, balls, cueId, g, allowArr);
+  if (leave !== null) score -= Math.max(-22.5, Math.min(22.5, (leave - 50) * 0.45));
+  return score;
+}
+
+/**
+ * 一级排序：用解析量给「纯几何候选」打分，决定只对哪几个跑仿真细扫。
+ *
+ * 为什么用这些解析量、按这个权重（容错角 0.55 / 切角 0.25 / 母球距离 0.2 /
+ * 解析走位 ±22.5 / 摔袋 +18 / 架杆惩罚）：
+ *  - 它们就是 `difficultyOf` + `valueOf` 的全部输入项，只是把「仿真才知道的
+ *    停位」换成了解析估计。排序键和目标函数同构，才不会出现「按 A 排、
+ *    按 B 选」的系统性偏差；
+ *  - 每项都是 O(球数 × 袋数) 的几何运算，6 个候选排序约 0.1 ms，
+ *    比它替掉的一次仿真还便宜。
+ *
+ * 为什么 K=3（constants.SOLVE_PRUNE_K）：48 个固定局面（16 个手工 + 32 个
+ * 确定性散球，见 %TEMP%\prune-baseline）实测——
+ *  - 只按解析分排序，旧 top-1 落在前 3 名的比例 **100%**（46/46，剩下 2 个
+ *    局面本来就没有直接解，走 combo/bank）；
+ *  - K=1 时只有 76%，K=2 时约 93%，K=3 到 100%，K>3 不再涨；
+ *  - 平均候选数只有 3.4 个/局面，K 再大就等于不剪枝。
+ *
+ * 为什么回退最多 1 个（constants.SOLVE_PRUNE_FALLBACK）：
+ * 回退是给「前 K 名全部力度都打不进」这种**异常**兜底的，不是给排名误差兜底。
+ * 48 个固定局面里出现 0 次；另扫 400 个随机局面出现 4 次（1%），其中 1 次真解
+ * 恰好排在第 4 名——正是靠这一次回退才与穷举结果一致（该局面已钉进
+ * test/solver-prune.test.js）。真出现两个以上，说明这个局面的解析量把球看错了，
+ * 应该去修排序函数，而不是无限回退把成本拉回原样。
+ *
+ * 同分时的 tie-break 完全确定：容错角大的 → 球号小的 → 袋口 id 字典序，
+ * 不依赖枚举顺序，保证同一输入任何机器给出同一份顺序。
+ *
+ * 已知风险 / 取舍（AGENTS.md 第 5 条）：
+ *  - 返回的候选列表会变短（d05 局面 5→3 个），coach 展示的是 `all.slice(1, 4)`，
+ *    所以候选多于 4 个的局面会少一张备选卡；选中的那一杆不受影响。
+ *  - 真解排在第 4 名之后的局面会被漏掉。48 个固定局面未出现，400 个随机局面
+ *    出现 1 次（0.25%），且被回退救回；剪枝把这类局面的风险从 0 提到了千分之几，
+ *    换来同局面 15.5→11.1 ms、仿真 116→68 次。
+ */
+function rankGeoCandidates(table, balls, cueId, geos, allowArr) {
+  const ranked = geos.map((g) => ({ g, score: analyticScore(table, balls, cueId, g, allowArr) }));
+  ranked.sort((a, b) =>
+    a.score - b.score ||
+    b.g.tol - a.g.tol ||
+    a.g.target.number - b.g.target.number ||
+    (a.g.pocket.id < b.g.pocket.id ? -1 : a.g.pocket.id > b.g.pocket.id ? 1 : 0)
+  );
+  return ranked;
+}
+
+/**
+ * 用一个几何候选 + 细扫结果拼出候选对象。
+ *
+ * 字段顺序与原实现逐字一致：候选对象会被上层按 `c.value` 排序、被 describeCandidate
+ * 读，字段集合与顺序保持一致，改动才是纯粹的「把构造搬出来」。
+ */
+function directCandidate(table, g, tuned) {
+  const speed = tuned ? tuned.speed : g.seedSpeed;
+  const aimAngle = tuned ? tuned.aimAngle : g.baseAim;
+
+  // 母球撞完后的走向：判断摔袋风险
+  const cueSpeedAfter = speed * Math.sin(g.cutRad);
+  const travel = cueBallTravelAfter(cueSpeedAfter, PHYS.muRoll, PHYS.g);
+  const cuePath = traceRay(g.target, g.tangent, Math.min(travel, 3.0), table);
+  const scratchRisk = cuePath.kind === 'pocket';
+
+  const positioning = tuned?.positioning ?? null;
+  const nextToleranceDeg = positioning?.hasNextTargets
+    ? positioning.nextShot?.toleranceDeg ?? 0
+    : null;
+
+  return {
+    targetId: g.target.id,
+    targetNumber: g.target.number,
+    pocketId: g.pocket.id,
+    pocketKind: g.pocket.kind,
+    ghost: g.probe.ghost,
+    contactNormal: g.probe.normal,
+    throwDeg: g.probe.throwDeg,
+    aimAngle,
+    aimAngleDeg: aimAngle * DEG,
+    aimOffsetDeg: tuned ? tuned.aimOffsetDeg : 0,
+    cutDeg: g.cutDeg,
+    toleranceDeg: g.tol,
+    distanceCue: g.d1,
+    distancePocket: g.d2,
+    speed,
+    power: pickPower(speed),
+    tip: tuned ? tuned.tip : g.tip,
+    scratchRisk,
+    cuePath,
+    cueRest: positioning?.cueRest ?? null,
+    cueRoute: tuned?.cueRoute ?? null,
+    nextShot: positioning?.nextShot ?? null,
+    positioningRequired: Boolean(positioning?.hasNextTargets),
+    nextToleranceDeg,
+    leaveScore: nextToleranceDeg === null ? null : leaveScoreOf(nextToleranceDeg),
+    verified: Boolean(tuned),
+    difficulty: 0,
+  };
+}
+
+/**
  * 把「好不好架杆」写进每个候选，供难度评分与教练卡取用。
  *
  * 放在统一入口做，是因为直接球、组合球、翻袋的候选在三个不同的函数里构造，
@@ -450,22 +603,32 @@ function annotateComfort(list, table, balls, cueId) {
  *
  * @param {object} table
  * @param {Array} balls 含母球（id === 'cue' 或 number === 0）
- * @param {{cueId?:string, maxCandidates?:number, verify?:boolean, allow?:number[]}} [opts]
+ * @param {{cueId?:string, maxCandidates?:number, verify?:boolean, allow?:number[], exhaustive?:boolean}} [opts]
  *   opts.allow 限定只考虑这些球号的球当目标（规则引擎用来排除对方的球）
+ *   opts.exhaustive 走旧路径：每个几何候选都跑杆法×力度细扫（基准对照用，默认不走）
+ *   环境变量 SOLVE_EXHAUSTIVE=1 等效于 opts.exhaustive（给 %TEMP% 下的基准脚本用，
+ *   生产代码不读它以外的东西）
  */
 export function solveShot(table, balls, opts = {}) {
   const cueId = opts.cueId ?? 'cue';
   const verify = opts.verify !== false;
+  // 剪枝出口：默认新路径；显式传 exhaustive 或设环境变量才回到老路径。
+  const exhaustive =
+    opts.exhaustive === true ||
+    (typeof process !== 'undefined' && process.env?.SOLVE_EXHAUSTIVE === '1');
   const R = table.ballRadius;
   const cue = balls.find((b) => b.id === cueId);
   if (!cue) throw new Error(`找不到母球: ${cueId}`);
 
   // 规则允许先碰的球号。不传就是"台面上所有球都能打"（自由练习模式）。
   const allow = opts.allow ? new Set(opts.allow) : null;
+  const allowArr = allow ? [...allow] : null;
   const targets = balls.filter(
     (b) => b.id !== cueId && !b.pocketed && (!allow || allow.has(b.number))
   );
   const candidates = [];
+  // 一级产物：纯几何候选，还没跑过任何仿真
+  const geos = [];
 
   for (const target of targets) {
     for (const pocket of table.pockets) {
@@ -510,63 +673,55 @@ export function solveShot(table, balls, opts = {}) {
 
       const baseAim = Math.atan2(ghost.y - cue.y, ghost.x - cue.x);
 
-      let tuned = null;
-      if (verify) {
-        tuned = verifyAndTune(
-          table, balls, cueId, target.id, pocket.id, baseAim, tip, seedSpeed,
-          allow ? [...allow] : null
-        );
-        if (!tuned) continue;
-      }
-
-      const speed = tuned ? tuned.speed : seedSpeed;
-      const aimAngle = tuned ? tuned.aimAngle : baseAim;
-
-      // 母球撞完后的走向：判断摔袋风险
+      // 切线方向与「母球大概停哪」都只取决于几何 + 解析种子速度：
+      // 提前算好，一级排序和候选构造共用一份，不重复算。
       const inDir = V.norm(V.sub(ghost, cue));
       const tangent = cueBallTangentDirection(inDir, outDir);
-      const cueSpeedAfter = speed * Math.sin(cutRad);
-      const travel = cueBallTravelAfter(cueSpeedAfter, PHYS.muRoll, PHYS.g);
-      const cuePath = traceRay(target, tangent, Math.min(travel, 3.0), table);
-      const scratchRisk = cuePath.kind === 'pocket';
+      const seedPath = traceRay(
+        target,
+        tangent,
+        Math.min(cueBallTravelAfter(seedSpeed * Math.sin(cutRad), PHYS.muRoll, PHYS.g), 3.0),
+        table
+      );
 
-      // 走位：这一杆打完之后，下一杆还有多好打。
-      // 只有真正试打过（tuned 有 afterBalls）才谈得上走位；纯解析解不知道母球停哪。
-      const positioning = tuned?.positioning ?? null;
-      const nextToleranceDeg = positioning?.hasNextTargets
-        ? positioning.nextShot?.toleranceDeg ?? 0
-        : null;
-
-      candidates.push({
-        targetId: target.id,
-        targetNumber: target.number,
-        pocketId: pocket.id,
-        pocketKind: pocket.kind,
-        ghost,
-        contactNormal: probe.normal,
-        throwDeg: probe.throwDeg,
-        aimAngle,
-        aimAngleDeg: aimAngle * DEG,
-        aimOffsetDeg: tuned ? tuned.aimOffsetDeg : 0,
-        cutDeg,
-        toleranceDeg: tol,
-        distanceCue: d1,
-        distancePocket: d2,
-        speed,
-        power: pickPower(speed),
-        tip: tuned ? tuned.tip : tip,
-        scratchRisk,
-        cuePath,
-        cueRest: positioning?.cueRest ?? null,
-        cueRoute: tuned?.cueRoute ?? null,
-        nextShot: positioning?.nextShot ?? null,
-        positioningRequired: Boolean(positioning?.hasNextTargets),
-        nextToleranceDeg,
-        leaveScore: nextToleranceDeg === null ? null : leaveScoreOf(nextToleranceDeg),
-        verified: Boolean(tuned),
-        difficulty: 0,
+      geos.push({
+        target, pocket, probe, outDir, inDir, tangent, baseAim, tip, seedSpeed,
+        cutDeg, cutRad, tol, d1, d2, cue, seedPath,
       });
     }
+  }
+
+  // ── 一级排序 + 二级细扫 ──
+  // 旧路径对上面每个几何候选都跑 3 杆法 × 5 力度的盲扫（最贵的一档还要再乘十几次），
+  // 但候选里绝大多数根本进不了前 3 名。现在先用解析量排序（0 次仿真），
+  // 只对前 SOLVE_PRUNE_K 名细扫；细扫出现「全部力度都打不进」才有限回退。
+  const prune = verify && !exhaustive;
+  // 候选本来就不超过 K 个时排序毫无意义：直接按枚举顺序全扫，省掉一级的解析开销
+  // （一级每个候选要做一次 200 步 traceRay + 一轮 next-shot 几何，2 球局面里这笔
+  //  开销能占到总时间的十分之一）。
+  const needRank = prune && geos.length > SOLVE_PRUNE_K;
+  const order = needRank ? rankGeoCandidates(table, balls, cueId, geos, allowArr) : geos.map((g) => ({ g }));
+  let misses = 0;
+  for (let i = 0; i < order.length; i++) {
+    if (prune && i >= SOLVE_PRUNE_K) {
+      // 前 K 名一个异常都没有 → 没有回退的理由，就停在 K
+      if (misses === 0) break;
+      // 有异常也只多捞 FALLBACK 个：再多就不是兜底，是把成本拉回原样
+      if (i >= SOLVE_PRUNE_K + SOLVE_PRUNE_FALLBACK) break;
+    }
+    const g = order[i].g;
+    let tuned = null;
+    if (verify) {
+      tuned = verifyAndTune(
+        table, balls, cueId, g.target.id, g.pocket.id, g.baseAim, g.tip, g.seedSpeed,
+        allowArr
+      );
+      if (!tuned) {
+        if (i < SOLVE_PRUNE_K) misses++;
+        continue;
+      }
+    }
+    candidates.push(directCandidate(table, g, tuned));
   }
 
   annotateComfort(candidates, table, balls, cueId);

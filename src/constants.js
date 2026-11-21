@@ -168,3 +168,14 @@ export const SHOT_TIME_LIMITS = Object.freeze({
  */
 export const MAX_CUT_ATTACK_DEG = 82;
 export const MAX_CUT_SAFETY_DEG = 78;
+
+/**
+ * 候选剪枝：一级按解析量排序后，只对前 K 名做「杆法 × 力度」仿真细扫。
+ *
+ * 为什么 K=3、为什么回退最多 1 个，以及 48 局面的命中率实测，都写在
+ * solver.js 的 rankGeoCandidates 注释里（取舍与已知风险要能就地读到）。
+ * 想跑旧的全量路径做对照：solveShot(table, balls, { exhaustive: true })
+ * 或环境变量 SOLVE_EXHAUSTIVE=1。
+ */
+export const SOLVE_PRUNE_K = 3;
+export const SOLVE_PRUNE_FALLBACK = 1;
