@@ -20,19 +20,5 @@ export const V = {
 
 export const DEG = 180 / Math.PI;
 
-/**
- * 点到线段的最短距离。
- * @param {{x:number,y:number}} p
- * @param {{x:number,y:number}} a
- * @param {{x:number,y:number}} b
- */
-export function pointSegmentDistance(p, a, b) {
-  const ab = V.sub(b, a);
-  const ap = V.sub(p, a);
-  const denom = V.dot(ab, ab);
-  if (denom < 1e-12) return V.dist(p, a);
-  let t = V.dot(ap, ab) / denom;
-  t = t < 0 ? 0 : t > 1 ? 1 : t;
-  const closest = V.add(a, V.mul(ab, t));
-  return V.dist(p, closest);
-}
+// pointSegmentDistance 曾在此重复实现一遍（与 aim.js:133 等价）。全仓库零引用，已删；
+// 需要点到线段距离时用 aim.js 导出的那份（firstBlocker 正在用）。
