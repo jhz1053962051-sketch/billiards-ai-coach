@@ -18,6 +18,12 @@
 #   tools/cdp.mjs:20-32 的候选列表已含 /usr/bin/google-chrome、google-chrome-stable、
 #   chromium、chromium-browser，且支持 CHROME_PATH 覆盖（tools/cdp.mjs:21），
 #   所以不需要 setup-chrome 之类的第三方 action。
+#
+# 为什么钉 v5（而不是 v4）：
+#   v4 系列声明的 node20 runtime 已被 GitHub 弃用，CI 会把它们强制在 node24 上跑，
+#   并打一条 "Node.js 20 is deprecated ... forced to run on Node.js 24" 告警。
+#   actions/checkout 与 actions/setup-node 的 v5 已把 runtime 换成 node24，
+#   升级后该告警消失（tag 由 git ls-remote 核实存在）。
 
 name: verify
 
@@ -43,10 +49,10 @@ jobs:
 
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: 安装 Node ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node-version }}
           # cache 故意不写：没有 package-lock.json，开了会报错（见文件头）。
