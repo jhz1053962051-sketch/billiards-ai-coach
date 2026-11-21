@@ -1674,7 +1674,7 @@ check(
   manualHard.advice || '超时'
 );
 check(
-  '手打结果的括号里带上力度与杆法两项（3.20 m/s · 中杆 · 无塞）',
+  '手打结果的括号里带上力度、杆法、塞三项（3.20 m/s · 中杆 · 无塞）',
   /（3\.20 m\/s · 中杆 · 无塞）$/.test(manualHard.advice),
   manualHard.advice || '超时'
 );
@@ -1684,7 +1684,7 @@ check(
 const manualSoft = await manualShotAt('1.20', '0', { reset: false });
 console.log('手打结果·1.20 m/s（同局面）:', JSON.stringify(manualSoft));
 check(
-  '同一局面换成 1.20 m/s：仍然进 1 号，但「母球落袋」不再出现——文档读的是这一杆的终局',
+  '同一局面换成 1.20 m/s：仍然进 1 号，但「母球落袋」不再出现——文案读的是这一杆的终局',
   /^手打结果：进 1 号（1\.20 m\/s/.test(manualSoft.advice) && !/母球落袋/.test(manualSoft.advice),
   manualSoft.advice || '超时'
 );
