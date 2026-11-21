@@ -5,13 +5,12 @@
 //   · 袋心必须真的落在台面边界上，捕获半径必须由 cornerJaw / middleJaw 推出；
 //   · 库边线段的两个端点必须正好抵到相邻袋口的捕获圆——否则球会从袋口边缘漏出台面
 //     （这是 table.js 头注释里写明的设计约束）；
-//   · pocketAt / insideBounds / cushionAt 的判定边界一律是「含端点」，差 1e-9 就翻面。
+//   · pocketAt / insideBounds 的判定边界一律是「含端点」，差 1e-9 就翻面。
 //
 // 三处曾「实现与注释错位」的语义，本轮各自定死一边并写进 table.js 的注释，
 // 下面的用例逐条锁住（改实现或改注释都会让这里变红）：
 //   · pocketAt 闭圆、边界只沿轴向精确（table.js:160）；
 //   · insideBounds 只判 bounds 矩形、不查袋口（table.js:181）；
-//   · cushionAt 的 pos 用 === 精确比较（table.js:204）；
 //   · createTable 拒绝几何上画不出台面的参数，不再静默接受反向库边段（table.js:31）。
 //
 // 所以任何一处几何量被改动（改半径、改 jaw、改袋位、改库边端点），这里都会立刻红。
@@ -30,6 +29,26 @@ function cushionEnds(c) {
   const a = c.axis === 'x' ? { x: c.pos, y: c.from } : { x: c.from, y: c.pos };
   const b = c.axis === 'x' ? { x: c.pos, y: c.to } : { x: c.to, y: c.pos };
   return [a, b];
+}
+
+/**
+ * 离 (x, y) 最近的袋心与欧氏距离。
+ *
+ * 原来这里直接调 table.nearestPocket()，但那个 API 除本文件外无人使用
+ * （生产代码零调用），已从 src/table.js 删除；本用例只需要「最近的那一个」，
+ * 就地算一次即可，不必为一个测试专用查询保留生产分支。
+ */
+function nearestPocket(t, x, y) {
+  let best = null;
+  let bestDist = Infinity;
+  for (const p of t.pockets) {
+    const d = Math.hypot(x - p.x, y - p.y);
+    if (d < bestDist) {
+      bestDist = d;
+      best = p;
+    }
+  }
+  return { pocket: best, distance: bestDist };
 }
 
 test('球台：尺寸 / 球半径 / 球质量逐项等于 constants.js 的预设', () => {
@@ -168,7 +187,7 @@ test('库边：每段端点正好抵到相邻袋口的捕获圆（袋口缺口�
     const t = createTable(id);
     for (const c of t.cushions) {
       for (const end of cushionEnds(c)) {
-        const near = t.nearestPocket(end.x, end.y);
+        const near = nearestPocket(t, end.x, end.y);
         assert.ok(
           Math.abs(near.distance - near.pocket.captureR) < 1e-12,
           `${id}/${c.id}: 端点 (${end.x}, ${end.y}) 距 ${near.pocket.id} ${near.distance}，` +
@@ -294,74 +313,6 @@ test('insideBounds：只判 bounds 矩形、不查袋口（契约已明确，见
   assert.equal(t.insideBounds(t.bounds.minX - 1e-6, t.bounds.minY - 1e-6), false);
 });
 
-test('nearestPocket：返回最近的袋心与欧氏距离，与逐袋硬算一致', () => {
-  const t = createTable('pool9');
-  const samples = [
-    [0, 0],
-    [t.length, 0],
-    [0, t.width],
-    [t.length, t.width],
-    [t.length / 2, 0.2],
-    [t.length / 2, t.width / 2 - 0.1],
-    [0.3, 0.2],
-  ];
-  for (const [x, y] of samples) {
-    const near = t.nearestPocket(x, y);
-    let best = Infinity;
-    let which = null;
-    for (const p of t.pockets) {
-      const d = Math.hypot(x - p.x, y - p.y);
-      if (d < best) {
-        best = d;
-        which = p;
-      }
-    }
-    assert.equal(near.pocket, which, `(${x}, ${y}) 最近袋应为 ${which.id}`);
-    assert.ok(Math.abs(near.distance - best) < 1e-15, `(${x}, ${y}) 距离 ${near.distance} 应为 ${best}`);
-  }
-  // 角点上距离为 0
-  assert.equal(t.nearestPocket(0, 0).distance, 0);
-  // 不做范围检查：台面外的点照样返回最近的袋
-  assert.equal(t.nearestPocket(-100, -100).pocket.id, 'c-bl');
-});
-
-test('cushionAt：闭区间含两端，中袋缺口与角袋缺口都返回 null', () => {
-  const t = createTable('pool9');
-  const cfg = TABLE_PRESETS.pool9;
-  const halfL = t.length / 2;
-  const railBL = t.cushions.find((c) => c.id === 'rail-b-l');
-
-  // from / to 端点都在线段上（闭区间）
-  assert.equal(t.cushionAt('y', 0, cfg.cornerJaw), railBL);
-  assert.equal(t.cushionAt('y', 0, halfL - cfg.middleJaw), railBL);
-  assert.equal(t.cushionAt('y', 0, cfg.cornerJaw / 2), null, '角袋缺口内不应有库边');
-  assert.equal(t.cushionAt('y', 0, cfg.cornerJaw - 1e-9), null);
-  // 中袋缺口
-  assert.equal(t.cushionAt('y', 0, halfL), null);
-  assert.equal(t.cushionAt('y', 0, halfL - cfg.middleJaw + 1e-9), null);
-  // 越过缺口后落到右段
-  assert.equal(t.cushionAt('y', 0, halfL + cfg.middleJaw)?.id, 'rail-b-r');
-  assert.equal(t.cushionAt('y', 0, t.length - cfg.cornerJaw)?.id, 'rail-b-r');
-
-  // 两侧短库
-  assert.equal(t.cushionAt('x', 0, t.width / 2)?.id, 'rail-l');
-  assert.equal(t.cushionAt('x', t.length, t.width / 2)?.id, 'rail-r');
-  assert.equal(t.cushionAt('x', 0, cfg.cornerJaw / 2), null);
-  assert.equal(t.cushionAt('x', t.length, t.width - cfg.cornerJaw / 2), null);
-
-  // 上库
-  assert.equal(t.cushionAt('y', t.width, halfL / 2)?.id, 'rail-t-l');
-  assert.equal(t.cushionAt('y', t.width, halfL + 1)?.id, 'rail-t-r');
-
-  // 位置对但轴不对 / 位置不对
-  assert.equal(t.cushionAt('x', 0.5, 1), null);
-  assert.equal(t.cushionAt('y', 0.5, 1), null);
-  // pos 是严格相等比较（契约见 table.js:204）：pos 只取库面所在的台面边界值
-  // 0 / t.length / t.width，不是球坐标重算出来的量，所以这里不做容差匹配。
-  // 这条用例锁的是"传进去一个算出来近似 0 的值，就该判不在库上"。
-  assert.equal(t.cushionAt('y', 0.1 + 0.2 - 0.3, 1), null);
-});
-
 test('createTable：未知预设 / null / 袋口不大于球 / 尺寸非正 都抛错', () => {
   assert.throws(() => createTable('不存在的台'), /未知球台预设/);
   assert.throws(() => createTable(null), /未知球台预设/);
@@ -410,8 +361,8 @@ test('createTable：反向库边段必须抛错（原「已知缺口」已封，
     middleJaw: 0.12,
   };
   // 上一轮这张台是"能建出来、但 rail-b-l 的 from > to"的：极端参数下库边段反向，
-  // cushionAt 永远命不中，等于这一段库整段消失，球从缺口直接滚出台面。
-  // 现在建台时就抛错，不再静默接受。
+  // 那一段库永远命不中（任何按 from..to 查库边的代码都会落空），等于整段消失，
+  // 球从缺口直接滚出台面。现在建台时就抛错，不再静默接受。
   assert.throws(() => createTable(base), /球台参数非法/);
 
   // 只违反长库条件（halfL - middleJaw <= cornerJaw），短库仍然合法——隔离出这一条校验

@@ -30,8 +30,9 @@ export function createTable(preset = 'pool9') {
 
   // ── 参数自洽性校验 ──────────────────────────────────────────────────
   // 必须在建台时抛错，而不是建出一张"看着正常、几何已经坏了"的台：极端参数不会让
-  // 任何一行代码报错，只会让库边段 from > to 反向；线段反向之后 cushionAt 永远
-  // 命不中，那一段库就静默消失，球会从缺口直接滚出台面，而没有任何一处提示。
+  // 任何一行代码报错，只会让库边段 from > to 反向；线段反向之后那一段库就永远
+  // 命不中（任何按 from..to 查库边的代码都会落空），等于整段消失，球会从缺口
+  // 直接滚出台面，而没有任何一处提示。
   //
   // 下面每条都只拒绝"几何上画不出台面"的参数。现有全部调用点（三个预设、
   // demo/app.js 的换台、demo/save.js 的读档、测试里的自定义台）都满足，
@@ -116,26 +117,12 @@ export function createTable(preset = 'pool9') {
     /** 球心允许活动的矩形范围（贴库时球心仍在内侧一个半径处） */
     bounds: { minX: R, maxX: L - R, minY: R, maxY: W - R },
 
-    /**
-     * 球心到最近袋心的距离。
-     *
-     * 生产代码里零调用点（只有测试在用）；保留是因为它是袋口几何的自检工具，
-     * 测试靠它把"库边端点必须抵到袋口捕获圆"这条约束钉死。
-     */
-    nearestPocket(x, y) {
-      let best = null;
-      let bestSq = Infinity;
-      for (const p of pockets) {
-        const dx = x - p.x;
-        const dy = y - p.y;
-        const sq = dx * dx + dy * dy;
-        if (sq < bestSq) {
-          bestSq = sq;
-          best = p;
-        }
-      }
-      return { pocket: best, distance: Math.sqrt(bestSq) };
-    },
+    // 这里曾有 nearestPocket(x, y)：返回最近袋心与欧氏距离。生产代码零调用
+    // （physics.js 走 pocketAt 的外接正方形预筛，从不问"最近的袋是哪个"），
+    // 只有 test/table.test.js 在用：一条是它自己的专项用例，另一条只是拿它当
+    // 工具去验「库边端点必须抵到袋口捕获圆」。后一条约束有价值，已改成在测试
+    // 里直接用 pockets 算最近袋；API 与其专项用例一并删除，避免留下只有测试
+    // 才走的分支。
 
     /**
      * 球心是否已经落在某个袋的捕获区内。
@@ -198,27 +185,12 @@ export function createTable(preset = 'pool9') {
       );
     },
 
-    /**
-     * 找到给定库边线段上、给定坐标处的有效库边；不在任何线段上则返回 null（即袋口）。
-     *
-     * pos 按 `===` 精确比较，这是刻意的：pos 是**库面所在的台面边界值**，
-     * 只有 0 / table.length / table.width 三个合法取值，由调用方从台面常量取，
-     * 不是球坐标累加出来的量。用容差比较等于允许"差不多在这条库上"的坐标混进来，
-     * 那会把袋口外的点误判成库边。
-     *
-     * 目前零生产调用点（src/ / demo/ / tools/ 全部 grep 过，只有 table.test.js 在用）：
-     * 库边碰撞走的是 physics.js 自己的 axis/pos 判定，不经过这里。若将来接进物理核，
-     * 传进来的 pos 必须回读 `c.pos` 之类的原值，不要用球坐标重算。
-     */
-    cushionAt(axis, pos, along) {
-      for (let i = 0; i < cushions.length; i++) {
-        const c = cushions[i];
-        if (c.axis === axis && c.pos === pos && along >= c.from && along <= c.to) {
-          return c;
-        }
-      }
-      return null;
-    },
+    // 这里曾有 cushionAt(axis, pos, along)：按 axis/pos/along 查库边线段。
+    // 生产代码从未调用（physics.js 的库边碰撞按自己的 axis/pos 判定，不进这里），
+    // 只有 test/table.test.js 的专项用例在用它，用例随 API 一并删除。库边几何
+    // 仍由两条更强的用例锁住：每段端点正好抵到相邻袋口的捕获圆、库边总长
+    // = 周长 - 8*cornerJaw - 4*middleJaw。若将来要把库边查询接进物理核，
+    // pos 必须回读 `c.pos` 之类的原值（0 / 台长 / 台宽），不要用球坐标重算。
   };
 }
 

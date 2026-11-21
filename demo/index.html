@@ -918,7 +918,20 @@
     .sub-pill { display: none; }
     header select { justify-self: start; }
     header nav { justify-self: end; }
-    #stage { height: 48vh; min-height: 260px; }
+    /* 台面高度跟着 canvas 实际高度收紧，不再留 48vh 的死高度。
+       竖屏手机下 canvas 永远是**宽度受限**的：app.js 的 resize() 调
+       view.fit(#stage 宽 - 10, #stage 高 - 10)，390 宽时 380/2.8 ≈ 136 远小于
+       高度允许的 ≈ 258，所以 canvas 高度只由宽度决定（与 #stage 高度无关）。
+       这里直接把这个高度算出来，比例取三种台里最宽的 pool8：
+       (1.12 + 2×0.13) / (2.24 + 2×0.13) = 0.552（FRAME_MARGIN 见 render.js）。
+       取上限是为了让最高的那种台也不被 overflow:hidden 裁掉，pool9 / 斯诺克
+       各自剩 ≤ 8px 居中余量。高度只依赖 100vw、不依赖 canvas 自身尺寸，
+       因此不存在「容器变小 → canvas 更小 → 空白还在」的反馈环。
+       min-height 必须归零：260px 会把收紧后的高度又顶回去。 */
+    #stage {
+      height: min(calc((100vw - 10px) * 0.552 + 32px), 48vh);
+      min-height: 0;
+    }
     aside { padding: 10px; }
     .practice-buckets { gap: 4px; font-size: 10px; }
     .practice-buckets div { padding: 6px 3px; }
