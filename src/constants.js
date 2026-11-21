@@ -129,5 +129,42 @@ export const MAX_TIP_OFFSET = 0.5;
 export const FIXED_DT = 1 / 240;
 export const SEARCH_DT = 1 / 120;
 
-/** 单杆最长仿真时间，防止卡死。 */
+/** 单杆最长仿真时间，防止卡死。真实击球（rules 的 simulateShot）和对手打分仿真走这个值。 */
 export const MAX_SHOT_TIME = 26;
+
+/**
+ * 一次求解里三种试探仿真的时间上限。
+ *
+ * 以前这四个时限是四个散落的字面量（solver 20 / solver 16 / safety 20 / 默认 26），
+ * 改一处漏两处就会让「验证时算出来的」和「真打时发生的事」不是同一件事。
+ * 收拢成具名常量时**数值一个都没动**，只是让来源可查、diff 可读：
+ *  - SOLVE_MAX_TIME 20：solver.js 的 trialShot，每次候选验证都跑它
+ *  - TUNE_MAX_TIME 16：solver.js 的 solveBankDirection，翻袋方向迭代（单球、更短）
+ *  - SHOOT_MAX_TIME 20：safety.js 的 shoot，防守候选验证
+ *  - 真实击球不另设值，继续用 MAX_SHOT_TIME=26（要给球留足停下来的时间）
+ */
+export const SOLVE_MAX_TIME = 20;
+export const TUNE_MAX_TIME = 16;
+export const SHOOT_MAX_TIME = 20;
+
+/** 时限登记表：sim.js 的调用方按用途取值，测试用它核对「常量表与实际调用一致」。 */
+export const SHOT_TIME_LIMITS = Object.freeze({
+  solve: SOLVE_MAX_TIME,
+  tune: TUNE_MAX_TIME,
+  safety: SHOOT_MAX_TIME,
+  play: MAX_SHOT_TIME,
+});
+
+/**
+ * 切角上限（度）：切角超过它就不认这一杆。
+ *
+ * 进攻判定（solver 的 solveShot / bestNextShot）用 82°，安全球判定（safety 的
+ * solveSafety）用 78°——**这不是同一条边界**，78 更保守，所以同一杆完全可能出现
+ * 「进攻说能打、防守说打不了」。安全球一侧那句「与 solveShot 同一条边界」是错的注释，
+ * 已按实情改写。
+ *
+ * 本次只做「常量具名 + 注释纠错」，两个数值都保持原样：把它们并成一个会让 78–82°
+ * 之间原本判为可打的球变成「打不了」，那是产品决策，不是重构。
+ */
+export const MAX_CUT_ATTACK_DEG = 82;
+export const MAX_CUT_SAFETY_DEG = 78;

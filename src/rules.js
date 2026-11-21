@@ -77,8 +77,11 @@ import { groupOf, findFreeSpot, GAME_KINDS } from './rack.js';
 
 // 玩法登记表放在 rack.js（那边零依赖），这里转出去给调用方继续从 rules.js 取。
 export { GAME_KINDS };
-import { createBall, createWorld, stepWorld, allStopped, strike, createRollTracker } from './physics.js';
+import { createBall, createRollTracker, isCueBall } from './physics.js';
 import { SEARCH_DT, MAX_SHOT_TIME, SNOOKER_SPOTS } from './constants.js';
+// 三处「复制球 → strike → runShot → 取首碰」合并成一个入口（src/sim.js），
+// 这里只做规则侧加工：录帧、首碰后碰库、驱向库边的球、落袋明细。
+import { simulateShot as runShotSim } from './sim.js';
 import { resolveSnooker, initialSnooker, snookerTargets, ballName as snookerBallName } from './snooker.js';
 
 /** 犯规代码。与 WPA 条文的对应写在每条的文字里。 */
@@ -133,7 +136,7 @@ export function createGame(table, balls, opts = {}) {
     // 静默回落黑八会让一局九球按黑八规则跑完，中途没有任何提示，比直接报错难查得多。
     throw new Error(`不认识的玩法：${String(opts.kind)}（支持 ${Object.keys(GAME_KINDS).join(' / ')}）`);
   }
-  const cue = balls.find((b) => b.number === 0 || b.id === 'cue');
+  const cue = balls.find((b) => isCueBall(b));
   if (!cue) throw new Error('建局需要一颗母球（number 0 或 id "cue"）');
 
   // 统一补齐运动学字段。createStandardRack 只给几何和配色，
@@ -186,7 +189,7 @@ export function cloneGame(game) {
 
 /** 台面上还没落袋的球号（不含母球）。 */
 export function numbersOnTable(balls) {
-  return balls.filter((b) => !b.pocketed && b.number !== 0).map((b) => b.number);
+  return balls.filter((b) => !b.pocketed && !isCueBall(b)).map((b) => b.number);
 }
 
 /**
@@ -243,59 +246,63 @@ export function simulateShot(table, balls, shot, opts = {}) {
   const maxTime = opts.maxTime ?? MAX_SHOT_TIME;
   const cueId = shot.cueId ?? 'cue';
 
-  const copy = balls.map((b) =>
-    typeof b.vx === 'number' && typeof b.pocketed === 'boolean' ? { ...b } : createBall(b.id, b.x, b.y, b)
-  );
-  const world = createWorld(table, copy);
-  const cue = copy.find((b) => b.id === cueId);
-  if (!cue) throw new Error(`找不到母球: ${cueId}`);
-  if (cue.pocketed) throw new Error('母球已落袋，不能击球');
-
-  const onTableBefore = copy.filter((b) => !b.pocketed && b.number !== 0).map((b) => b.number);
-
-  strike(cue, { angle: shot.angle, speed: shot.speed, tip: shot.tip ?? { a: 0, b: 0 } });
-
   // 录帧是给演示页回放用的：规则结算只要最终状态，但界面要看到球怎么走的。
   // 默认不录（Node 测试和批量模拟都不需要），只有传了 record 才逐帧存快照。
   const frameEvery = Math.max(1, Math.round(opts.frameEvery ?? 1));
-  const trackRoll = opts.record ? createRollTracker(copy, table.ballRadius) : null;
-  const snapshot = () => {
-    const roll = trackRoll();
-    return copy.map((b, i) => ({
-      x: b.x,
-      y: b.y,
-      pocketed: b.pocketed,
-      pocket: b.pocket,
-      ...roll[i],
-    }));
-  };
-  const frames = opts.record ? [snapshot()] : null;
-
-  const events = [];
-  let elapsed = 0;
+  let copy = null;
+  let snapshot = null;
+  let frames = null;
   let step = 0;
-  while (elapsed < maxTime) {
-    stepWorld(world, dt, events);
-    elapsed += dt;
-    step++;
-    if (frames && step % frameEvery === 0) frames.push(snapshot());
-    if (allStopped(world)) break;
+  let onTableBefore = [];
+
+  const sim = runShotSim(
+    table,
+    balls,
+    { cueId, angle: shot.angle, speed: shot.speed, tip: shot.tip },
+    {
+      dt,
+      maxTime,
+      // 规则侧沿用原来的补球策略：动学字段不全的球用 createBall 补齐，齐全的浅拷贝。
+      normalize: true,
+      // 母球已经落袋就不许再击球（原来这里直接 throw，理由见下面 !sim.ok 分支）。
+      rejectPocketedCue: true,
+      onStart: (world) => {
+        copy = world.balls;
+        onTableBefore = copy.filter((b) => !b.pocketed && !isCueBall(b)).map((b) => b.number);
+        if (!opts.record) return;
+        const trackRoll = createRollTracker(copy, table.ballRadius);
+        snapshot = () => {
+          const roll = trackRoll();
+          return copy.map((b, i) => ({
+            x: b.x,
+            y: b.y,
+            pocketed: b.pocketed,
+            pocket: b.pocket,
+            ...roll[i],
+          }));
+        };
+        frames = [snapshot()];
+      },
+      onStep: () => {
+        step++;
+        if (frames && step % frameEvery === 0) frames.push(snapshot());
+      },
+    }
+  );
+
+  if (!sim.ok) {
+    if (sim.reason === 'no_cue') throw new Error(`找不到母球: ${cueId}`);
+    if (sim.reason === 'cue_pocketed') throw new Error('母球已落袋，不能击球');
+    throw new Error(`无法击球: ${sim.reason}`);
   }
   if (frames && step % frameEvery !== 0) {
     frames.push(snapshot());
   }
 
-  // 首碰：事件流里第一条与母球有关的球球接触
-  let contactIndex = -1;
-  let firstContactId = null;
-  for (let i = 0; i < events.length; i++) {
-    const e = events[i];
-    if (e.type !== 'ball') continue;
-    if (e.a === cueId) { firstContactId = e.b; contactIndex = i; break; }
-    if (e.b === cueId) { firstContactId = e.a; contactIndex = i; break; }
-  }
-  const firstBall = firstContactId ? copy.find((b) => b.id === firstContactId) : null;
-  const firstContact = firstBall ? firstBall.number : null;
+  const { events } = sim;
+  const contactIndex = sim.contactIndex;
+  const firstContactId = sim.firstContactId;
+  const firstContact = sim.firstContact;
 
   // 首碰之后有哪些球碰过库（3.3 只看碰球之后）
   const railsAfterContact = [];
@@ -311,7 +318,7 @@ export function simulateShot(table, balls, shot, opts = {}) {
   for (const e of events) {
     if (e.type !== 'cushion') continue;
     const b = copy.find((x) => x.id === e.ball);
-    if (b && b.number !== 0) toRail.add(b.number);
+    if (b && !isCueBall(b)) toRail.add(b.number);
   }
 
   const pocketed = [];
@@ -320,19 +327,19 @@ export function simulateShot(table, balls, shot, opts = {}) {
     const b = copy.find((x) => x.id === e.ball);
     if (b) pocketed.push({ id: b.id, number: b.number, pocket: e.pocket });
   }
-  for (const p of pocketed) if (p.number !== 0) toRail.add(p.number);
+  for (const p of pocketed) if (!isCueBall(p)) toRail.add(p.number);
 
   return {
     firstContact,
     firstContactId,
     pocketed,
-    cueScratched: pocketed.some((p) => p.number === 0),
+    cueScratched: pocketed.some((p) => isCueBall(p)),
     railsAfterContact,
     objectBallsToRail: [...toRail].sort((a, b) => a - b),
     onTableBefore,
-    onTableAfter: copy.filter((b) => !b.pocketed && b.number !== 0).map((b) => b.number),
-    settled: allStopped(world),
-    elapsed,
+    onTableAfter: copy.filter((b) => !b.pocketed && !isCueBall(b)).map((b) => b.number),
+    settled: sim.settled,
+    elapsed: sim.elapsed,
     events,
     frames,
     dt,
@@ -871,7 +878,7 @@ export function placementAllowed(game, x, y) {
 
 /** 把一个球放到指定位置，并清掉与其它球的重叠（持球摆位用）。 */
 export function placeCueBall(game, x, y) {
-  const cue = game.balls.find((b) => b.number === 0 || b.id === 'cue');
+  const cue = game.balls.find((b) => isCueBall(b));
   if (!cue) return false;
   const R = game.table.ballRadius;
   // findFreeSpot 会螺旋外扩，必须把持球区域约束一起传进去，

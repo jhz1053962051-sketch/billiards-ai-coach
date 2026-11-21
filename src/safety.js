@@ -24,10 +24,14 @@
 //   然后看这一杆能不能让对手比那更难受。赢不过基准就不算防守，返回 null，
 //   由 planShot 退回兜底直撞——正好就是那杆基准。
 
-import { SPEED, SEARCH_DT } from './constants.js';
+import { SPEED, SEARCH_DT, SHOOT_MAX_TIME, MAX_CUT_SAFETY_DEG } from './constants.js';
 import { V, DEG } from './geometry.js';
-import { createWorld, strike, runShot } from './physics.js';
-import { positionTolerance } from './solver.js';
+import { isCueBall } from './physics.js';
+// 容错评估只在 tolerance.js 里，不再 import solver.js——solver.js 反过来要用本文件的
+// solveSafety，那个循环依赖就是这么来的，从这里断开。
+import { positionTolerance } from './tolerance.js';
+// 三处「复制球 → strike → runShot → 取首碰」合并成一个入口（src/sim.js）。
+import { simulateShot } from './sim.js';
 
 /**
  * 采样哪些瞄准偏移，按**几何上界**的比例取值，不是一组固定角度。
@@ -73,9 +77,13 @@ const SPEEDS = [SPEED.min, SPEED.soft, SPEED.medium, SPEED.firm];
 
 /**
  * 薄到什么程度就打空了：切角超过 78° 时球心连线已经擦不到球。
- * 与 solveShot 用同一条边界，否则会出现「进攻说打不了、防守说能打」的自相矛盾。
+ *
+ * 注意：这**不是**进攻判定的那条边界。进攻（solveShot / bestNextShot）用 82°
+ * （constants.MAX_CUT_ATTACK_DEG），防守用这里的 78°——78 更保守，所以同一杆
+ * 完全可能「进攻说能打、防守说打不了」。原来的注释写着「与 solveShot 同一条
+ * 边界」，是错的；是否要统一成一个数（以及统一到哪个）属于产品判断，待确认。
  */
-export const MAX_CUT_DEG = 78;
+export const MAX_CUT_DEG = MAX_CUT_SAFETY_DEG;
 
 /**
  * 评分三块（0–100，权重见 SCORE_WEIGHTS）：
@@ -106,29 +114,40 @@ function scoreSafety({ oppTol, baseTol, fouled, cueNearPocket, cueNearestBall, R
  * @returns {{ok:boolean, fouled:boolean, cueSpot:object|null, balls:object[]|null, oppTol:number, hitNumber:number|null}}
  */
 function shoot(table, balls, cueId, target, aimAngle, speed) {
-  const copy = balls.map((b) => ({ ...b, vx: 0, vy: 0, wx: 0, wy: 0, wz: 0 }));
-  const world = createWorld(table, copy);
-  const c = copy.find((b) => b.id === cueId);
-  if (!c || c.pocketed) return { ok: false };
-  strike(c, { angle: aimAngle, speed, tip: { a: 0, b: 0 } });
-  // 步长必须和真正执行时一致（rules.js 的 simulateShot 用 SEARCH_DT）。
-  // 这里原来不传 dt，走的是 FIXED_DT = 1/240——比执行细一倍，
-  // 于是防守评估算的是"另一个台面"，而它评出来的容错角度是要拿去和
-  // 对手的实际局面比大小的。同一批 24 个方向的单球仿真实测：
-  // 1/240 用 21.3 ms、SEARCH_DT 用 3.3 ms（快 6.44 倍），进袋结论 0 处差异。
-  const { events } = runShot(world, { maxTime: 20, dt: SEARCH_DT });
+  // 仿真本体（复制球 → strike → runShot → 取首碰）走 src/sim.js 那一个入口，
+  // 这里只保留防守侧特有的判定：有没有碰到球、母球有没有摔袋、有没有球碰库。
+  const sim = simulateShot(
+    table,
+    balls,
+    { cueId, angle: aimAngle, speed, tip: { a: 0, b: 0 } },
+    {
+      // 防守验证的时限：20s，与抽取入口之前一致（见 constants.SHOOT_MAX_TIME）。
+      maxTime: SHOOT_MAX_TIME,
+      // 步长必须和真正执行时一致（rules.js 的 simulateShot 用 SEARCH_DT）。
+      // 这里原来不传 dt，走的是 FIXED_DT = 1/240——比执行细一倍，
+      // 于是防守评估算的是"另一个台面"，而它评出来的容错角度是要拿去和
+      // 对手的实际局面比大小的。同一批 24 个方向的单球仿真实测：
+      // 1/240 用 21.3 ms、SEARCH_DT 用 3.3 ms（快 6.44 倍），进袋结论 0 处差异。
+      dt: SEARCH_DT,
+      // 母球已经落袋就没有防守可言：这是防守侧原本就有的前提检查。
+      rejectPocketedCue: true,
+    }
+  );
 
+  if (!sim.ok) {
+    if (sim.reason === 'no_cue' || sim.reason === 'cue_pocketed') return { ok: false };
+    return { ok: false, reason: sim.reason };
+  }
+  const events = sim.events;
   // 必须真的先碰到球（没碰到就是直接犯规）
-  const hit = events.find((e) => e.type === 'ball' && (e.a === cueId || e.b === cueId));
-  if (!hit) return { ok: false, reason: 'no_contact' };
-  const otherId = hit.a === cueId ? hit.b : hit.a;
-  const hitBall = balls.find((b) => b.id === otherId);
+  if (!sim.hitBall) return { ok: false, reason: 'no_contact' };
+  const copy = sim.balls;
 
-  const cueAfter = copy.find((b) => b.id === cueId);
+  const cueAfter = sim.cue;
   if (!cueAfter || cueAfter.pocketed) return { ok: false, reason: 'scratch' };
 
   const rails = events.filter((e) => e.type === 'cushion').length;
-  const pocketedAny = copy.some((b) => b.number !== 0 && b.pocketed);
+  const pocketedAny = copy.some((b) => !isCueBall(b) && b.pocketed);
   // 3.3：碰球之后至少一颗球被驱向库边，进袋也算
   const fouled = rails === 0 && !pocketedAny;
 
@@ -138,7 +157,7 @@ function shoot(table, balls, cueId, target, aimAngle, speed) {
     cueSpot: { x: cueAfter.x, y: cueAfter.y },
     balls: copy,
     oppTol: positionTolerance(table, copy, { cueId }),
-    hitNumber: hitBall ? hitBall.number : null,
+    hitNumber: sim.hitBall.number,
     pocketedAny,
   };
 }
@@ -162,7 +181,7 @@ export function solveSafety(table, balls, opts = {}) {
 
   const allow = opts.allow ? new Set(opts.allow) : null;
   const targets = balls.filter(
-    (b) => b.id !== cueId && !b.pocketed && b.number !== 0 && (!allow || allow.has(b.number))
+    (b) => b.id !== cueId && !b.pocketed && !isCueBall(b) && (!allow || allow.has(b.number))
   );
   if (!targets.length) return null;
 

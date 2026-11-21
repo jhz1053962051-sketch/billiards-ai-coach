@@ -79,9 +79,26 @@ export function createBall(id, x, y, extra = {}) {
     wz: 0,
     pocketed: false,
     color: '#ffffff',
-    number: 0,
+    // 这里**不**给 number 默认值。以前默认 0，于是「漏传 number 的新球」会被
+    // 判成母球（0 号就是母球），母球身份因此多了一条谁也想不到的来源。
+    // 现在没给 number 就是 undefined，isCueBall 不认它，必须显式写 0 或 id 'cue'。
     ...extra,
   };
+}
+
+/**
+ * 母球身份的唯一判定。
+ *
+ * 以前仓库里有两种写法（`number === 0 || id === 'cue'` 与只判 `number === 0`），
+ * 同一颗球在两处可以得到不同答案。统一成这一处：显式 0 号，或者显式 id 'cue'。
+ * 注意 `number` 缺省（undefined）**不算**母球——这正是 createBall 不再默认 0 的原因。
+ *
+ * @param {{ number?: number, id?: string } | null | undefined} ball
+ * @returns {boolean}
+ */
+export function isCueBall(ball) {
+  if (!ball) return false;
+  return ball.number === 0 || ball.id === 'cue';
 }
 
 export function createRollTracker(balls, radius) {

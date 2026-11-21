@@ -1,4 +1,4 @@
-// 对手出杆：给「打一整局」一个真正的对手。
+﻿// 对手出杆：给「打一整局」一个真正的对手。
 //
 // 设计上刻意不引入任何"作弊"路径——对手用的就是玩家点「求解」时跑的同一套
 // planShot / simulateShot / resolveShot，参数完全一致，只是把点击换成了自动触发。
@@ -26,6 +26,7 @@ import {
   simulateShot,
 } from './rules.js';
 import { SEARCH_DT } from './constants.js';
+import { isCueBall } from './physics.js';
 import { planShot, positionTolerance, toleranceToEase } from './solver.js';
 
 /** 打完这一杆之后，对方还剩多好打，在选杆里占多少权重（0 = 只看这一杆） */
@@ -123,7 +124,7 @@ function scoreCandidate(table, game, candidate, opts) {
   const { next, report } = resolveShot(work, facts);
   const potted = report.pocketed.length > 0;
 
-  const cue = next.balls.find((b) => b.number === 0 || b.id === 'cue');
+  const cue = next.balls.find((b) => isCueBall(b));
   const opponentAllow = legalTargetNumbers(next, numbersOnTable(next.balls));
   const humanTolerance = positionTolerance(table, next.balls, {
     cueId: cue?.id ?? 'cue',
@@ -181,7 +182,7 @@ function deepScore(table, entry, opts) {
     after = resolveShot(work, facts).next;
   }
 
-  const cue = after.balls.find((b) => b.number === 0 || b.id === 'cue');
+  const cue = after.balls.find((b) => isCueBall(b));
   const myAllow = legalTargetNumbers(after, numbersOnTable(after.balls));
   const myTolerance = positionTolerance(table, after.balls, { cueId: cue?.id ?? 'cue', allow: myAllow });
   const myEase = toleranceToEase(myTolerance);
@@ -222,7 +223,7 @@ export function pickCueSpot(game, opts = {}) {
 
       let clear = Infinity;
       for (const b of game.balls) {
-        if (b.number === 0 || b.pocketed) continue;
+        if (isCueBall(b) || b.pocketed) continue;
         clear = Math.min(clear, Math.hypot(b.x - x, b.y - y));
       }
       // 必须留出直径再加一点余量，否则 placeCueBall 会把它推开、位置就不受控了
@@ -272,7 +273,7 @@ export function takeTurn(table, game, opts = {}) {
     work.ballInHand = null;
     cuePlaced = true;
     // placeCueBall 可能把球推开一点，所以回报的是它实际落点，不是请求点
-    const placed = work.balls.find((b) => b.number === 0 || b.id === 'cue');
+    const placed = work.balls.find((b) => isCueBall(b));
     cueSpot = placed ? { x: placed.x, y: placed.y } : spot;
   }
 

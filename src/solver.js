@@ -9,7 +9,7 @@
 //   实测：只靠解析解的推荐杆成功率 65%；加上仿真验证后能到 95% 以上。
 //   一次仿真 0.8 ms，验证十几次也就十几毫秒，完全付得起。
 
-import { PHYS, SPEED, MAX_TIP_OFFSET, SEARCH_DT } from './constants.js';
+import { PHYS, SPEED, MAX_TIP_OFFSET, SEARCH_DT, SOLVE_MAX_TIME, TUNE_MAX_TIME, MAX_CUT_ATTACK_DEG } from './constants.js';
 import { V, DEG } from './geometry.js';
 import {
   createBall,
@@ -18,6 +18,7 @@ import {
   runShot,
   speedToReach,
   cueSpeedForImpact,
+  isCueBall,
 } from './physics.js';
 import {
   solveContactNormal,
@@ -30,14 +31,16 @@ import {
   comboAimPoints,
   bankSeedDirection,
 } from './aim.js';
+// 「下一杆有多好打」的评估搬到 src/tolerance.js：它只依赖 aim/geometry，
+// 这样 safety.js 就不必再从 solver.js 取 positionTolerance，solver ↔ safety 的环没了。
+// 对外仍然从 solver.js 导出 positionTolerance，老调用方（opponent.js、测试）不用改。
+import { bestNextShot, positionTolerance } from './tolerance.js';
 
-// 与 src/safety.js 互相引用：那边用本文件的 positionTolerance 评估「对手有多难打」，
-// 这边用那边的 solveSafety 在没进攻机会时找防守。
-// ES modules 的函数声明会提升，所以这个环不会在模块求值阶段炸——
-// 两个文件在顶层都只定义常量与函数，没有一边依赖另一边的求值结果。
-// （真出问题的话 Node 会直接抛 ReferenceError，测试里能立刻看到。）
+export { positionTolerance };
 import { solveSafety } from './safety.js';
 import { ballName as snookerBallName } from './snooker.js';
+// 三处「复制球 → strike → runShot → 取首碰」合并成一个入口（src/sim.js）。
+import { simulateShot } from './sim.js';
 
 /**
  * 目标球的叫法。
@@ -148,46 +151,48 @@ function suggestTip(cutDeg, d1) {
  * 母球停位要拿它算走位，兜底方案要拿 firstContact 判断这一杆碰没碰到球。
  */
 function trialShot(table, balls, cueId, targetId, pocketId, aimAngle, speed, tip, recordCueRoute = false) {
-  const copy = balls.map((b) => ({ ...b, vx: 0, vy: 0, wx: 0, wy: 0, wz: 0 }));
-  const world = createWorld(table, copy);
-  // 用索引代替 find：copy 由 balls.map 生成，下标一一对应，O(1) 取代 O(n)。
+  // 真正的仿真（复制球 → strike → runShot → 取首碰）走 src/sim.js 那一个入口，
+  // 这里只保留求解侧特有的两件事：母球路线采样（给走位提示用）和「目标球进的是不是这个袋」。
+  // 用索引代替 find：sim 内部的副本就是 balls.map 浅拷贝，下标与 balls 一一对应，
   // trialShot 在一次 solveShot 里被调几百次，每次省掉两次线性查找。
   const cueIdx = balls.findIndex((b) => b.id === cueId);
-  const targetIdx = balls.findIndex((b) => b.id === targetId);
-  if (cueIdx < 0 || targetIdx < 0) return { ok: false, balls: copy, firstContact: null };
-  const cue = copy[cueIdx];
-  const target = copy[targetIdx];
-  strike(cue, { angle: aimAngle, speed, tip: { a: tip.a, b: tip.b } });
-  // 步长必须和真正执行时用的那个一致（rules.js 的 simulateShot 用 SEARCH_DT）。
-  // 这里原来不传 dt，走的是 runShot 默认的 FIXED_DT = 1/240，于是出现一个很隐蔽的
-  // 不一致：求解器用 240 Hz 验证「这一杆能进」，用户点下去却按 120 Hz 真的打，
-  // 两边算出来的球位不是同一个。验证比执行更精确并不是优点——验证的意义就是
-  // 预测实际会发生什么，精度对不上时它预测的是另一件事。
-  // 顺带这也让求解快了一倍（120 Hz 的步数是 240 Hz 的一半）。
-  const cueRoute = recordCueRoute ? [{ x: cue.x, y: cue.y }] : null;
+  const cueRoute = recordCueRoute ? [] : null;
   let nextRouteTime = 0.06;
-  const { events } = runShot(world, {
-    maxTime: 20,
-    dt: SEARCH_DT,
-    onStep: recordCueRoute
-      ? (currentWorld, elapsed) => {
-        if (elapsed < nextRouteTime) return;
-        const currentCue = currentWorld.balls[cueIdx];
-        if (currentCue && !currentCue.pocketed && cueRoute.length < 180) {
-          cueRoute.push({ x: currentCue.x, y: currentCue.y });
+  const sim = simulateShot(
+    table,
+    balls,
+    { cueId, angle: aimAngle, speed, tip: { a: tip.a, b: tip.b } },
+    {
+      // 求解验证的时限：20s，与抽取入口之前完全一致（见 constants.js 的 SOLVE_MAX_TIME）。
+      maxTime: SOLVE_MAX_TIME,
+      // 步长必须和真正执行时用的那个一致（rules.js 的 simulateShot 用 SEARCH_DT）。
+      // 这里原来不传 dt，走的是 runShot 默认的 FIXED_DT = 1/240，于是出现一个很隐蔽的
+      // 不一致：求解器用 240 Hz 验证「这一杆能进」，用户点下去却按 120 Hz 真的打，
+      // 两边算出来的球位不是同一个。验证比执行更精确并不是优点——验证的意义就是
+      // 预测实际会发生什么，精度对不上时它预测的是另一件事。
+      // 顺带这也让求解快了一倍（120 Hz 的步数是 240 Hz 的一半）。
+      dt: SEARCH_DT,
+      targetId,
+      onStart: (world) => {
+        if (cueRoute && world.balls[cueIdx]) cueRoute.push({ x: world.balls[cueIdx].x, y: world.balls[cueIdx].y });
+      },
+      onStep: recordCueRoute
+        ? (currentWorld, elapsed) => {
+          if (elapsed < nextRouteTime) return;
+          const currentCue = currentWorld.balls[cueIdx];
+          if (currentCue && !currentCue.pocketed && cueRoute.length < 180) {
+            cueRoute.push({ x: currentCue.x, y: currentCue.y });
+          }
+          nextRouteTime += 0.06;
         }
-        nextRouteTime += 0.06;
-      }
-      : undefined,
-  });
-  // events 里的 'ball' 是两球相撞；只有母球参与的那次才算「这一杆碰到了什么」
-  const hit = events.find((e) => e.type === 'ball' && (e.a === cueId || e.b === cueId));
-  let firstContact = null;
-  if (hit) {
-    const otherId = hit.a === cueId ? hit.b : hit.a;
-    const otherIdx = balls.findIndex((b) => b.id === otherId);
-    firstContact = otherIdx >= 0 ? balls[otherIdx].number : null;
-  }
+        : undefined,
+    }
+  );
+  // 母球或目标球不在台面上：原实现连仿真都不跑，直接当作「这一杆没意义」。
+  if (!sim.ok) return { ok: false, balls: sim.balls, firstContact: null };
+
+  const target = sim.balls[sim.balls.findIndex((b) => b.id === targetId)];
+  const cue = cueIdx >= 0 ? sim.balls[cueIdx] : null;
   if (cueRoute && cue && !cue.pocketed) {
     const last = cueRoute[cueRoute.length - 1];
     if (Math.hypot(last.x - cue.x, last.y - cue.y) > 1e-6) {
@@ -196,66 +201,16 @@ function trialShot(table, balls, cueId, targetId, pocketId, aimAngle, speed, tip
   }
   return {
     ok: target.pocketed && target.pocket === pocketId,
-    balls: copy,
-    firstContact,
+    balls: sim.balls,
+    firstContact: sim.firstContact,
     cueRoute,
   };
 }
 
 /**
- * 打完之后，下一杆还有多好打。
- *
- * 这一项原来完全没有：候选只按「这一杆多容易进」排序。实测 79 个有多个
- * 可进球候选的布局里，65% 的情况下「这一杆最容易」和「下一杆最好打」不是
- * 同一杆；按下一杆排序平均能让下一杆难度低 12.4 分（满分 100）。
- *
- * 评估不重跑完整求解（那要几十毫秒），只做几何筛查：剩下的每颗合法目标球
- * × 每个袋，看假想球在不在台内、两条路径通不通，取容错窗口最大的那个当
- * 「下一杆有多好打」。返回容错角度（度），没有可打的球时返回 0。
+ * 打完之后下一杆好不好打——bestNextShot / positionTolerance 已搬到 src/tolerance.js，
+ * 这里只保留求解器自己的用法（走位价值与候选排序）。
  */
-function bestNextShot(table, balls, cueId, allow) {
-  const R = table.ballRadius;
-  const cue = balls.find((b) => b.id === cueId);
-  if (!cue || cue.pocketed) return null;
-  const allowSet = allow ? new Set(allow) : null;
-  const targets = balls.filter(
-    (b) => b.id !== cueId && !b.pocketed && b.number !== 0 && (!allowSet || allowSet.has(b.number))
-  );
-  let best = null;
-  for (const target of targets) {
-    for (const pocket of table.pockets) {
-      const d2 = V.dist(target, pocket);
-      if (d2 < R * 2.2) continue;
-      const outDir = V.norm(V.sub(pocket, target));
-      const ghost = { x: target.x - outDir.x * 2 * R, y: target.y - outDir.y * 2 * R };
-      if (
-        ghost.x < R * 0.5 || ghost.x > table.length - R * 0.5 ||
-        ghost.y < R * 0.5 || ghost.y > table.width - R * 0.5
-      ) continue;
-      if (firstBlocker(cue, ghost, balls, [cueId, target.id], R)) continue;
-      if (firstBlocker(target, pocket, balls, [cueId, target.id], R)) continue;
-      if (cutAngleDeg(cue, ghost, target, pocket) > 82) continue;
-      const tol = aimToleranceDeg(cue, ghost, target, pocket, pocket.captureR, R);
-      if (!best || tol > best.toleranceDeg) {
-        best = {
-          targetId: target.id,
-          targetNumber: target.number,
-          target: { x: target.x, y: target.y },
-          pocketId: pocket.id,
-          pocket: { x: pocket.x, y: pocket.y },
-          ghost,
-          toleranceDeg: tol,
-        };
-      }
-    }
-  }
-  return best;
-}
-
-function bestNextTolerance(table, balls, cueId, allow) {
-  return bestNextShot(table, balls, cueId, allow)?.toleranceDeg ?? 0;
-}
-
 function assessPosition(table, balls, cueId, shotTargetId, allow) {
   const cue = balls.find((b) => b.id === cueId);
   const remaining = balls.some(
@@ -536,7 +491,8 @@ export function solveShot(table, balls, opts = {}) {
       if (firstBlocker(target, pocket, balls, [cueId, target.id], R)) continue;
 
       const cutDeg = cutAngleDeg(cue, ghost, target, pocket);
-      if (cutDeg > 82) continue;
+      // 进攻侧切角上限：具名常量，数值与以前写死的 82 完全一致。
+      if (cutDeg > MAX_CUT_ATTACK_DEG) continue;
 
       const tol = aimToleranceDeg(cue, ghost, target, pocket, pocket.captureR, R);
       if (tol < 0.03) continue;
@@ -888,7 +844,8 @@ function solveBankDirection(table, target, pocket, seedDir) {
     // 同 trialShot 的理由：步长与执行时一致。实测 24 个方向的单球翻袋仿真，
     // 1/240 用 21.3 ms、SEARCH_DT 用 3.3 ms（快 6.44 倍），进袋结论 0 处差异。
     // 这个函数在翻袋枚举里被调几十次，6 倍差距直接决定翻袋能不能开。
-    runShot(world, { maxTime: 16, dt: SEARCH_DT });
+    // 时限具名化：16s（原来在这里写死），因为只算单球方向，比整杆验证短（见 constants.TUNE_MAX_TIME）。
+    runShot(world, { maxTime: TUNE_MAX_TIME, dt: SEARCH_DT });
     if (copy.pocketed && copy.pocket === pocket.id) {
       return { x: Math.cos(angle), y: Math.sin(angle) };
     }
@@ -1369,7 +1326,8 @@ export function solveDirectHit(table, balls, opts = {}) {
       let targetMoved = 0;
       let targetPocketed = false;
       for (const after of r.balls) {
-        if (after.number === 0) continue;
+        // 母球不算「被撞动的目标球」——统一用 isCueBall，别再用 number === 0 单条件判。
+        if (isCueBall(after)) continue;
         const orig = before.get(after.id);
         if (!orig || orig.pocketed) continue;
         if (after.pocketed) {
@@ -1429,9 +1387,8 @@ export function solveDirectHit(table, balls, opts = {}) {
  * @param {object[]} balls 打完之后的球位
  * @param {{cueId?:string, allow?:number[]}} [opts]
  */
-export function positionTolerance(table, balls, opts = {}) {
-  return bestNextTolerance(table, balls, opts.cueId ?? 'cue', opts.allow ?? null);
-}
+// positionTolerance 的实现已搬到 src/tolerance.js（为了断开 solver ↔ safety 的循环依赖），
+// 这里从模块顶部 re-export，调用方继续 `import { positionTolerance } from './solver.js'`。
 
 /**
  * 生成一份完整的教练卡：最佳方案 + 备选 + 一句人话解说。
@@ -1489,7 +1446,7 @@ export function coach(table, balls, opts = {}) {
  * @returns {{plan:object|null, kind:string, alternatives:object[]}}
  */
 export function planShot(table, game, opts = {}) {
-  const cue = game.balls.find((b) => b.number === 0 || b.id === 'cue');
+  const cue = game.balls.find((b) => isCueBall(b));
   if (!cue) throw new Error('球局里找不到母球');
 
   if (game.breakShot) {
