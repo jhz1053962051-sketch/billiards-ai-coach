@@ -161,13 +161,15 @@ test('网格：默认收紧版与 exhaustive 的完整旧网格是两套参数�
   assert.deepEqual([...SOLVE_TUNE_GRID.centerTipBs], [0.55]);
   assert.deepEqual([...SOLVE_TUNE_GRID.spinTipAs], [-0.35, 0.35]);
   assert.equal(SOLVE_TUNE_GRID.spinOverAllSpeeds, false);
+  assert.equal(SOLVE_TUNE_GRID.spinCandidateScope, 'rank1', '默认只给排第一的候选补塞');
   assert.deepEqual([...SOLVE_TUNE_GRID.aimOffsetsDeg], []);
 
-  // 完整旧网格：5 档力度、6 个瞄准偏移、加塞对每档力度都重扫
+  // 完整旧网格：5 档力度、6 个瞄准偏移、加塞对每个候选、每档力度都重扫
   assert.deepEqual([...SOLVE_TUNE_GRID_LEGACY.speedFactors], [0.8, 1, 1.2, 1.45, 1.7]);
   assert.deepEqual([...SOLVE_TUNE_GRID_LEGACY.centerTipBs], [-0.55, 0.55]);
   assert.deepEqual([...SOLVE_TUNE_GRID_LEGACY.spinTipAs], [-0.35, 0.35]);
   assert.equal(SOLVE_TUNE_GRID_LEGACY.spinOverAllSpeeds, true);
+  assert.equal(SOLVE_TUNE_GRID_LEGACY.spinCandidateScope, 'all');
   assert.equal(SOLVE_TUNE_GRID_LEGACY.aimOffsetsDeg.length, 6);
 
   // 两套都是冻结对象：运行时改一个字段就等于悄悄改掉验收基准
@@ -219,6 +221,35 @@ test('网格：细扫循环确实消费 grid 的每个字段（常量改了循�
   assert.equal(legacyPerCandidate, 26, 'exhaustive 的完整网格不许被收紧');
 });
 
+// 「加塞给哪些候选」原来是调用点上的硬编码 i === 0，现在由 spinCandidateScope 决定。
+// 仓库里没有仿真计数器（src/sim.js 不许改），枪数没法在行为层数出来，所以这条契约
+// 只能钉在源码上：常量被读进局部开关，开关必须真的进 allowSpin。
+test('加塞覆盖：rank-1 是具名常量驱动，不是硬编码的 i === 0', () => {
+  assert.equal(SOLVE_TUNE_GRID.spinCandidateScope, 'rank1');
+  assert.equal(SOLVE_TUNE_GRID_LEGACY.spinCandidateScope, 'all');
+  for (const scope of [SOLVE_TUNE_GRID.spinCandidateScope, SOLVE_TUNE_GRID_LEGACY.spinCandidateScope]) {
+    assert.ok(scope === 'rank1' || scope === 'all', `spinCandidateScope 只接受 rank1/all，实际 ${scope}`);
+  }
+
+  const solver = srcText('solver.js');
+  assert.match(
+    solver,
+    /const\s+spinAllCandidates\s*=\s*tuneGrid\.spinCandidateScope\s*===\s*'all'/,
+    'solveShot 必须把 spinCandidateScope 读成局部开关'
+  );
+  assert.match(
+    solver,
+    /exhaustive\s*\|\|\s*spinAllCandidates\s*\|\|\s*i\s*===\s*0/,
+    'allowSpin 必须走开关，否则把常量改成 all 也没人来读'
+  );
+  // 旧的硬编码不能再留着做后门：留着就等于常量失效
+  assert.doesNotMatch(
+    solver,
+    /exhaustive\s*\|\|\s*i\s*===\s*0/,
+    '「只给 rank-1」的旧硬编码必须删掉'
+  );
+});
+
 test('网格：收紧后 3 球局面的仿真次数落在目标以内', () => {
   // 与 %TEMP% 基准脚本同一组局面（d05-three）：收紧前 58 次，目标 ≤ 40
   const balls = makeBalls([[0, 0.45, 0.9], [1, 1.35, 0.55], [2, 2.0, 1.05]]);
@@ -235,4 +266,53 @@ test('物理常量没有被改动（SPEED / PHYS 是收紧网格的下游，不�
   const l = cutLayout('c-tr', 60);
   const probe = solveContactNormal(l.cue, l.target, V.norm(V.sub(l.pocket, l.target)), SPEED.medium, R, PHYS);
   assert.ok(Number.isFinite(probe.ghost.x) && Number.isFinite(probe.ghost.y));
+});
+
+// ── 走位分回归：g3-6 / g4-2（2026-12 复核）──
+//
+// 上一轮报告把这两局记成「同杆但评分更低 −15.3% / −17.5%」，据此怀疑「加塞只在
+// 最优速度补两枪」。复核结论不是：candidate.value 是**成本**（越小越好），默认
+// 路径这两局都比穷举便宜——
+//   g3-6：两路都选中 2 号同一中袋。穷举在 1.55 倍速度上加右塞，走位只多 0.14，
+//         却多背 6 分加塞难度，默认中杆这杆更划算。
+//   g4-2：同杆同速，穷举只多一个左塞，停位逐位相同，纯多背 6 分惩罚。
+// 把加塞覆盖到全部力度档后两局数值一字未变，所以「覆盖不足」不是这两局的原因。
+// 这组坐标留下来当哨兵：将来谁再收窄加塞覆盖，只要真的把走位打差就会红。
+const SPIN_REGRESSION = [
+  { id: 'g3-6', balls: [[0, 2.044978, 0.18208], [1, 0.391335, 1.150222], [2, 1.7692, 0.785915]] },
+  {
+    id: 'g4-2',
+    balls: [
+      [0, 1.060585, 0.623912],
+      [1, 1.491169, 0.451195],
+      [2, 1.810791, 0.91889],
+      [3, 1.849721, 0.315312],
+    ],
+  },
+];
+
+test('加塞覆盖：g3-6 / g4-2 同杆，且走位分不低于穷举的 97%', () => {
+  for (const layout of SPIN_REGRESSION) {
+    const opts = { ...NO_BUDGET, cueId: 'cue' };
+    const def = solveShot(table, makeBalls(layout.balls), opts);
+    const full = solveShot(table, makeBalls(layout.balls), { ...opts, exhaustive: true });
+    assert.ok(def.length > 0 && full.length > 0, `${layout.id}：两边都该有解`);
+
+    // 同杆才有「评分比较」可言：袋和目标球都不许变
+    assert.equal(shotKey(def[0]), shotKey(full[0]), `${layout.id}：默认与穷举必须同杆`);
+
+    // 综合价值是成本：默认最多接受 3% 的恶化
+    assert.ok(
+      def[0].value <= full[0].value * 1.03 + 1e-9,
+      `${layout.id}：默认 value=${def[0].value} 比穷举 value=${full[0].value} 差出 3% 以上`
+    );
+
+    // 走位分本体：下一杆容差换算出来的 leaveScore 不许掉出 97%
+    if (full[0].leaveScore !== null) {
+      assert.ok(
+        def[0].leaveScore >= full[0].leaveScore * 0.97 - 1e-9,
+        `${layout.id}：走位分 ${def[0].leaveScore} 低于穷举 ${full[0].leaveScore} 的 97%`
+      );
+    }
+  }
 });

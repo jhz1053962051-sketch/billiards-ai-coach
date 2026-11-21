@@ -711,6 +711,11 @@ export function solveShot(table, balls, opts = {}) {
   const prune = verify && !exhaustive;
   // 网格：默认收紧版；exhaustive 走完整旧网格，作为质量对照的基准。
   const tuneGrid = exhaustive ? SOLVE_TUNE_GRID_LEGACY : SOLVE_TUNE_GRID;
+  // 加塞重扫给哪些候选，由网格自带的 spinCandidateScope 决定：'rank1' 只给排第一的
+  // 那个（默认路径），'all' 每个候选都给（完整旧网格）。这条决策原先硬编码成下面
+  // 调用里的 i === 0，搬进 constants 是为了让两套网格各自说清自己要什么，也为了
+  // 让改了常量却没改循环这种漏改能被测试逮到。
+  const spinAllCandidates = tuneGrid.spinCandidateScope === 'all';
   // 候选本来就不超过 K 个时排序毫无意义：直接按枚举顺序全扫，省掉一级的解析开销
   // （一级每个候选要做一次 200 步 traceRay + 一轮 next-shot 几何，2 球局面里这笔
   //  开销能占到总时间的十分之一）。
@@ -730,9 +735,11 @@ export function solveShot(table, balls, opts = {}) {
       tuned = verifyAndTune(
         table, balls, cueId, g.target.id, g.pocket.id, g.baseAim, g.tip, g.seedSpeed,
         allowArr, tuneGrid,
-        // 加塞只给排第一的那个候选补：它是「最可能被选中、也最值得为走位多花两枪」
-        // 的那一个；后面两个候选补塞只会抬高成本，还容易给出测不准的走位分。
-        exhaustive || i === 0
+        // 排第一的候选最可能被选中，也最值得为走位多花两枪；后面两个候选补塞只会
+        // 抬高成本。实测把加塞放开到全部候选、且覆盖每档速度（3 球 35 → 41 枪），
+        // 48 个对照局面上一次都没因此改变选球——所以默认只留 rank1。
+        // 这两句的证据记在 constants 的 spinCandidateScope 上。
+        exhaustive || spinAllCandidates || i === 0
       );
       if (!tuned) {
         if (i < SOLVE_PRUNE_K) misses++;
