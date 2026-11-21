@@ -14,12 +14,29 @@
 // `await import()` 真的加载这个文件来核对导出，一碰 window 就是整条门禁红。
 
 import { cloneGame, legalTargetNumbers, numbersOnTable } from '../src/rules.js';
+import { SEARCH_DT } from '../src/constants.js';
+import { createWorld, strike, stepWorld, allStopped, createRollTracker } from '../src/physics.js';
+import { pocketName } from '../src/solver.js';
 
 // ---------------------------------------------------------------- 数值
 
 /** 夹在 [lo, hi] 之间。越界时返回边界值。 */
 export function clamp(v, lo, hi) {
   return v < lo ? lo : v > hi ? hi : v;
+}
+
+// ---------------------------------------------------------------- 文本转义
+
+/**
+ * 把要拼进 HTML 的外部字符串转义。
+ *
+ * 拼进 innerHTML 之前必须过这一道：玩家名、存档里的文本、按钮上的数字，
+ * 只要有一个来自页面之外，未转义就是一个注入点。
+ * 它不读写任何 DOM——只做字符串替换，所以属于这一层。
+ */
+const ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+export function esc(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (ch) => ESC_MAP[ch]);
 }
 
 // ---------------------------------------------------------------- 玩法 ↔ 球台
@@ -181,6 +198,91 @@ export function describeManualShot(balls) {
   return { pocketed, cuePocketed, detail };
 }
 
+// ---------------------------------------------------------------- 空位
+
+/**
+ * 在台面上给新球找一个不压到任何球的位置：从台心向外螺旋找，找到就返回。
+ *
+ * 螺旋是按「环」走的：第 0 环就是台心，之后每环半径加 0.048（约 1.6 个球径），
+ * 每环采样点不少于 8 个，并且每往外一环起点多转 0.37 弧度——不转的话所有环的
+ * 采样点会落在同一个方向上，看起来就是「总往同一个角堆」。
+ *
+ * y 方向再乘 0.55：球台是长的，等比铺开会在纵向上浪费掉一半的分辨率。
+ *
+ * 台面尺度参数一律由调用方传入（table 的 bounds / ballRadius），这里不读全局。
+ *
+ * @returns {{x:number, y:number}|null} 找不到空位时返回 null，由调用方决定怎么提示。
+ */
+export function findSpot(balls, table) {
+  const R2 = table.ballRadius * 2 + 1e-4;
+  const clear = (x, y) =>
+    x >= table.bounds.minX && x <= table.bounds.maxX &&
+    y >= table.bounds.minY && y <= table.bounds.maxY &&
+    !balls.some((b) => !b.pocketed && Math.hypot(b.x - x, b.y - y) < R2);
+
+  for (let ring = 0; ring < 60; ring++) {
+    const radius = ring * table.ballRadius * 1.6;
+    const count = ring === 0 ? 1 : Math.max(8, ring * 8);
+    for (let i = 0; i < count; i++) {
+      const a = (i / count) * Math.PI * 2 + ring * 0.37;
+      const x = table.length * 0.5 + Math.cos(a) * radius;
+      const y = table.width * 0.5 + Math.sin(a) * radius * 0.55;
+      if (clear(x, y)) return { x, y };
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------- 整杆模拟
+
+/**
+ * 一次整杆模拟最多走的物理步数。
+ *
+ * 这是**步数**上限，不是时间上限：原来这两处循环都写 `120 * 20`
+ * （20 秒 × 每秒 120 步）。抽出来之后照旧按步数封顶，帧数与改动前逐字节一致；
+ * 真按 dt 换算成时间会在 dt 换档时悄悄改变帧数。
+ */
+const MAX_FRAME_STEPS = 2400;
+
+/**
+ * 打一杆，把整杆的逐帧球位录下来给回放用。
+ *
+ * 这是原来 demo/app.js 里重复了两遍的那段循环（练习「演示这一杆」与练习「手打」），
+ * 本体现在只此一份。它不碰 DOM、不看时钟：dt 由调用方传（真页面上是 SEARCH_DT），
+ * 帧里只有球位、袋口与滚动量，播放节奏留给渲染层。
+ *
+ * 物理步长、步数上限、事件先后都不改：`strike` → 每步 `stepWorld` → 立刻录一帧 →
+ * 全停就 break。注意 break 是在录帧**之后**判的，所以「停下那一刻」也会留一帧，
+ * 回放的末帧不会停在上一步。
+ *
+ * 母球不在场上时返回 null（正常路径进不来：求解与手打都要求台上有母球），
+ * 调用方原样早退即可，不要在这里抛。
+ *
+ * @param {Array} balls   当前局面的球（原数组不会被改动）
+ * @param {object} table  球台，取自 src/table.js 的 createTable
+ * @param {{angle:number, speed:number, tip:{a:number, b:number}}} shot 杆法
+ * @param {number} dt     物理步长
+ * @returns {{frames:Array, balls:Array, dt:number}|null}
+ *   frames —— 每帧是「每颗球一行」的数组，结构同 captureBallFrame
+ *   balls  —— 模拟用的那份副本的终局（手打结果描述要读它）
+ */
+export function simulateFrames(balls, table, shot, dt = SEARCH_DT) {
+  const copy = copyBallsForShot(balls);
+  const world = createWorld(table, copy);
+  const cue = copy.find((b) => b.id === 'cue');
+  if (!cue) return null;
+  strike(cue, shot);
+
+  const trackRoll = createRollTracker(copy, table.ballRadius);
+  const frames = [captureBallFrame(copy, trackRoll)];
+  for (let i = 0; i < MAX_FRAME_STEPS; i++) {
+    stepWorld(world, dt);
+    frames.push(captureBallFrame(copy, trackRoll));
+    if (allStopped(world)) break;
+  }
+  return { frames, balls: copy, dt };
+}
+
 // ---------------------------------------------------------------- 撤销栈
 
 /** 撤销栈上限。台面上任意时刻最多 16 颗球，一局十几到几十杆，20 步够用又不占内存。 */
@@ -276,6 +378,49 @@ export function currentAim(state) {
     angle: Math.atan2(target.y - cue.y, target.x - cue.x),
     targetId: target.id,
     from: 'direct',
+  };
+}
+
+// ---------------------------------------------------------------- 瞄准 HUD
+
+/**
+ * 第一人称准星上那两行字，外加要画鬼球的坐标。
+ *
+ * 纯计算：只读局面、求解结果与力度滑块，产出 `{ title, detail, ghost }`。
+ * 谁来画、画在哪里是渲染层的事——这里连 canvas 都不认识。
+ *
+ * 优先级：有解就用解（带袋口名与容错角），否则退到「手打瞄准」，
+ * 连瞄准方向都没有时只报力度。
+ *
+ * @param {object} state demo/app.js 那份 state
+ * @returns {{title:string, detail:string, ghost:{x:number,y:number}|null}}
+ */
+export function getAimHUDInfo(state) {
+  const inGame = state.mode === 'game';
+  const sol = inGame ? state.gSolution : state.solution;
+  const tier = getPowerTier(state.manual.speed);
+  if (sol?.found && sol.best) {
+    const b = sol.best;
+    return {
+      title: '第一人称瞄准',
+      detail: `${b.targetNumber} 号球 → ${pocketName(b.pocketId)} · 容错 ±${b.toleranceDeg.toFixed(2)}° · ${tier.level} ${state.manual.speed.toFixed(2)} m/s`,
+      ghost: b.ghost,
+    };
+  }
+  const aim = currentAim(state);
+  if (aim) {
+    const balls = inGame ? (state.game?.balls ?? []) : state.balls;
+    const target = balls.find((b) => b.id === aim.targetId);
+    return {
+      title: '第一人称手打瞄准',
+      detail: `${target ? target.number + ' 号球 · ' : ''}力度 ${state.manual.speed.toFixed(2)} m/s (${tier.level} ${tier.pct}%)`,
+      ghost: target ? { x: target.x, y: target.y } : null,
+    };
+  }
+  return {
+    title: '第一人称瞄准',
+    detail: `力度 ${state.manual.speed.toFixed(2)} m/s (${tier.level}) · 按 V 切换俯视`,
+    ghost: null,
   };
 }
 

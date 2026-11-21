@@ -24,6 +24,9 @@ import {
   copyBallsForShot,
   currentAim,
   describeManualShot,
+  esc,
+  findSpot,
+  getAimHUDInfo,
   getPowerTier,
   packHistory,
   practiceHint,
@@ -34,12 +37,14 @@ import {
   restorePositions,
   saveCoord,
   shouldAutoShoot,
+  simulateFrames,
   snapshotPositions,
   tableForKind,
   undoLabel,
   unpackHistory,
   utf8Bytes,
 } from '../demo/state.js';
+import { SEARCH_DT } from '../src/constants.js';
 import { loadSave, readSave, sanitize, serialize, writeSave, SAVE_KEY, SAVE_VERSION } from '../demo/save.js';
 
 const table = createTable('pool9');
@@ -1073,4 +1078,223 @@ test('切台后存档的 table.id 与实际台一致，读档能还原成同一�
   const reloaded = createTable(saved.table.id);
   assert.equal(reloaded.preset, t.preset);
   assert.equal(reloaded.length, t.length);
+});
+
+// ---------------------------------------------------------------- esc
+
+test('esc：尖括号与引号都转义，玩家名塞不进标签', () => {
+  // 存档存在 localStorage 里，任何人改一下就能往计分板的 innerHTML 里塞标签
+  assert.equal(esc('<img src=x onerror=alert(1)>'), '&lt;img src=x onerror=alert(1)&gt;');
+  assert.equal(esc(`"你" & '对手'`), '&quot;你&quot; &amp; &#39;对手&#39;');
+  assert.equal(esc('张&李'), '张&amp;李');
+});
+
+test('esc：null / undefined 是空串，0 和 false 要原样留下', () => {
+  assert.equal(esc(null), '');
+  assert.equal(esc(undefined), '');
+  // 计分板上 0 分是很常见的情况，被当成"没有"就会显示成空
+  assert.equal(esc(0), '0');
+  assert.equal(esc(false), 'false');
+});
+
+test('esc：只扫一遍，已经转义过的实体不会被放过', () => {
+  // 正因为只扫一遍，'&amp;' 里的 & 还会再被判一次——这是有意的：
+  // 输入本来就是一串原文，二次转义的代价远小于漏判。
+  assert.equal(esc('&amp;'), '&amp;amp;');
+});
+
+// ---------------------------------------------------------------- findSpot
+
+test('findSpot：空台面直接给台心', () => {
+  assert.deepEqual(findSpot([], table), { x: table.length * 0.5, y: table.width * 0.5 });
+});
+
+test('findSpot：台心被占就挪开，且不压到任何一颗球、也不出台', () => {
+  const balls = [createBall('cue', table.length * 0.5, table.width * 0.5, { number: 0 })];
+  const spot = findSpot(balls, table);
+  assert.notDeepEqual(spot, { x: table.length * 0.5, y: table.width * 0.5 }, '台心有人，不能还摆在台心');
+  for (const b of balls) {
+    assert.ok(
+      Math.hypot(b.x - spot.x, b.y - spot.y) >= table.ballRadius * 2,
+      `新球压到了 ${b.id}`
+    );
+  }
+  assert.ok(spot.x >= table.bounds.minX && spot.x <= table.bounds.maxX);
+  assert.ok(spot.y >= table.bounds.minY && spot.y <= table.bounds.maxY);
+});
+
+test('findSpot：已经落袋的球不占地方（它的旧坐标是空的）', () => {
+  const dead = createBall('b1', table.length * 0.5, table.width * 0.5, { number: 1 });
+  dead.pocketed = true;
+  assert.deepEqual(findSpot([dead], table), { x: table.length * 0.5, y: table.width * 0.5 });
+});
+
+test('findSpot：台面真的没地方了返回 null，不抛也不硬塞', () => {
+  // 用一张 0.3 米的迷你台把螺旋采样全堵死（真台要铺几千颗球，没必要）。
+  // 网格间距 = 一个球径，任何一点到最近网格点都小于 2R，所以一个空位都没有。
+  const R = table.ballRadius;
+  const tiny = {
+    length: 0.3,
+    width: 0.3,
+    ballRadius: R,
+    bounds: { minX: R, maxX: 0.3 - R, minY: R, maxY: 0.3 - R },
+  };
+  const balls = [];
+  let n = 0;
+  for (let x = tiny.bounds.minX; x <= tiny.bounds.maxX; x += R) {
+    for (let y = tiny.bounds.minY; y <= tiny.bounds.maxY; y += R) {
+      balls.push(createBall('b' + n, x, y, { number: (n++ % 9) + 1 }));
+    }
+  }
+  assert.ok(balls.length > 40, '网格要真的铺满');
+  assert.equal(findSpot(balls, tiny), null);
+});
+
+// ---------------------------------------------------------------- getAimHUDInfo
+
+/** 造一份 HUD 只读的那几个字段，其余一律不提供（它不该读别的东西）。 */
+function hudState(over = {}) {
+  return {
+    mode: 'practice',
+    solution: null,
+    gSolution: null,
+    balls: [],
+    game: null,
+    manual: { speed: 2.2, aimOffsetDeg: 0, tipA: 0, tipB: 0, touched: false },
+    ...over,
+  };
+}
+
+test('getAimHUDInfo：有解时报袋口名、容错角与力度档，鬼球取解给的坐标', () => {
+  const info = getAimHUDInfo(hudState({
+    balls: [createBall('cue', 0.5, 0.5, { number: 0 }), createBall('b1', 1.2, 0.5, { number: 1 })],
+    manual: { speed: 3.0 },
+    solution: {
+      found: true,
+      best: { targetNumber: 1, targetId: 'b1', pocketId: 'c-br', toleranceDeg: 1.2345, ghost: { x: 1.1, y: 0.42 }, aimAngle: 0, speed: 3.0 },
+    },
+  }));
+  assert.equal(info.title, '第一人称瞄准');
+  assert.match(info.detail, /1 号球 → 右下底袋/);
+  assert.match(info.detail, /±1\.23°/);
+  assert.match(info.detail, /中力 3\.00 m\/s/);
+  assert.deepEqual(info.ghost, { x: 1.1, y: 0.42 }, '鬼球必须用解给的坐标，不能自己再算一遍');
+});
+
+test('getAimHUDInfo：没解时退成手打瞄准，鬼球落在目标球球心', () => {
+  const info = getAimHUDInfo(hudState({
+    balls: [createBall('cue', 0.3, 0.5, { number: 0 }), createBall('b2', 1.0, 0.5, { number: 2 })],
+    manual: { speed: 2.2 },
+  }));
+  assert.equal(info.title, '第一人称手打瞄准');
+  assert.match(info.detail, /2 号球 · 力度 2\.20 m\/s \(轻力 27%\)/);
+  assert.deepEqual(info.ghost, { x: 1.0, y: 0.5 });
+});
+
+test('getAimHUDInfo：连目标球都没有时只报力度，鬼球为 null', () => {
+  const info = getAimHUDInfo(hudState({ balls: [createBall('cue', 0.3, 0.5, { number: 0 })] }));
+  assert.match(info.detail, /按 V 切换俯视/);
+  assert.equal(info.ghost, null);
+});
+
+test('getAimHUDInfo：球局模式只看球局的解与球局的球，不串到练习局面', () => {
+  const gameBalls = [
+    createBall('cue', 1.5, 0.6, { number: 0 }),
+    createBall('b5', 2.0, 0.6, { number: 5 }),
+  ];
+  const game = createGame(table, gameBalls, { names: ['你', '对手'], kind: 'eightball' });
+  const info = getAimHUDInfo(hudState({
+    mode: 'game',
+    // 练习模式留着一个"有解"的局面，球局模式必须无视它
+    balls: [createBall('cue', 0.3, 0.5, { number: 0 }), createBall('b1', 1.0, 0.5, { number: 1 })],
+    solution: { found: true, best: { targetNumber: 1, pocketId: 'c-br', toleranceDeg: 9, ghost: { x: 9, y: 9 } } },
+    game,
+  }));
+  assert.equal(info.title, '第一人称手打瞄准');
+  assert.match(info.detail, /5 号球/);
+  assert.deepEqual(info.ghost, { x: 2.0, y: 0.6 });
+});
+
+// ---------------------------------------------------------------- simulateFrames
+
+/** 母球与 1 号球同在 x=1.27 的中线上，直推下中袋。 */
+function straightBalls() {
+  return [
+    createBall('cue', 1.27, 0.62, { number: 0 }),
+    createBall('b1', 1.27, 0.40, { number: 1 }),
+  ];
+}
+
+const straightShot = { angle: -Math.PI / 2, speed: 3.0, tip: { a: 0, b: 0 } };
+
+test('simulateFrames：首帧是击球前的静止局面，末帧里目标球已经落进下中袋', () => {
+  const sim = simulateFrames(straightBalls(), table, straightShot, SEARCH_DT);
+  assert.ok(sim, '正常局面不该返回 null');
+  assert.equal(sim.dt, SEARCH_DT);
+  assert.ok(sim.frames.length > 150, `帧数太少：${sim.frames.length}`);
+  assert.ok(sim.frames.length <= 2401, '步数上限是 2400 步，帧数最多 2401');
+
+  // 首帧：strike 只给速度不改坐标，所以第一帧还原封不动
+  assert.deepEqual(
+    sim.frames[0].map((r) => [r.x, r.y, r.pocketed]),
+    [[1.27, 0.62, false], [1.27, 0.40, false]]
+  );
+
+  const last = sim.frames[sim.frames.length - 1];
+  assert.equal(last[1].pocketed, true, '这一杆本来就该进');
+  assert.equal(last[1].pocket, 'm-b');
+  assert.equal(last[0].pocketed, false, '母球没摔');
+  // 母球推进了却仍在中线上（直线球不该有横向漂移）
+  assert.ok(Math.abs(last[0].x - 1.27) < 1e-9);
+  assert.ok(last[0].y < 0.62, '母球要往前走了');
+});
+
+test('simulateFrames：全停判定在录帧之后，所以末两帧完全一样（停下那一刻没漏也没多录）', () => {
+  const sim = simulateFrames(straightBalls(), table, straightShot, SEARCH_DT);
+  const n = sim.frames.length;
+  assert.deepEqual(sim.frames[n - 1], sim.frames[n - 2]);
+  assert.notDeepEqual(sim.frames[n - 2], sim.frames[n - 3], '上一帧还在动，末帧才是真的停了');
+});
+
+test('simulateFrames：每帧每颗球都带渲染层要读的字段（x/y/袋口/滚动量）', () => {
+  const sim = simulateFrames(straightBalls(), table, straightShot, SEARCH_DT);
+  for (const frame of sim.frames) {
+    assert.equal(frame.length, 2);
+    for (const row of frame) {
+      for (const k of ['x', 'y', 'rollAngle', 'rollDirX', 'rollDirY']) {
+        assert.ok(Number.isFinite(row[k]), `${k} 必须是有限数，实际 ${row[k]}`);
+      }
+      assert.equal(typeof row.pocketed, 'boolean');
+    }
+  }
+});
+
+test('simulateFrames：同一输入两次调用逐字段相同（确定性），且都不改原数组', () => {
+  const balls = straightBalls();
+  const a = simulateFrames(balls, table, straightShot, SEARCH_DT);
+  const b = simulateFrames(balls, table, straightShot, SEARCH_DT);
+  assert.equal(JSON.stringify(a.frames), JSON.stringify(b.frames));
+  assert.notEqual(a.frames, b.frames, '不能返回同一个数组，回放会就地改它');
+  // 模拟跑的是副本：原局面必须一颗不动，否则回放结束后「复位」就复不回去了
+  assert.deepEqual(balls.map((x) => [x.x, x.y, x.pocketed]), [[1.27, 0.62, false], [1.27, 0.40, false]]);
+});
+
+test('simulateFrames：返回的 balls 是模拟那份副本的终局，手打结果就读它', () => {
+  const sim = simulateFrames(straightBalls(), table, straightShot, SEARCH_DT);
+  assert.equal(describeManualShot(sim.balls).detail.join(' · '), '进 1 号');
+  assert.equal(sim.balls.find((b) => b.number === 1).pocket, 'm-b');
+});
+
+test('simulateFrames：步数按 120×20 封顶，dt 再小也不会多跑一帧', () => {
+  // dt 小到永远停不下来：帧数就是上限 2400 步 + 首帧
+  assert.equal(simulateFrames(straightBalls(), table, straightShot, 1e-9).frames.length, 2401);
+  // 不传 dt 时默认用求解同一个步长
+  assert.equal(simulateFrames(straightBalls(), table, straightShot).dt, SEARCH_DT);
+});
+
+test('simulateFrames：场上没有母球时返回 null，让调用方早退而不是抛 TypeError', () => {
+  assert.equal(
+    simulateFrames([createBall('b1', 1.0, 0.5, { number: 1 })], table, straightShot, SEARCH_DT),
+    null
+  );
 });

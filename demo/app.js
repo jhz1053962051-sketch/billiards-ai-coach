@@ -10,7 +10,7 @@
 
 import { createTable } from '../src/table.js';
 import { TABLE_PRESETS, SEARCH_DT } from '../src/constants.js';
-import { createBall, createWorld, strike, stepWorld, allStopped, createRollTracker } from '../src/physics.js';
+import { createBall, createWorld } from '../src/physics.js';
 import {
   solveShot,
   coach,
@@ -54,11 +54,12 @@ import {
 // 这里只留「读什么状态、画什么、什么时候拦下来」。
 import {
   autoPauseHint,
-  captureBallFrame,
   clamp,
-  copyBallsForShot,
   currentAim,
   describeManualShot,
+  esc,
+  findSpot,
+  getAimHUDInfo,
   getPowerTier,
   practiceHint,
   practiceReady,
@@ -67,6 +68,7 @@ import {
   restoreGameState,
   restorePositions,
   shouldAutoShoot,
+  simulateFrames,
   snapshotPositions,
   tableForKind,
   undoLabel,
@@ -165,19 +167,6 @@ const state = {
 };
 
 const GROUP_LABEL = { solid: '全色', stripe: '花色', eight: '8 号', cue: '母球' };
-
-/**
- * 拼进 innerHTML 之前必须过这一道。
- *
- * 现在玩家名只有「你」「对手」两个常量，所以还炸不出来；但存档是存在
- * localStorage 里的，任何人手改一下（或者以后加了改名、分享存档）就能把
- * `<img src=x onerror=...>` 塞进去，而计分板正是用 innerHTML 拼名字的。
- * 与其等到那天再补，不如把所有外部字符串统一转义。
- */
-const ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
-function esc(value) {
-  return String(value ?? '').replace(/[&<>"']/g, (ch) => ESC_MAP[ch]);
-}
 
 // ---------------------------------------------------------------- 尺寸
 
@@ -303,7 +292,7 @@ function addBall() {
   if (state.balls.some((b) => b.number === n && !b.pocketed)) return;
 
   // 找一个空位：从台面中心向外螺旋找，不压到已有的球
-  const spot = findSpot();
+  const spot = findSpot(state.balls, table);
   if (!spot) {
     setAdvice('台面上已经放不下更多球了。', '');
     return;
@@ -314,26 +303,6 @@ function addBall() {
   clearSolution('已加球，重新求解。');
   refreshBallPicker();
   render();
-}
-
-function findSpot() {
-  const R2 = R * 2 + 1e-4;
-  const clear = (x, y) =>
-    x >= table.bounds.minX && x <= table.bounds.maxX &&
-    y >= table.bounds.minY && y <= table.bounds.maxY &&
-    !state.balls.some((b) => !b.pocketed && Math.hypot(b.x - x, b.y - y) < R2);
-
-  for (let ring = 0; ring < 60; ring++) {
-    const radius = ring * R * 1.6;
-    const count = ring === 0 ? 1 : Math.max(8, ring * 8);
-    for (let i = 0; i < count; i++) {
-      const a = (i / count) * Math.PI * 2 + ring * 0.37;
-      const x = table.length * 0.5 + Math.cos(a) * radius;
-      const y = table.width * 0.5 + Math.sin(a) * radius * 0.55;
-      if (clear(x, y)) return { x, y };
-    }
-  }
-  return null;
 }
 
 function rackUp() {
@@ -474,34 +443,7 @@ function syncCamera(t) {
   });
 }
 
-function getAimHUDInfo() {
-  const inGame = state.mode === 'game';
-  const sol = inGame ? state.gSolution : state.solution;
-  const tier = getPowerTier(state.manual.speed);
-  if (sol?.found && sol.best) {
-    const b = sol.best;
-    return {
-      title: '第一人称瞄准',
-      detail: `${b.targetNumber} 号球 → ${pocketName(b.pocketId)} · 容错 ±${b.toleranceDeg.toFixed(2)}° · ${tier.level} ${state.manual.speed.toFixed(2)} m/s`,
-      ghost: b.ghost,
-    };
-  }
-  const aim = currentAim(state);
-  if (aim) {
-    const balls = inGame ? (state.game?.balls ?? []) : state.balls;
-    const target = balls.find((b) => b.id === aim.targetId);
-    return {
-      title: '第一人称手打瞄准',
-      detail: `${target ? target.number + ' 号球 · ' : ''}力度 ${state.manual.speed.toFixed(2)} m/s (${tier.level} ${tier.pct}%)`,
-      ghost: target ? { x: target.x, y: target.y } : null,
-    };
-  }
-  return {
-    title: '第一人称瞄准',
-    detail: `力度 ${state.manual.speed.toFixed(2)} m/s (${tier.level}) · 按 V 切换俯视`,
-    ghost: null,
-  };
-}
+// 第一人称 HUD 的两行字与鬼球坐标在 state.js 的 getAimHUDInfo（纯计算，能单测）。
 
 // ---------------------------------------------------------------- 绘制
 
@@ -521,7 +463,7 @@ function render() {
   // 渲染第一人称球杆与战术瞄准准星 HUD
   if (view.getCamera().t > 0.01) {
     view.drawCueStick(state.manual.strokeOffset || 0);
-    view.draw1stPersonHUD(getAimHUDInfo());
+    view.draw1stPersonHUD(getAimHUDInfo(state));
   }
 }
 
@@ -1297,19 +1239,15 @@ function shootPractice() {
     return;
   }
   const best = sol.best;
-  const copy = copyBallsForShot(state.balls);
-  const world = createWorld(table, copy);
-  const cue = copy.find((b) => b.id === 'cue');
-  strike(cue, { angle: best.aimAngle, speed: best.speed, tip: { a: best.tip.a, b: best.tip.b } });
-
-  const dt = SEARCH_DT;
-  const trackRoll = createRollTracker(copy, table.ballRadius);
-  const frames = [captureBallFrame(copy, trackRoll)];
-  for (let i = 0; i < 120 * 20; i++) {
-    stepWorld(world, dt);
-    frames.push(captureBallFrame(copy, trackRoll));
-    if (allStopped(world)) break;
-  }
+  // 整杆模拟本体在 state.js 的 simulateFrames：这里只要「帧 + 步长」两样东西。
+  const sim = simulateFrames(
+    state.balls,
+    table,
+    { angle: best.aimAngle, speed: best.speed, tip: { a: best.tip.a, b: best.tip.b } },
+    SEARCH_DT
+  );
+  if (!sim) return;
+  const { frames, dt } = sim;
 
   const original = snapshotPositions(state.balls);
   // replay 内部已经按代次拦住过期帧，这里再挡一次：只要 original 和当前球数组不是同一批球，
@@ -1947,20 +1885,10 @@ function shootManual() {
 
 /** 练习模式：按给定的杆打，打完复位到原局面。 */
 function shootPracticeWith(shot, aim) {
-  const copy = copyBallsForShot(state.balls);
-  const world = createWorld(table, copy);
-  const cue = copy.find((b) => b.id === 'cue');
-  if (!cue) return;
-  strike(cue, shot);
-
-  const dt = SEARCH_DT;
-  const trackRoll = createRollTracker(copy, table.ballRadius);
-  const frames = [captureBallFrame(copy, trackRoll)];
-  for (let i = 0; i < 120 * 20; i++) {
-    stepWorld(world, dt);
-    frames.push(captureBallFrame(copy, trackRoll));
-    if (allStopped(world)) break;
-  }
+  const sim = simulateFrames(state.balls, table, shot, SEARCH_DT);
+  if (!sim) return;
+  // balls 是模拟那份副本的终局：手打结果描述要读它，和改动前读的是同一个数组。
+  const { frames, dt, balls: copy } = sim;
   const original = snapshotPositions(state.balls);
   replay(frames, dt, () => {
     const outcome = describeManualShot(copy);
