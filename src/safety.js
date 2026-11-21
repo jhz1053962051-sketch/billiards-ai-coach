@@ -24,7 +24,7 @@
 //   然后看这一杆能不能让对手比那更难受。赢不过基准就不算防守，返回 null，
 //   由 planShot 退回兜底直撞——正好就是那杆基准。
 
-import { SPEED, SEARCH_DT, SHOOT_MAX_TIME, MAX_CUT_SAFETY_DEG } from './constants.js';
+import { SPEED, SEARCH_DT, SHOOT_MAX_TIME, MAX_CUT_DEG } from './constants.js';
 import { V, DEG } from './geometry.js';
 import { isCueBall } from './physics.js';
 // 容错评估只在 tolerance.js 里，不再 import solver.js——solver.js 反过来要用本文件的
@@ -76,14 +76,16 @@ export function swingOffsetsDeg(distToCue, R) {
 const SPEEDS = [SPEED.min, SPEED.soft, SPEED.medium, SPEED.firm];
 
 /**
- * 薄到什么程度就打空了：切角超过 78° 时球心连线已经擦不到球。
+ * 薄到什么程度就打空了：切角超过 MAX_CUT_DEG（82°）时球心连线已经擦不到球。
  *
- * 注意：这**不是**进攻判定的那条边界。进攻（solveShot / bestNextShot）用 82°
- * （constants.MAX_CUT_ATTACK_DEG），防守用这里的 78°——78 更保守，所以同一杆
- * 完全可能「进攻说能打、防守说打不了」。原来的注释写着「与 solveShot 同一条
- * 边界」，是错的；是否要统一成一个数（以及统一到哪个）属于产品判断，待确认。
+ * 这条边界现在**全项目唯一**，进攻（solveShot / bestNextShot / tolerance）与
+ * 防守（本文件）读的是同一个常量（constants.MAX_CUT_DEG），本文件不再导出自己的
+ * 副本——多一份导出就多一个能漂移的地方。历史上有过「防守比进攻更保守」
+ * （78° vs 82°）的分叉，已经取消：78–82° 之间的球在物理上可打，收窄只会删掉
+ * 本来能打的球。安全球不再比进攻更保守——需要保守就在策略层加权（例如给防守
+ * 候选加代价、或在评分上偏好更稳的落点），不要再分叉物理边界，否则同一杆会在
+ * 两条路径上得到互相矛盾的结论。
  */
-export const MAX_CUT_DEG = MAX_CUT_SAFETY_DEG;
 
 /**
  * 评分三块（0–100，权重见 SCORE_WEIGHTS）：

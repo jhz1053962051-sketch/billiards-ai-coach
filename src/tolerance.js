@@ -9,7 +9,7 @@
  * 把它搬出来，safety.js 直接从这里取，环就断了；solver.js 继续 re-export
  * positionTolerance，所以 opponent.js 与既有测试不用改一行。
  */
-import { MAX_CUT_ATTACK_DEG } from './constants.js';
+import { MAX_CUT_DEG } from './constants.js';
 import { V } from './geometry.js';
 import { cutAngleDeg, firstBlocker, aimToleranceDeg } from './aim.js';
 
@@ -51,8 +51,8 @@ export function bestNextShot(table, balls, cueId, allow) {
       ) continue;
       if (firstBlocker(cue, ghost, balls, [cueId, target.id], R)) continue;
       if (firstBlocker(target, pocket, balls, [cueId, target.id], R)) continue;
-      // 进攻侧切角上限：与 solveShot 用同一条边界（constants.MAX_CUT_ATTACK_DEG = 82）。
-      if (cutAngleDeg(cue, ghost, target, pocket) > MAX_CUT_ATTACK_DEG) continue;
+      // 切角上限：与 solveShot 用同一条边界（constants.MAX_CUT_DEG = 82）。
+      if (cutAngleDeg(cue, ghost, target, pocket) > MAX_CUT_DEG) continue;
       const tol = aimToleranceDeg(cue, ghost, target, pocket, pocket.captureR, R);
       if (!best || tol > best.toleranceDeg) {
         best = {

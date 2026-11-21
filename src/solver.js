@@ -9,7 +9,7 @@
 //   实测：只靠解析解的推荐杆成功率 65%；加上仿真验证后能到 95% 以上。
 //   一次仿真 0.8 ms，验证十几次也就十几毫秒，完全付得起。
 
-import { PHYS, SPEED, MAX_TIP_OFFSET, SEARCH_DT, SOLVE_MAX_TIME, TUNE_MAX_TIME, MAX_CUT_ATTACK_DEG, SOLVE_PRUNE_K, SOLVE_PRUNE_FALLBACK } from './constants.js';
+import { PHYS, SPEED, MAX_TIP_OFFSET, SEARCH_DT, SOLVE_MAX_TIME, TUNE_MAX_TIME, MAX_CUT_DEG, SOLVE_PRUNE_K, SOLVE_PRUNE_FALLBACK, SOLVE_TUNE_GRID, SOLVE_TUNE_GRID_LEGACY } from './constants.js';
 import { V, DEG } from './geometry.js';
 import {
   createBall,
@@ -233,7 +233,7 @@ function positionQuality(positioning) {
 }
 
 /**
- * 走位价值低于这个分（0–100）才肯加塞去救。
+ * 走位价值低于阈值才肯加塞去救——阈值现在住在 constants.SOLVE_TUNE_GRID.spinRetryQuality。
  *
  * 加塞在物理上确实能改变母球出库角（`physics.js` 的 SIDE_SPIN_EFFECT），
  * 但它同时带来偏杆：瞄准同样多的角度，加塞的实际落点更散。
@@ -241,18 +241,21 @@ function positionQuality(positioning) {
  * 而「加塞 vs 中杆」的下一杆容错是 16 好 16 差——没有系统性收益，
  * 却把 p50 从 21.6 ms 抬到 36.3 ms。所以改成只有位置将就时才试。
  */
-const SPIN_RETRY_QUALITY = 60;
 
 /**
  * 对一个几何候选做力度/瞄准微调，找到能真正打进的那组参数。
- * 搜索顺序：先扫力度（粗→细），每个力度下微调瞄准角 ±0.3°。
+ * 搜索顺序：先扫力度（粗→细），每个力度下微调瞄准角（默认网格 ±0.15°，见 constants）。
  * 找到就返回；找不到返回 null。
+ *
+ * `grid` 决定网格密度：默认路径传 SOLVE_TUNE_GRID（已收紧），{exhaustive:true}
+ * 传 SOLVE_TUNE_GRID_LEGACY（完整旧网格）。网格只走参数、不读全局开关，
+ * 所以同一进程里两条路径可以交替调用，互不污染。
  *
  * 返回值里带 afterBalls：这一杆打完之后整张台面的球位，用来算走位。
  *
  * @returns {{speed:number, aimAngle:number, aimOffsetDeg:number, tip:object, afterBalls:Array}|null}
  */
-function verifyAndTune(table, balls, cueId, targetId, pocketId, baseAim, tip, seedSpeed, allow) {
+function verifyAndTune(table, balls, cueId, targetId, pocketId, baseAim, tip, seedSpeed, allow, grid, allowSpin = true) {
   const tryOnce = (speed, offsetDeg, shotTip = tip) =>
     trialShot(
       table,
@@ -266,7 +269,7 @@ function verifyAndTune(table, balls, cueId, targetId, pocketId, baseAim, tip, se
     );
 
   // 力度候选：从解析解附近铺开，覆盖"刚好够"到"明显够"
-  const speeds = [0.8, 1, 1.2, 1.45, 1.7]
+  const speeds = grid.speedFactors
     .map((factor) => seedSpeed * factor)
     .filter((speed) => speed >= SPEED.min && speed <= SPEED.break);
   if (!speeds.length) speeds.push(Math.min(SPEED.break, Math.max(SPEED.min, seedSpeed)));
@@ -282,6 +285,8 @@ function verifyAndTune(table, balls, cueId, targetId, pocketId, baseAim, tip, se
     const side = a > 0.05 ? '右塞' : a < -0.05 ? '左塞' : '';
     return side ? `${vertical}${side}（管母球出库角）` : vertical;
   };
+  const centerTipName = (b) =>
+    (b <= -0.4 ? '低杆（控制母球回缩）' : b >= 0.4 ? '高杆（控制母球跟进）' : '中杆');
   const dedupeTips = (list) => {
     const seen = new Map();
     for (const t of list) seen.set(`${t.a ?? 0}|${t.b}`, t);
@@ -290,22 +295,20 @@ function verifyAndTune(table, balls, cueId, targetId, pocketId, baseAim, tip, se
   // 高低杆先试：它们不改变瞄准精度，是默认手段。
   const centerTips = dedupeTips([
     tip,
-    { ...tip, name: '低杆（控制母球回缩）', b: -0.55 },
-    { ...tip, name: '高杆（控制母球跟进）', b: 0.55 },
+    ...grid.centerTipBs.map((b) => ({ ...tip, b, name: centerTipName(b) })),
   ]);
   // 左右塞后试：它靠出库角换位置，但偏杆会让瞄准精度下降，不能当默认选项。
-  const spinTips = dedupeTips([
-    { ...tip, a: -0.35, name: tipNameOf(tip.b, -0.35) },
-    { ...tip, a: 0.35, name: tipNameOf(tip.b, 0.35) },
-  ]);
+  const spinTips = dedupeTips(
+    grid.spinTipAs.map((a) => ({ ...tip, a, name: tipNameOf(tip.b, a) }))
+  );
   const tips = remaining ? centerTips : [tip];
 
   // 不只拿到第一组能进的参数：仍有目标球时，要在可进球的力度/杆法里
   // 比较实际母球停位，优先留下下一杆容错更大的局面。
   let best = null;
-  const scanTips = (list) => {
+  const scanTips = (list, speedList = speeds) => {
     for (const candidateTip of list) {
-      const candidateSpeeds = speeds.map((speed) => {
+      const candidateSpeeds = speedList.map((speed) => {
         if (candidateTip.b === tip.b) return speed;
         const impact = speed * Math.max(0.55, 1 - Math.abs(candidateTip.b - tip.b) * 0.14);
         return Math.min(SPEED.break, Math.max(SPEED.min, impact));
@@ -353,8 +356,14 @@ function verifyAndTune(table, balls, cueId, targetId, pocketId, baseAim, tip, se
   // 加塞只在「位置将就」时才值得多花一轮：quality 越低说明下一杆越难打。
   // 实测 120 个 6 球散球布局，这一步约三成局面触发，p50 从 21.6 涨到 36.3 ms；
   // 无脑试塞是 27% 的局面都在用塞，代价翻倍而收益不见得更好。
-  if (remaining && best && best.quality !== null && best.quality < SPIN_RETRY_QUALITY) {
-    scanTips(spinTips);
+  // 默认网格只在**当前最优那一档速度**上补两枪（spinOverAllSpeeds: false）——
+  // 旧行为对每个力度都重扫，同一组塞在 5 个速度上重复验证，只有一档是有意义的。
+  if (
+    allowSpin &&
+    remaining && best && best.quality !== null && best.quality < grid.spinRetryQuality &&
+    spinTips.length > 0
+  ) {
+    scanTips(spinTips, grid.spinOverAllSpeeds ? speeds : [best.speed]);
   }
   if (best) {
     const route = trialShot(
@@ -371,11 +380,14 @@ function verifyAndTune(table, balls, cueId, targetId, pocketId, baseAim, tip, se
     };
   }
 
-  // 再按"接近解析解优先"的顺序微调瞄准角
-  const offsets = [0.15, -0.15, 0.3, -0.3, 0.45, -0.45];
-  // 走到这一步说明前面一组都没成功，杆法池就全打开（含加塞）：这时候是「有没有」，
-  // 不是「好不好」，多试两种不吃亏。
-  const widenTips = dedupeTips([...centerTips, ...spinTips]);
+  // 再按"接近解析解优先"的顺序微调瞄准角（偏移表见 constants 的网格）
+  const offsets = grid.aimOffsetsDeg;
+  // 走到这一步说明前面一组都没成功。旧行为把杆法池全打开（含加塞）：5 杆法 × 5 力度
+  // × 6 个偏移，上限 150 枪，是单候选最贵的一档；而杆法在中心扫描里已经全试过并
+  // 全部落空，这里的问题只可能是「解析瞄准差了点」，换杆法救不回来。
+  // 默认网格因此只沿着候选自带那支杆微调（widenTips:'base'），27–45 枪降到 6 枪。
+  const widenTips =
+    grid.widenTips === 'base' ? [tip] : dedupeTips([...centerTips, ...spinTips]);
   let adjustedBest = null;
   for (const off of offsets) {
     for (const candidateTip of widenTips) {
@@ -654,8 +666,8 @@ export function solveShot(table, balls, opts = {}) {
       if (firstBlocker(target, pocket, balls, [cueId, target.id], R)) continue;
 
       const cutDeg = cutAngleDeg(cue, ghost, target, pocket);
-      // 进攻侧切角上限：具名常量，数值与以前写死的 82 完全一致。
-      if (cutDeg > MAX_CUT_ATTACK_DEG) continue;
+      // 切角上限：全项目唯一那条边界（constants.MAX_CUT_DEG = 82°），防守侧也读它。
+      if (cutDeg > MAX_CUT_DEG) continue;
 
       const tol = aimToleranceDeg(cue, ghost, target, pocket, pocket.captureR, R);
       if (tol < 0.03) continue;
@@ -692,10 +704,13 @@ export function solveShot(table, balls, opts = {}) {
   }
 
   // ── 一级排序 + 二级细扫 ──
-  // 旧路径对上面每个几何候选都跑 3 杆法 × 5 力度的盲扫（最贵的一档还要再乘十几次），
+  // 旧路径对上面每个几何候选都跑满一套「杆法 × 力度」盲扫（默认网格 3×3，
+  // 完整旧网格 3×5，见 constants 的 SOLVE_TUNE_GRID / SOLVE_TUNE_GRID_LEGACY），
   // 但候选里绝大多数根本进不了前 3 名。现在先用解析量排序（0 次仿真），
   // 只对前 SOLVE_PRUNE_K 名细扫；细扫出现「全部力度都打不进」才有限回退。
   const prune = verify && !exhaustive;
+  // 网格：默认收紧版；exhaustive 走完整旧网格，作为质量对照的基准。
+  const tuneGrid = exhaustive ? SOLVE_TUNE_GRID_LEGACY : SOLVE_TUNE_GRID;
   // 候选本来就不超过 K 个时排序毫无意义：直接按枚举顺序全扫，省掉一级的解析开销
   // （一级每个候选要做一次 200 步 traceRay + 一轮 next-shot 几何，2 球局面里这笔
   //  开销能占到总时间的十分之一）。
@@ -714,7 +729,10 @@ export function solveShot(table, balls, opts = {}) {
     if (verify) {
       tuned = verifyAndTune(
         table, balls, cueId, g.target.id, g.pocket.id, g.baseAim, g.tip, g.seedSpeed,
-        allowArr
+        allowArr, tuneGrid,
+        // 加塞只给排第一的那个候选补：它是「最可能被选中、也最值得为走位多花两枪」
+        // 的那一个；后面两个候选补塞只会抬高成本，还容易给出测不准的走位分。
+        exhaustive || i === 0
       );
       if (!tuned) {
         if (i < SOLVE_PRUNE_K) misses++;

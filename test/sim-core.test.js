@@ -15,15 +15,14 @@ import { createBall, isCueBall } from '../src/physics.js';
 import { simulateShot as coreSimulate } from '../src/sim.js';
 import { createGame, simulateShot as rulesSimulate } from '../src/rules.js';
 import { solveShot } from '../src/solver.js';
-import { solveSafety, MAX_CUT_DEG } from '../src/safety.js';
+import { solveSafety } from '../src/safety.js';
 import {
   MAX_SHOT_TIME,
   SOLVE_MAX_TIME,
   TUNE_MAX_TIME,
   SHOOT_MAX_TIME,
   SHOT_TIME_LIMITS,
-  MAX_CUT_ATTACK_DEG,
-  MAX_CUT_SAFETY_DEG,
+  MAX_CUT_DEG,
 } from '../src/constants.js';
 
 const table = createTable('pool9');
@@ -112,18 +111,27 @@ test('createBall 不再默认 number 0：漏传的球不会被当成母球', () 
   assert.equal(isCueBall(createBall('b9', R * 3, R * 3, { number: 9 })), false, '显式 9 号不是母球');
 });
 
-test('切角上限：进攻 82 与防守 78 各自单源，源码里没有裸字面量', () => {
-  assert.equal(MAX_CUT_ATTACK_DEG, 82, '进攻判定沿用的就是原来的 82°');
-  assert.equal(MAX_CUT_SAFETY_DEG, 78, '防守判定沿用的就是原来的 78°');
-  assert.equal(MAX_CUT_DEG, MAX_CUT_SAFETY_DEG, 'safety 对外导出的 MAX_CUT_DEG 必须跟着防守常量走');
+test('切角上限：全项目唯一 MAX_CUT_DEG = 82，进攻与防守读同一个常量', () => {
+  // 契约变更（072 统一）：原来进攻 82 / 防守 78 两条边界，现在合并成一条 82°。
+  // 取 82 而不是 78：78–82° 之间的球物理上能打，把进攻侧收到 78 会删掉现有能打的球；
+  // 把防守侧放宽到 82 只是多几个极薄球选项，不会凭空造出打不进的球。
+  assert.equal(MAX_CUT_DEG, 82, '统一后的切角上限就是 82°');
 
-  // 两侧都从常量读：改常量两侧一起变，不会再出现「改一处漏一处」。
-  assert.match(srcText('solver.js'), /cutDeg > MAX_CUT_ATTACK_DEG/, 'solveShot 的切角门槛必须读常量');
+  // 只有一处定义：旧的两个名字必须彻底消失，不允许留下能各自漂移的第二份。
+  const constantsText = srcText('constants.js');
+  assert.doesNotMatch(constantsText, /MAX_CUT_ATTACK_DEG|MAX_CUT_SAFETY_DEG/, '旧的两个切角常量必须删干净');
+  assert.doesNotMatch(srcText('safety.js'), /export (const )?\{? ?MAX_CUT_DEG/, 'safety 不再导出自己的切角副本');
+
+  // 两侧都从同一个常量读：改常量两侧一起变，不会再出现「改一处漏一处」。
+  assert.match(srcText('solver.js'), /cutDeg > MAX_CUT_DEG/, 'solveShot 的切角门槛必须读唯一常量');
   assert.doesNotMatch(srcText('solver.js'), /cutDeg > 82/, 'solveShot 里不应再有裸 82');
-  assert.match(srcText('tolerance.js'), /> MAX_CUT_ATTACK_DEG/, '容错窗口的切角门槛必须读同一个常量');
+  assert.match(srcText('tolerance.js'), /> MAX_CUT_DEG/, '容错窗口的切角门槛必须读同一个常量');
   assert.doesNotMatch(srcText('tolerance.js'), /> 82\b/, 'tolerance.js 里不应再有裸 82');
-  assert.match(srcText('safety.js'), /MAX_CUT_DEG = MAX_CUT_SAFETY_DEG/, 'safety 的切角必须从防守常量派生');
-  assert.match(srcText('safety.js'), /MAX_CUT_SAFETY_DEG/, 'safety 必须引用防守常量名');
+  assert.match(
+    srcText('safety.js'),
+    /import \{[^}]*\bMAX_CUT_DEG\b[^}]*\} from '\.\/constants\.js'/,
+    'safety 必须从 constants 直接 import 这个常量'
+  );
 });
 
 test('时限常量表：四个用途各一个名字，调用点只写名字不写字面量', () => {

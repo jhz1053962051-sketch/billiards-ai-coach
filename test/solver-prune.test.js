@@ -2,6 +2,15 @@
 // 先把几何候选按解析量排序，只对前 K 名跑「杆法 × 力度」细扫，其余整块跳过。
 // 这里钉住三件事：剪枝不许改变选球、回退（第 K+1 名）真的会被用上、
 // 排序不依赖候选枚举顺序（否则打乱球的数组就能换一个结果）。
+//
+// 断言的契约在「杆法/力度档位收紧」之后变了一次（2026-11）：
+//   旧契约 —— 剪枝后的 top-1 必须与 exhaustive **完全相同**，评分也逐位相同。
+//   新契约 —— 默认路径用收紧网格（SOLVE_TUNE_GRID）、exhaustive 用完整旧网格
+//   （SOLVE_TUNE_GRID_LEGACY），两套网格给同一几何候选算出的力度/杆法本来就不同，
+//   所以「逐位相同」不再是正确断言；改为：默认 top-1 必须落在穷举的 **top-3** 内
+//   （48 局面验收线就是 top-3 100%），且默认 top-1 必须等于冻结基准里的 selected。
+//   1~2 球的简单必进球局面仍要求与 exhaustive **同一杆**——那种局面上不存在
+//   「两个候选势均力敌」，收紧网格不该改变结论。
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -24,7 +33,7 @@ const FIXTURES = [
   { id: 'd03-angle-b', balls: [[0, 2.1, 0.3], [1, 1.1, 0.85]], selected: '1|c-tl' },
   // 3 球 5 候选：剪枝真正开始起作用的最简局面
   { id: 'd05-three', balls: [[0, 0.45, 0.9], [1, 1.35, 0.55], [2, 2.0, 1.05]], selected: '1|c-tr' },
-  { id: 'd06-three-b', balls: [[0, 0.6, 0.62], [3, 1.7, 0.95], [5, 2.0, 0.4]], selected: '5|c-br' },
+  { id: 'd06-three-b', balls: [[0, 0.6, 0.62], [3, 1.7, 0.95], [5, 2.0, 0.4]], selected: '3|c-tr' },
   { id: 'd12-four', balls: [[0, 0.3, 0.3], [1, 1.2, 0.9], [2, 1.9, 1.15], [3, 2.3, 0.4]], selected: '1|m-t' },
   // 5 球 6 候选 / 5 球 7 候选：剪枝收益最大的两类
   { id: 'g5-0', balls: [[0, 1.5903, 1.1656], [1, 1.0927, 0.4764], [2, 1.2959, 0.7031], [3, 1.6082, 0.6738], [4, 0.5832, 0.5105]], selected: '2|m-b' },
@@ -46,23 +55,30 @@ const run = (layout, opts = {}, reverse = false) =>
   solveShot(table, makeBalls(layout, reverse), { ...NO_BUDGET, cueId: 'cue', ...opts });
 
 test('剪枝：简单局面（1~2 球必进球）与 exhaustive 选出同一杆', () => {
-  for (const layout of FIXTURES.filter((f) => f.balls.length <= 3)) {
+  // d06-three-b 不在这个名单里：那一局两个候选的评分只差 1.8 分（且收紧网格的
+  // 3|c-tr 反而更高），新契约只要求 top-1 落在穷举 top-3 内——见下一个用例。
+  const simple = FIXTURES.filter(
+    (f) => f.balls.length <= 2 || f.id === 'd05-three'
+  );
+  for (const layout of simple) {
     const pruned = run(layout);
     const full = run(layout, { exhaustive: true });
     assert.ok(pruned.length > 0, `${layout.id}：剪枝后不该一个候选都没有`);
     assert.equal(shotKey(pruned[0]), shotKey(full[0]), `${layout.id}：剪枝与穷举的 top-1 必须一致`);
-    assert.equal(pruned[0].value, full[0].value, `${layout.id}：同一杆的评分必须逐位相同`);
     assert.equal(shotKey(pruned[0]), layout.selected, `${layout.id}：与冻结基准选中的那一杆必须一致`);
   }
 });
 
-test('剪枝：多候局面 top-1 与 exhaustive 一致，且没有候选被判成打不了', () => {
+test('剪枝：多候局面 top-1 落在穷举 top-3 内，且没有候选被判成打不了', () => {
   for (const layout of FIXTURES) {
     const pruned = run(layout);
     const full = run(layout, { exhaustive: true });
     assert.ok(pruned.length > 0, `${layout.id}：剪枝后不该一个候选都没有`);
-    assert.equal(shotKey(pruned[0]), shotKey(full[0]), `${layout.id}：top-1 必须落在穷举的 top-3 内`);
-    assert.equal(pruned[0].value, full[0].value, `${layout.id}：评分必须逐位相同`);
+    const top3 = full.slice(0, 3).map(shotKey);
+    assert.ok(
+      top3.includes(shotKey(pruned[0])),
+      `${layout.id}：默认 top-1 必须落在穷举 top-3 内，实际 ${shotKey(pruned[0])} / 穷举 ${top3.join(',')}`
+    );
     assert.equal(shotKey(pruned[0]), layout.selected, `${layout.id}：与冻结基准一致`);
     for (const c of pruned) assert.equal(c.verified, true, `${layout.id}：返回的候选都必须过仿真验证`);
   }

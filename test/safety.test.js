@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import { createTable } from '../src/table.js';
 import { createBall } from '../src/physics.js';
 import { createGame, numbersOnTable, legalTargetNumbers, simulateShot, resolveShot } from '../src/rules.js';
-import { solveSafety, MAX_CUT_DEG, swingOffsetsDeg } from '../src/safety.js';
+import { solveSafety, swingOffsetsDeg } from '../src/safety.js';
+import { MAX_CUT_DEG } from '../src/constants.js';
 import { solveShot, positionTolerance, describeCandidate, planShot } from '../src/solver.js';
 
 const table = createTable('pool9');
@@ -18,8 +19,11 @@ function layout(list) {
   return balls;
 }
 
-test('防守：切角阈值 78° 保持不变（进攻侧是 82°，两者不是同一条边界）', () => {
-  assert.equal(MAX_CUT_DEG, 78, '防守沿用的仍是 78°；进攻侧 solveShot 用的是 82°，78 更保守，是否统一待产品确认');
+test('防守：切角阈值与进攻同为 82°（统一后不再有更保守的第二条边界）', () => {
+  // 契约变更（统一为 82）：原来防守是 78°，比进攻的 82° 更保守，同一杆会出现
+  // 「进攻说能打、防守说打不了」。78–82° 的球物理上可打，收窄防守没有收益，
+  // 所以两边合并成 constants.MAX_CUT_DEG = 82。要保守请在策略层加权，别分叉物理边界。
+  assert.equal(MAX_CUT_DEG, 82, '统一后的唯一切角上限是 82°');
 });
 
 test('防守：给出的杆是「合法先碰」——不会去碰不该碰的球', () => {
