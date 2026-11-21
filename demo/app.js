@@ -27,7 +27,6 @@ import { createRenderer, interpolateBallStates, sampleDampedCamera } from './ren
 import { ballStyle, groupOf, RACK_NUMBERS, createStandardRack, createRack, GAME_KINDS } from '../src/rack.js';
 import {
   createGame,
-  cloneGame,
   legalTargetNumbers,
   numbersOnTable,
   remainingOfGroup,
@@ -42,6 +41,23 @@ import {
 import { takeTurn } from '../src/opponent.js';
 import { ballName as snookerBallName } from '../src/snooker.js';
 import { readSave, writeSave, clearSave, describeSave, readSaveStamp, serialize, sanitize, SAVE_KEY } from './save.js';
+// 不碰 DOM 的那部分状态逻辑住在 ./state.js：它是能在 Node 单测里跑的那一层。
+// 这里只留「读什么状态、画什么、什么时候拦下来」。
+import {
+  captureBallFrame,
+  clamp,
+  copyBallsForShot,
+  currentAim,
+  describeManualShot,
+  getPowerTier,
+  practiceHint,
+  practiceReady,
+  pushHistoryEntry,
+  restoreGameState,
+  restorePositions,
+  snapshotPositions,
+  undoLabel,
+} from './state.js';
 import {
   appendPracticeResult,
   clearPracticeLog,
@@ -420,7 +436,7 @@ function syncCamera(t) {
   const inGame = state.mode === 'game';
   const balls = inGame ? (state.game?.balls ?? []) : state.balls;
   const cue = balls.find((b) => b.number === 0 && !b.pocketed);
-  const aim = currentAim();
+  const aim = currentAim(state);
   const aimAngle = aim ? (aim.angle + (state.manual.aimOffsetDeg * Math.PI) / 180) : 0;
 
   view.setCamera({
@@ -442,7 +458,7 @@ function getAimHUDInfo() {
       ghost: b.ghost,
     };
   }
-  const aim = currentAim();
+  const aim = currentAim(state);
   if (aim) {
     const balls = inGame ? (state.game?.balls ?? []) : state.balls;
     const target = balls.find((b) => b.id === aim.targetId);
@@ -494,17 +510,6 @@ function drawBalls(balls) {
   for (const b of visible) {
     view.drawBall(b);
   }
-}
-
-function captureBallFrame(balls, trackRoll) {
-  const roll = trackRoll();
-  return balls.map((ball, index) => ({
-    x: ball.x,
-    y: ball.y,
-    pocketed: ball.pocketed,
-    pocket: ball.pocket,
-    ...roll[index],
-  }));
 }
 
 function drawPositionGuide(candidate) {
@@ -841,40 +846,15 @@ function endDrag(ev) {
 canvas.addEventListener('pointerup', endDrag);
 canvas.addEventListener('pointercancel', endDrag);
 
-function clamp(v, lo, hi) {
-  return v < lo ? lo : v > hi ? hi : v;
-}
-
 // ---------------------------------------------------------------- 练习：求解与演示
-
-/**
- * 练习面板的状态行。
- *
- * 不传参时不该把它清空：页面一打开 resetLayout 就会调一次，清成空字符串
- * 等于把首屏那句「先求解一个目标袋方案，再记录真实练习结果」当场抹掉，
- * 球友看到的是一块空白，不知道下一步该干什么。所以不传参就按当前状态
- * 算一句该说的话。
- */
-function practiceHint() {
-  if (state.mode !== 'practice') return '';
-  if (!state.solution?.found || !state.solution.best?.pocketId) {
-    return '先求解一个目标袋方案，再记录真实练习结果。';
-  }
-  if (state.practiceRecorded) return '这一杆记下了。同一个球位可以接着记，换球位就再求解一次。';
-  return '按实际结果点「进了」或「没进」——记下来才看得出进步。';
-}
 
 function updatePracticeFeedback(message = null) {
   // 记完一杆不再禁用：同一个球位反复练十杆是常态，每杆都得重新求解一次
   // 才能记录，等于逼人重复劳动。这里只要「有解」就给点，记多少次都行。
-  const ready = Boolean(
-    state.mode === 'practice' &&
-    state.solution?.found &&
-    state.solution.best?.pocketId
-  );
+  const ready = practiceReady(state);
   $('practiceMade').disabled = !ready || state.animating;
   $('practiceMissed').disabled = !ready || state.animating;
-  $('practiceMessage').textContent = message ?? practiceHint();
+  $('practiceMessage').textContent = message ?? practiceHint(state);
 }
 
 function updatePracticeLog() {
@@ -1288,7 +1268,7 @@ function shootPractice() {
     return;
   }
   const best = sol.best;
-  const copy = state.balls.map((b) => ({ ...b, vx: 0, vy: 0, wx: 0, wy: 0, wz: 0 }));
+  const copy = copyBallsForShot(state.balls);
   const world = createWorld(table, copy);
   const cue = copy.find((b) => b.id === 'cue');
   strike(cue, { angle: best.aimAngle, speed: best.speed, tip: { a: best.tip.a, b: best.tip.b } });
@@ -1302,7 +1282,7 @@ function shootPractice() {
     if (allStopped(world)) break;
   }
 
-  const original = state.balls.map((b) => ({ x: b.x, y: b.y, pocketed: b.pocketed, pocket: b.pocket }));
+  const original = snapshotPositions(state.balls);
   // replay 内部已经按代次拦住过期帧，这里再挡一次：只要 original 和当前球数组不是同一批球，
   // 按下标恢复就会读到 undefined。宁可什么都不做，也不能把别人的局面改坏。
   const gen = state.generation;
@@ -1311,12 +1291,7 @@ function shootPractice() {
     const target = state.balls.find((b) => b.id === best.targetId);
     const ok = Boolean(target && target.pocketed && target.pocket === best.pocketId);
     setAdvice((ok ? '✓ 进球。' : '✗ 这一杆没进（袋口或力度需要微调）。') + ' ' + sol.message, sol.verdict);
-    for (let i = 0; i < state.balls.length; i++) {
-      state.balls[i].x = original[i].x;
-      state.balls[i].y = original[i].y;
-      state.balls[i].pocketed = original[i].pocketed;
-      state.balls[i].pocket = original[i].pocket;
-    }
+    restorePositions(state.balls, original);
     render();
   });
 }
@@ -1549,9 +1524,6 @@ function gameShoot() {
 
 // ---------------------------------------------------------------- 撤销
 
-/** 撤销栈上限。台面上任意时刻最多 16 颗球，一局十几到几十杆，20 步够用又不占内存。 */
-const HISTORY_LIMIT = 20;
-
 /**
  * 记一步快照。
  *
@@ -1559,8 +1531,7 @@ const HISTORY_LIMIT = 20;
  * 打完这一杆之前的局面，正是撤销要回到的状态。
  */
 function pushHistory(game) {
-  state.history.push(cloneGame(game));
-  if (state.history.length > HISTORY_LIMIT) state.history.shift();
+  pushHistoryEntry(state.history, game);
   updateUndoButton();
 }
 
@@ -1569,7 +1540,7 @@ function updateUndoButton() {
   if (!btn) return;
   const n = state.history.length;
   btn.disabled = n === 0 || state.animating;
-  btn.textContent = n === 0 ? '撤销上一杆' : `撤销上一杆（${n}）`;
+  btn.textContent = undoLabel(n);
 }
 
 function undoGame() {
@@ -1741,49 +1712,6 @@ function doRerack() {
 
 // ---------------------------------------------------------------- 手动出杆
 
-/**
- * 当前这一杆的基准瞄准方向（弧度）。
- *
- * 优先用求解结果——那是唯一"已经对准某个袋"的方向，滑块在它上面偏移才有意义。
- * 没有解时退化成"直指最近的合法目标球球心"，至少方向不是乱的。
- *
- * @returns {{angle:number, targetId:string|null, from:string}|null}
- */
-function currentAim() {
-  const inGame = state.mode === 'game';
-  const sol = inGame ? state.gSolution : state.solution;
-  const balls = inGame ? (state.game?.balls ?? []) : state.balls;
-  const cue = balls.find((b) => b.number === 0 && !b.pocketed);
-  if (!cue) return null;
-
-  if (sol?.found && sol.best) {
-    return { angle: sol.best.aimAngle, targetId: sol.best.targetId, from: 'solution' };
-  }
-
-  // 没有解：找一个最近的合法目标球当方向
-  const allow = inGame && state.game
-    ? legalTargetNumbers(state.game, numbersOnTable(state.game.balls))
-    : null;
-  const allowSet = allow ? new Set(allow) : null;
-  let target = null;
-  let bestD = Infinity;
-  for (const b of balls) {
-    if (b.pocketed || b.number === 0) continue;
-    if (allowSet && !allowSet.has(b.number)) continue;
-    const d = Math.hypot(b.x - cue.x, b.y - cue.y);
-    if (d < bestD) {
-      bestD = d;
-      target = b;
-    }
-  }
-  if (!target) return null;
-  return {
-    angle: Math.atan2(target.y - cue.y, target.x - cue.x),
-    targetId: target.id,
-    from: 'direct',
-  };
-}
-
 /** 把滑块的值读进 state.manual。 */
 function readManualControls() {
   const m = state.manual;
@@ -1801,63 +1729,6 @@ function updateCueBallPad() {
   const y = 50 - (state.manual.tipB / 0.5) * 38;
   dot.style.left = `${x}%`;
   dot.style.top = `${y}%`;
-}
-
-/**
- * 经典台球游戏击球力度档位划分 (参考 8 Ball Pool / 腾讯桌球)
- * 0% ~ 29%: 轻力 (细腻走位 / 贴库过渡) - 翡翠绿
- * 30% ~ 59%: 中力 (标准走位 / 常规进球) - 晴空蓝
- * 60% ~ 84%: 发力 (长台推进 / 强力拉杆) - 琥珀金
- * 85% ~ 100%: 爆杆 (强力冲球 / 极限爆裂) - 炽烈红
- */
-function getPowerTier(speed) {
-  const min = 0.55;
-  const max = 6.60;
-  const clamped = clamp(speed, min, max);
-  const ratio = (clamped - min) / (max - min);
-  const pct = Math.round(ratio * 100);
-
-  if (pct < 30) {
-    return {
-      level: '轻力',
-      sub: '细腻走位',
-      pct,
-      ratio,
-      color: '#10b981',
-      badgeBg: 'linear-gradient(135deg, #059669 0%, #10b981 100%)',
-      glow: 'rgba(16, 185, 129, 0.5)',
-    };
-  } else if (pct < 60) {
-    return {
-      level: '中力',
-      sub: '标准进球',
-      pct,
-      ratio,
-      color: '#0ea5e9',
-      badgeBg: 'linear-gradient(135deg, #0284c7 0%, #38bdf8 100%)',
-      glow: 'rgba(14, 165, 233, 0.5)',
-    };
-  } else if (pct < 85) {
-    return {
-      level: '发力',
-      sub: '强拉长台',
-      pct,
-      ratio,
-      color: '#f59e0b',
-      badgeBg: 'linear-gradient(135deg, #d97706 0%, #f59e0b 100%)',
-      glow: 'rgba(245, 158, 11, 0.5)',
-    };
-  } else {
-    return {
-      level: '爆杆',
-      sub: '强力冲球',
-      pct,
-      ratio,
-      color: '#ef4444',
-      badgeBg: 'linear-gradient(135deg, #dc2626 0%, #f87171 100%)',
-      glow: 'rgba(239, 68, 68, 0.65)',
-    };
-  }
 }
 
 function updatePowerMeterUI(tier, speed) {
@@ -1957,7 +1828,7 @@ function applySolutionToManual() {
 function shootManual() {
   if (state.animating) return;
   readManualControls();
-  const aim = currentAim();
+  const aim = currentAim(state);
   if (!aim) {
     if (state.mode === 'game') $('gAdvice').textContent = '台面上没有可以打的球。';
     else setAdvice('台面上没有可以打的球。', '');
@@ -1976,7 +1847,7 @@ function shootManual() {
 
 /** 练习模式：按给定的杆打，打完复位到原局面。 */
 function shootPracticeWith(shot, aim) {
-  const copy = state.balls.map((b) => ({ ...b, vx: 0, vy: 0, wx: 0, wy: 0, wz: 0 }));
+  const copy = copyBallsForShot(state.balls);
   const world = createWorld(table, copy);
   const cue = copy.find((b) => b.id === 'cue');
   if (!cue) return;
@@ -1990,24 +1861,14 @@ function shootPracticeWith(shot, aim) {
     frames.push(captureBallFrame(copy, trackRoll));
     if (allStopped(world)) break;
   }
-  const original = state.balls.map((b) => ({ x: b.x, y: b.y, pocketed: b.pocketed, pocket: b.pocket }));
+  const original = snapshotPositions(state.balls);
   replay(frames, dt, () => {
-    const pocketed = copy.filter((b) => b.pocketed && b.number !== 0).map((b) => b.number);
-    const cuePocketed = copy.some((b) => b.pocketed && b.number === 0);
-    const detail = [];
-    if (pocketed.length) detail.push(`进 ${pocketed.join('、')} 号`);
-    if (cuePocketed) detail.push('母球落袋');
-    if (!pocketed.length && !cuePocketed) detail.push('没有球进袋');
+    const outcome = describeManualShot(copy);
     setAdvice(
-      `手打结果：${detail.join(' · ')}（${state.manual.speed.toFixed(2)} m/s · ${$('tipBVal').textContent} · ${$('tipAVal').textContent}）`,
+      `手打结果：${outcome.detail.join(' · ')}（${state.manual.speed.toFixed(2)} m/s · ${$('tipBVal').textContent} · ${$('tipAVal').textContent}）`,
       aim.from === 'solution' ? '方向取自求解结果 + 你调的偏移' : '方向直指最近的球（没有求解）'
     );
-    for (let i = 0; i < state.balls.length; i++) {
-      state.balls[i].x = original[i].x;
-      state.balls[i].y = original[i].y;
-      state.balls[i].pocketed = original[i].pocketed;
-      state.balls[i].pocket = original[i].pocket;
-    }
+    restorePositions(state.balls, original);
     render();
   });
 }
@@ -2162,18 +2023,9 @@ function applyLoadedGame(saved) {
   const g = createGame(table, balls, { names: saved.players.map((p) => p.name), kind: saved.kind });
   state.gameKind = g.kind;
   $('gameKind').value = g.kind;
-  // createGame 给的是开局态，把存档里的进程态逐项装回去。
-  g.players = saved.players.map((p) => ({ ...p }));
-  g.turn = saved.turn;
-  g.breakShot = saved.breakShot;
-  g.open = saved.open;
-  g.ballInHand = saved.ballInHand ? { ...saved.ballInHand } : null;
-  g.requiresRerack = saved.requiresRerack;
-  g.phase = saved.phase;
-  g.winner = saved.winner;
-  g.shots = saved.shots;
-  // 斯诺克的比分和「该打什么」不在 createGame 的默认值里，必须单独装回去。
-  if (saved.snooker && g.snooker) g.snooker = { ...saved.snooker, scores: saved.snooker.scores.slice() };
+  // createGame 给的是开局态，把存档里的进程态逐项装回去（字段清单在 state.js，
+  // 那边能在 Node 里单测「漏装哪一项就变回开局」）。
+  restoreGameState(g, saved);
 
   state.generation += 1;
   state.game = g;
@@ -2863,7 +2715,8 @@ window.__app = {
   // 端到端脚本要能数「记了几杆」，不用去解析 localStorage
   practiceCount: () => readPracticeLog().length,
   applySolutionToManual,
-  currentAim,
+  // 端到端脚本按零参调，所以这里包一层把 state 喂进去（签名在 state.js 里）
+  currentAim: () => currentAim(state),
   saveGame,
   loadGame,
   removeSave,
