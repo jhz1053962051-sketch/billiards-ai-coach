@@ -1,0 +1,86 @@
+# CI：单元测试 + 演示页静态检查 + 浏览器端到端（verify:demo）。
+#
+# 为什么没有 npm ci、也没有 setup-node 的 cache：
+#   仓库零依赖（package.json 没有 dependencies/devDependencies），也没有
+#   package-lock.json。setup-node 的 cache: npm 在没有 lockfile 时会直接报
+#   "Dependencies lock file is not found"，所以这里只装 Node，不缓存。
+#
+# 为什么 CI 不跑姿态页（verify-pose）：
+#   tools/verify-pose.mjs:39-48 的照片/录像素材默认取自 _research/，而 _research/
+#   被 .gitignore 排除、不进仓库。干净 clone 上它必然走「缺素材 → 跳过」分支
+#   （tools/verify-pose.mjs:217-223、:353-354），只剩 3 条降级断言；叠上
+#   POSE_STRICT=1 会直接把 CI 判红。要上 CI，得先把素材放进仓库或改成可下载。
+#
+# 同理也没有 `VERIFY_STRICT=1 npm run verify`：verify-all 里含姿态页，
+# 在干净 clone 上严格模式必红。
+#
+# Chrome 来源：ubuntu-latest 镜像自带 Google Chrome stable（/usr/bin/google-chrome）。
+#   tools/cdp.mjs:20-32 的候选列表已含 /usr/bin/google-chrome、google-chrome-stable、
+#   chromium、chromium-browser，且支持 CHROME_PATH 覆盖（tools/cdp.mjs:21），
+#   所以不需要 setup-chrome 之类的第三方 action。
+
+name: verify
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: node ${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # 与 package.json 的 engines.node >= 22 对齐；22 是最低支持线，24 是当前线。
+        node-version: [22, 24]
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          # cache 故意不写：没有 package-lock.json，开了会报错（见文件头）。
+
+      - name: 单元测试
+        run: npm test
+
+      - name: 演示页静态检查
+        run: npm run check:demo
+
+      - name: 确认 Chrome 可用
+        # verify-demo 会自己按候选路径找 Chrome（tools/cdp.mjs:41-52）；
+        # 这一步只是为了在镜像变了的时候先给一句明白话，而不是让 E2E 报「找不到 Chrome」。
+        run: google-chrome --version
+
+      - name: 浏览器端到端（verify:demo）
+        timeout-minutes: 10
+        env:
+          # 缺了它 verify-demo 会去连默认的 http://127.0.0.1:4173/demo/
+          DEMO_URL: http://127.0.0.1:4173/demo/
+        run: |
+          # verify-demo 只负责连服务，不负责起服务（tools/verify-demo.mjs:25-32）。
+          # 端口用它的默认值 4173；下面先轮询到页面可访问再跑断言。
+          node tools/serve.mjs 4173 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 60); do
+            if curl -fsS "$DEMO_URL" > /dev/null; then break; fi
+            sleep 0.5
+          done
+          # 60 次仍未就绪就在这里失败，比让 E2E 后面报「页面 null」好定位。
+          curl -fsS "$DEMO_URL" > /dev/null
+          # 已知风险（不改 tools/）：tools/verify-demo.mjs:36-49 自己 spawn Chrome 时
+          # 没带 --disable-dev-shm-usage，而 tools/cdp.mjs:88 带了。GitHub runner 的
+          # /dev/shm 只有 64 MB，Chrome 偶发崩溃（Target closed / SIGTRAP）属于环境
+          # 问题，不是业务断言失败；真遇到再给 verify-demo 补这个 flag。
+          npm run verify:demo
