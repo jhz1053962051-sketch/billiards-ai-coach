@@ -40,7 +40,16 @@ import {
 } from '../src/rules.js';
 import { takeTurn } from '../src/opponent.js';
 import { ballName as snookerBallName } from '../src/snooker.js';
-import { readSave, writeSave, clearSave, describeSave, readSaveStamp, serialize, sanitize, SAVE_KEY } from './save.js';
+import {
+  loadSave,
+  writeSave,
+  clearSave,
+  describeSave,
+  readSaveStamp,
+  serialize,
+  sanitize,
+  SAVE_KEY,
+} from './save.js';
 // 不碰 DOM 的那部分状态逻辑住在 ./state.js：它是能在 Node 单测里跑的那一层。
 // 这里只留「读什么状态、画什么、什么时候拦下来」。
 import {
@@ -1423,7 +1432,10 @@ function updateLog() {
   }
   if (!g || !g.log.length) {
     box.innerHTML = '';
-    box.appendChild(note ?? document.createTextNode('—'));
+    // 提示行和「—」要同时在场：只有一行橙字时，看起来像记录区还在加载或者坏了，
+    // 补一个占位才说清「这里没有记录」，上面那行只解释为什么没有。
+    if (note) box.appendChild(note);
+    box.appendChild(document.createTextNode('—'));
     return;
   }
   box.innerHTML = '';
@@ -2088,9 +2100,27 @@ function saveGame() {
 
 /** 从 localStorage 读回一局。 */
 function loadGame() {
-  const saved = readSave();
+  // 读档走 loadSave 而不是 readSave：整档被判损坏时它会真的把那份坏档删掉，
+  // 下面的文案才配得上说「已删除」。只读的 readSave 留给 describeSave 之类。
+  const { status, saved, discarded } = loadSave();
   if (!saved) {
-    setReport('没有可用的存档（或者存档已损坏，已被丢弃）。');
+    if (status === 'corrupt') {
+      // 删档失败（隐私模式 / 存储只读）时不许说「已删除」：文案必须和实际发生的事一致。
+      setReport(
+        discarded
+          ? '存档已损坏（读不出合法局面），已从本地存储删除。'
+          : '存档已损坏（读不出合法局面），本次没有加载；本地存储删不掉，它还会在。',
+      );
+      // 坏档留着的另一个后果：界面上的「存档：…」摘要也得跟着消失/保持诚实。
+      refreshSaveInfo();
+      return;
+    }
+    if (status === 'newer') {
+      setReport('存档来自更新的版本，这个版本读不了；没有动它，换回新版页面还能接着打。');
+      refreshSaveInfo();
+      return;
+    }
+    setReport('没有可用的存档。');
     refreshSaveInfo();
     return;
   }

@@ -233,7 +233,7 @@ export function serialize(game, now = Date.now(), history = []) {
   const log = Array.isArray(game.log) ? game.log : [];
   const packed = packHistory(history);
   const out = {
-    v: 2,
+    v: SAVE_VERSION,
     savedAt: now,
     table: { id: game.table.preset },
     balls: game.balls.map((b) => ({
@@ -319,21 +319,68 @@ export function readSaveStamp(store = defaultStore()) {
   }
 }
 
-/** 读存档。没有、坏掉、校验不过都返回 null。 */
-export function readSave(store = defaultStore()) {
-  if (!store) return null;
+/** 当前存档格式版本。v1 是「没有 log / history 两个键」的老格式。 */
+export const SAVE_VERSION = 2;
+
+/**
+ * 读存档并判断「为什么读不出来」——只读，不动存储。
+ *
+ * status 的取值和用途：
+ *   ok          读到一份能用的局面（saved 是 sanitize 之后的对象）
+ *   empty       压根没有存档
+ *   unavailable 存储读不了（隐私模式下 getItem 就抛）
+ *   newer       JSON 是对象、版本号比本代码新：那是版本差异，不是坏数据，
+ *               不许删——把它留着，换回新版本来还能读
+ *   corrupt     确认是坏数据（不是 JSON、或者 sanitize 判它建不出一局）
+ */
+function inspectSave(store) {
+  if (!store) return { status: 'unavailable', saved: null };
   let text = null;
   try {
     text = store.getItem(KEY);
   } catch {
-    return null;
+    return { status: 'unavailable', saved: null };
   }
-  if (!text) return null;
+  if (!text) return { status: 'empty', saved: null };
+  let raw = null;
   try {
-    return sanitize(JSON.parse(text));
+    raw = JSON.parse(text);
   } catch {
-    return null;
+    return { status: 'corrupt', saved: null };
   }
+  // 版本号先于 sanitize 判断：未来的存档多半会多出字段，sanitize 可能因此判它
+  // 不合法。降级打开时把人家新版本的存档删掉，是比读不出来严重得多的错。
+  if (raw && typeof raw === 'object' && isFiniteNumber(raw.v) && raw.v > SAVE_VERSION) {
+    return { status: 'newer', saved: null };
+  }
+  const saved = sanitize(raw);
+  return saved ? { status: 'ok', saved } : { status: 'corrupt', saved: null };
+}
+
+/**
+ * 读档 + 清理坏档。整档校验不过就把它真的从存储里删掉，并如实报告删没删成。
+ *
+ * 为什么必须真有这一步：界面上写着「存档已损坏，已被丢弃」，但坏档一直躺在
+ * localStorage 里，下次进页面照样被读出来，那句提示就是假的。
+ *
+ * @returns {{status:'ok'|'empty'|'unavailable'|'newer'|'corrupt', saved:object|null, discarded:boolean}}
+ */
+export function loadSave(store = defaultStore()) {
+  const { status, saved } = inspectSave(store);
+  if (status !== 'corrupt') return { status, saved, discarded: false };
+  let discarded = false;
+  try {
+    store.removeItem(KEY);
+    discarded = true;
+  } catch {
+    discarded = false;
+  }
+  return { status, saved: null, discarded };
+}
+
+/** 读存档。没有、坏掉、校验不过都返回 null。（只读，不删坏档——删档走 loadSave） */
+export function readSave(store = defaultStore()) {
+  return inspectSave(store).saved;
 }
 
 export function clearSave(store = defaultStore()) {

@@ -40,7 +40,7 @@ import {
   unpackHistory,
   utf8Bytes,
 } from '../demo/state.js';
-import { readSave, sanitize, serialize, writeSave } from '../demo/save.js';
+import { loadSave, readSave, sanitize, serialize, writeSave, SAVE_KEY, SAVE_VERSION } from '../demo/save.js';
 
 const table = createTable('pool9');
 
@@ -742,6 +742,158 @@ test('存档往返：杆史与对局记录一起存，撤销一步回到上一�
     assert.equal(prev.balls[i].pocketed, before.balls[i].pocketed);
     assert.equal(prev.balls[i].pocket ?? null, before.balls[i].pocket ?? null);
   }
+});
+
+// ------------------------------------------------- 杆史里的越界坐标（坏步要丢）
+//
+// 真机实测抓到的缺陷：把某一步的坐标手改成 9999，读档后一切「正常」、note 为
+// null、控制台零报错，甚至点撤销能把母球放到 (9999,9999) 台面之外，求解器还照常
+// 给建议。这种「静默读到坏数据」比直接报错更糟，所以单步坐标必须落在台面范围内。
+
+/** 台面 + 袋口容差的允许坐标带（和 state.js 的取值口径一致：max(2R, 最大袋口捕捉半径)）。 */
+function coordBand(t) {
+  const jaw = t.pockets.reduce((m, p) => Math.max(m, p.captureR), 0);
+  const margin = Math.max(2 * t.ballRadius, jaw);
+  return {
+    minX: t.bounds.minX - margin,
+    maxX: t.bounds.maxX + margin,
+    minY: t.bounds.minY - margin,
+    maxY: t.bounds.maxY + margin,
+  };
+}
+
+/** 造一份「只有一步」的杆史载荷，母球放在给定坐标上，其余球沿用局面里的球位。 */
+function oneStepPayload(base, cueX, cueY) {
+  const ids = base.balls.map((b) => b.id);
+  const x = [];
+  for (let i = 0; i < ids.length; i += 1) {
+    x.push(i === 0 ? cueX : base.balls[i].x, i === 0 ? cueY : base.balls[i].y, -1);
+  }
+  return {
+    b: ids,
+    s: [{ s: 0, t: 0, k: 0, o: 0, h: 0, r: 0, e: 0, w: -1, g: [0, 0], f: [0, 0], n: [0, 0], l: 0, x }],
+    d: 0,
+  };
+}
+
+test('unpackHistory：某一步坐标越出台面就只丢那一步，并计入 dropped', () => {
+  const { history, game } = makeHistory(3);
+  const base = history[history.length - 1];
+  const packed = JSON.parse(JSON.stringify(packHistory(history)));
+  assert.equal(packed.s.length, 3);
+
+  // 中间那一步写成「有限数、但根本不在台面上」——旧版会原样装进撤销栈
+  packed.s[1].x[0] = 9999;
+  packed.s[1].x[1] = 9999;
+
+  const { entries, dropped } = unpackHistory(packed, game);
+  assert.equal(entries.length, 2, '只丢坏的那一步，其余步照常还原');
+  assert.equal(dropped, 1, '丢掉的那一步要如实计数，「更早的 N 步」才对得上');
+  assert.deepEqual(entries.map((e) => e.shots), [0, 2], '丢的是中间那一步');
+
+  const band = coordBand(table);
+  for (const entry of entries) {
+    for (const b of entry.balls) {
+      assert.ok(b.x >= band.minX && b.x <= band.maxX, `x=${b.x} 不该出现在撤销栈里`);
+      assert.ok(b.y >= band.minY && b.y <= band.maxY, `y=${b.y} 不该出现在撤销栈里`);
+    }
+  }
+
+  // 整段都坏时 entries 为空，dropped 要等于步数（提示会退化成「更早的 N 步」）
+  const allBad = JSON.parse(JSON.stringify(packed));
+  for (const step of allBad.s) {
+    step.x[0] = 1e9;
+  }
+  const none = unpackHistory(allBad, game);
+  assert.equal(none.entries.length, 0);
+  assert.equal(none.dropped, 3);
+});
+
+test('unpackHistory：边界值不误杀，真越界才丢', () => {
+  const base = makeGame(1);
+  const band = coordBand(table);
+  const accept = (x, y, why) => {
+    const { entries, dropped } = unpackHistory(oneStepPayload(base, x, y), base);
+    assert.equal(dropped, 0, `${why}（${x}, ${y}）不该被丢`);
+    assert.equal(entries.length, 1, `${why}（${x}, ${y}）应当还原成一步`);
+  };
+  const reject = (x, y, why) => {
+    const { entries, dropped } = unpackHistory(oneStepPayload(base, x, y), base);
+    assert.equal(entries.length, 0, `${why}（${x}, ${y}）必须丢掉`);
+    assert.equal(dropped, 1, `${why}（${x}, ${y}）要计入 dropped`);
+  };
+
+  // 台面可行域的四角与贴库线：恰好落在 bounds 上仍然合法
+  accept(table.bounds.minX, table.bounds.minY, '球心可行域左下角');
+  accept(table.bounds.maxX, table.bounds.maxY, '球心可行域右上角');
+  // 0 与 -0：坐标 0 在袋心所在的台面边界上，-0 就是 0，都不该被当成坏数据
+  accept(0, 0, '角袋袋心');
+  accept(-0, -0, '负零');
+  accept(table.length / 2, 0, '中袋袋心');
+  // 恰好超出一个球半径：落袋球的球心可以停在台外一个袋口半径处，不许误杀
+  accept(table.bounds.maxX + table.ballRadius, table.bounds.maxY + table.ballRadius, '超出一个球半径');
+  // 允许带的外沿（闭区间）：正好压在界上仍算合法
+  accept(band.minX, band.minY, '允许带下界');
+  accept(band.maxX, band.maxY, '允许带上界');
+
+  // 真正越界：台外一米、极大值、负值、NaN
+  reject(band.maxX + 0.001, table.width / 2, '越出允许带一毫米');
+  reject(table.length + 1, table.width / 2, '台外一米');
+  reject(1e9, 1e9, '极大值 1e9');
+  reject(-5, table.width / 2, '负值');
+  reject(Number.NaN, table.width / 2, 'NaN');
+
+  // 一颗球的坐标坏了就丢整步（不是只把那一颗球挪回 0）
+  const twoBad = oneStepPayload(base, table.length / 2, table.width / 2);
+  twoBad.s[0].x[3] = table.length + 2;
+  assert.equal(unpackHistory(twoBad, base).entries.length, 0, '任一球越界都要丢整步');
+});
+
+test('坏档：整档被拒时 loadSave 真的删掉 key，只读的 readSave 不动它', () => {
+  const store = memoryStore();
+  const raw = serialize(makeGame(0), 1700000000000, []);
+  raw.balls[0].x = null; // 顶层球位读不出来 → sanitize 整份否掉
+  store.setItem(SAVE_KEY, JSON.stringify(raw));
+
+  assert.equal(readSave(store), null, '只读路径应当读不出局面');
+  assert.notEqual(store.getItem(SAVE_KEY), null, 'readSave 只读，不许偷偷删档');
+
+  const got = loadSave(store);
+  assert.equal(got.status, 'corrupt');
+  assert.equal(got.saved, null);
+  assert.equal(got.discarded, true, '删成功要说出来，界面文案才敢写「已删除」');
+  assert.equal(store.getItem(SAVE_KEY), null, '「已被丢弃」必须是真的：key 得没了');
+
+  // 删完再读是 empty（不是 corrupt），下次进页面不会再撞上一份坏档
+  const again = loadSave(store);
+  assert.equal(again.status, 'empty');
+  assert.equal(again.discarded, false);
+});
+
+test('坏档：版本号比本代码新的存档不删，只报 newer', () => {
+  const store = memoryStore();
+  const raw = serialize(makeGame(0), 1700000000000, []);
+  raw.v = SAVE_VERSION + 1;
+  raw.somethingNew = { anything: true };
+  // 故意再写坏一处：确认判定顺序是「先看版本、再看内容」，新版本存档一个字节都不动
+  raw.balls[0].x = null;
+  store.setItem(SAVE_KEY, JSON.stringify(raw));
+
+  const got = loadSave(store);
+  assert.equal(got.status, 'newer', '版本差异不是坏数据');
+  assert.equal(got.discarded, false);
+  assert.notEqual(store.getItem(SAVE_KEY), null, '更新的版本必须留着，换回新版还要能读');
+});
+
+test('坏档：不是 JSON 的也应判损坏并删掉，空存储报 empty', () => {
+  const store = memoryStore();
+  assert.equal(loadSave(store).status, 'empty');
+
+  store.setItem(SAVE_KEY, '{"table":');
+  const got = loadSave(store);
+  assert.equal(got.status, 'corrupt');
+  assert.equal(got.discarded, true);
+  assert.equal(store.getItem(SAVE_KEY), null);
 });
 
 // --------------------------------------------------- 撤销 / 读档后的自动出杆暂停

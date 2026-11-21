@@ -533,11 +533,66 @@ function decodeStep(step, baseGame, slots, pocketIds) {
 }
 
 /**
+ * 杆史坐标的可行域：球心可行矩形（table.bounds）四周再放一圈「袋口容差」。
+ *
+ * 为什么不能直接用 bounds：落袋的球，球心在袋心附近，而袋心就落在台面边界上
+ * （角袋 (0,0)、中袋 (L/2, 0)），所以一颗**合法**的落袋球完全可能落在 bounds
+ * 之外。物理核判进袋用的是「到袋心距离 ≤ captureR」，那么任何一颗真实打出来的
+ * 球，球心必然落在 `bounds ∪ 若干袋口捕获圆` 里，其坐标最远也就越出台面
+ * 一个捕获半径。所以容差取 `max(2R, 最大 captureR)`：
+ *   · 2R —— 题面要求的「一个球半径的量级」，防止把贴库/袋口边缘的球误杀；
+ *   · 最大 captureR —— 袋口捕获半径（pool9 角袋 74 mm ≈ 2.6R），比 2R 更大，
+ *     取二者最大才不会把「刚被袋口吃进去、坐标还在台外一点」的落袋球误判成坏步。
+ *
+ * 尺寸一律从调用方传进来的 table 上取，这一层不写死任何球台尺寸：换台（pool8 /
+ * pool9 / snooker）之后同一份校验照样成立。
+ *
+ * 返回 null 表示这张台没给出可用的 bounds（异常夹具），此时不校验——宁可少拦，
+ * 也不要让一份没有球台信息的局面把整段杆史全丢掉。
+ */
+function historyCoordLimit(table) {
+  const b = table?.bounds;
+  if (!b || ![b.minX, b.maxX, b.minY, b.maxY].every((v) => Number.isFinite(v))) return null;
+  const r = Number.isFinite(table.ballRadius) ? table.ballRadius : 0;
+  const jaw = Array.isArray(table.pockets)
+    ? table.pockets.reduce((m, p) => (Number.isFinite(p?.captureR) ? Math.max(m, p.captureR) : m), 0)
+    : 0;
+  const margin = Math.max(2 * r, jaw);
+  return {
+    minX: b.minX - margin,
+    maxX: b.maxX + margin,
+    minY: b.minY - margin,
+    maxY: b.maxY + margin,
+  };
+}
+
+/**
+ * 一步的坐标串是否整步都在可行域内。
+ *
+ * 写成 `!(v >= lo && v <= hi)` 而不是 `v < lo || v > hi`：NaN 参与任何比较都是
+ * false，前一种写法会把它判成越界，后一种会静默放过。存档里出现 NaN 只能算坏数据。
+ * 边界取闭区间——恰好落在上下界上仍然接受，只有真的越出去才丢这一步。
+ */
+function stepInRange(x, limit) {
+  if (!limit) return true;
+  for (let i = 0; i + 2 < x.length; i += 3) {
+    const px = x[i];
+    const py = x[i + 1];
+    if (!(px >= limit.minX && px <= limit.maxX && py >= limit.minY && py <= limit.maxY)) return false;
+  }
+  return true;
+}
+
+/**
  * 存档里的杆史 → 撤销栈（旧的在前，和 pushHistoryEntry 的顺序一致）。
  *
  * baseGame 必须是「已经按存档装好进程态」的当前局面：球序、球台袋口、以及
  * 当前这局的 log 都从它上面取。载荷缺失（老存档没有这个字段）时返回空历史，
  * 由调用方决定怎么提示——绝不能因为老存档就直接报错。
+ *
+ * 单步坏掉（长度不对、球序对不上、坐标越出台面太多）只丢那一步并计入 dropped，
+ * 不因此否掉整段杆史：整档已经被 save.js 的 sanitize 放行过一次，这里再整段丢
+ * 就变成「球局读回来了、撤销栈却全没了」，比少几步更难解释。
  */
 export function unpackHistory(packed, baseGame) {
   const empty = { entries: [], dropped: 0 };
@@ -546,9 +601,13 @@ export function unpackHistory(packed, baseGame) {
   const slots = ids.map((id) => baseGame.balls.findIndex((b) => b.id === id));
   if (ids.length === 0 || slots.some((i) => i < 0)) return empty;
   const pocketIds = baseGame.table.pockets.map((p) => p.id);
+  // 越界坐标在旧版里会被原样装进撤销栈：读档看着「正常」，一点撤销母球就落到
+  // 台面外，求解器还照着它给建议——「静默读到坏数据」比直接报错更糟。
+  const limit = historyCoordLimit(baseGame.table);
   const entries = [];
   for (const step of packed.s) {
     if (!step || !Array.isArray(step.x) || step.x.length !== ids.length * 3) continue;
+    if (!stepInRange(step.x, limit)) continue;
     entries.push(decodeStep(step, baseGame, slots, pocketIds));
   }
   const declared = Number.isFinite(packed.d) ? Math.max(0, Math.floor(packed.d)) : 0;
