@@ -85,8 +85,8 @@ jobs:
           done
           # 60 次仍未就绪就在这里失败，比让 E2E 后面报「页面 null」好定位。
           curl -fsS "$DEMO_URL" > /dev/null
-          # 已知风险（不改 tools/）：tools/verify-demo.mjs:36-49 自己 spawn Chrome 时
-          # 没带 --disable-dev-shm-usage，而 tools/cdp.mjs:88 带了。GitHub runner 的
-          # /dev/shm 只有 64 MB，Chrome 偶发崩溃（Target closed / SIGTRAP）属于环境
-          # 问题，不是业务断言失败；真遇到再给 verify-demo 补这个 flag。
+          # tools/verify-demo.mjs:48 已经带上 --disable-dev-shm-usage（提交 06635c7），
+          # GitHub runner /dev/shm 只有 64 MB 这条老风险因此不再适用。若这里仍出现
+          # Chrome 崩溃（Target closed / SIGTRAP），那是别的原因，得重新查，不要默认
+          # 当成环境问题放过。
           npm run verify:demo

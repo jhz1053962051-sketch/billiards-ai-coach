@@ -361,7 +361,7 @@ function findDomRefs(src) {
     const src = fs.readFileSync(statePath, 'utf8');
     const hits = findDomRefs(src);
     for (const kw of DOM_KEYWORDS) checked++;
-    // 报错要能直接指到行：只说「有一条失败」等于让人从头翻 270 行。
+    // 报错要能直接指到行：只说「有一条失败」等于让人从头翻整个文件。
     for (const h of hits) {
       problems.push(`${rel}:${h.line} 出现 DOM 全局 ${h.kw}，状态层要能在 Node 里裸跑：${h.text}`);
     }

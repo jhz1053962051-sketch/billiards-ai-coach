@@ -1,13 +1,16 @@
-// 循环依赖的守护测试。
+// 加载顺序的守护测试。
 //
-// `src/solver.js` 与 `src/safety.js` 互相 import：solver 用 safety 的 solveSafety
-// 找防守方案，safety 用 solver 的 positionTolerance 给局面打分。ES module 允许这样，
-// 但前提是「被循环引用的那个绑定只在调用时读」——只要谁在模块顶层真的用了它，
-// 就会撞上 TDZ（Cannot access 'X' before initialization），而且是加载即崩。
+// 循环依赖在本文件写下时确实存在过：`src/solver.js` 与 `src/safety.js` 互相 import——
+// solver 用 safety 的 solveSafety 找防守方案，safety 用 solver 的 positionTolerance
+// 给局面打分。ES module 允许这样，但前提是「被循环引用的那个绑定只在调用时读」；
+// 谁在模块顶层真的用了它，就会撞上 TDZ（Cannot access 'X' before initialization），
+// 而且是加载即崩。那个环现在已断开：positionTolerance 搬到 `src/tolerance.js`，
+// safety 只单向依赖它；「两边不再互相 import」由 `test/sim-core.test.js` 直接断言。
 //
-// 平时两个模块都在同一个进程里按测试文件的顺序加载，恰好不会暴露问题；换个入口
-// （比如别人直接 import safety.js）就可能崩。所以这里开两个子进程，分别按两种顺序
-// 加载，并且真的调用一次，把「加载顺序」这个变量固定住。
+// 所以下面两条用例钉的不是循环依赖，而是**加载顺序**这条隐式契约：两个模块仍共享
+// 间接依赖，平时所有测试都在同一个进程里按固定顺序加载，恰好不会暴露加载期的问题；
+// 换个入口（比如别人直接 import safety.js）仍可能崩。于是这里开两个子进程，分别按
+// 两种顺序加载，并且真的调用一次，把这个变量固定住。
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
