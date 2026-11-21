@@ -1586,6 +1586,133 @@ console.log('手动出杆·滑块:', manualShot);
   check('塞的标签说得清是无塞', /无塞/.test(r.labels.tipA), r.labels.tipA);
 }
 
+// 上面一组只验「滑块的值被读进来」。用户真正看到的是打完之后的「手打结果：…」，
+// 而这句话里的球号 / 母球落袋读的是 simulateFrames 返回的 sim.balls——那份模拟副本
+// 的终局。副本读错（读成模拟之前的球位、或读成空数组）时页面不会报错，只会安静地
+// 写一句「没有球进袋」，单测和 frames 逐字节比对都兜不到渲染这一侧，所以这里按页面
+// 文本验它。
+//
+// 局面自己摆，不依赖前面用例留下的东西：resetLayout 的三球局，母球摆在台心，1 号球
+// 落在母球→左下角袋的连线上、离袋口 0.30 米，另两颗球丢到远角，保证「最近的球」就是
+// 1 号、且直撞必进。3.20 m/s 打进去时母球跟着摔袋，1.20 m/s 只进 1 号不摔——两杆的
+// 文案差在「母球落袋」这一项上，正好能验每杆都重新读终局。
+const MANUAL_SETUP = `(() => {
+  const app = window.__app;
+  app.setMode('practice');
+  app.resetLayout();
+  const t = app.table;
+  const pk = t.pockets.find((p) => p.id === 'c-bl');
+  const byNum = (n) => app.state.balls.find((b) => b.number === n);
+  const cue = byNum(0);
+  const b1 = byNum(1);
+  const b2 = byNum(2);
+  const b3 = byNum(3);
+  cue.x = t.length * 0.5;
+  cue.y = t.width * 0.5;
+  const dx = pk.x - cue.x;
+  const dy = pk.y - cue.y;
+  const L = Math.hypot(dx, dy);
+  const ux = dx / L;
+  const uy = dy / L;
+  b1.x = pk.x - ux * 0.30;
+  b1.y = pk.y - uy * 0.30;
+  b2.x = t.length * 0.95;
+  b2.y = t.width * 0.06;
+  b3.x = t.length * 0.95;
+  b3.y = t.width * 0.94;
+  app.state.solution = null;
+  const aim = app.currentAim();
+  return JSON.stringify({
+    target: aim ? aim.targetId : null,
+    from: aim ? aim.from : null,
+    cue: { x: cue.x, y: cue.y },
+  });
+})()`;
+
+/**
+ * 按给定力度/瞄准偏移打一杆，等回放结束，读页面上的文案。
+ * reset 为 false 时沿用上一杆之后的局面（练习模式打完会复位球位），
+ * 这样第二杆读到的仍然是同一张台子，可以拿两杆的文案直接对比。
+ */
+async function manualShotAt(speed, aimOffset, { reset = true } = {}) {
+  if (reset) await evaluate(MANUAL_SETUP);
+  await evaluate(`(() => {
+    document.getElementById('power').value = '${speed}';
+    document.getElementById('aimOffset').value = '${aimOffset}';
+    document.getElementById('tipB').value = '0';
+    document.getElementById('tipA').value = '0';
+    document.getElementById('power').dispatchEvent(new Event('input', { bubbles: true }));
+    document.getElementById('shootManual').click();
+  })()`);
+  for (let i = 0; i < 60; i++) {
+    await sleep(200);
+    const r = JSON.parse(await evaluate(`(() => JSON.stringify({
+      animating: window.__app.state.animating,
+      advice: document.getElementById('advice').textContent,
+      verdict: document.getElementById('verdict').textContent,
+      cue: (() => {
+        const c = window.__app.state.balls.find((b) => b.number === 0);
+        return c ? { x: c.x, y: c.y } : null;
+      })(),
+    }))()`));
+    // 等的是「回放结束 + 文案真的换成了手打结果」，不是固定时长
+    if (!r.animating && r.advice.startsWith('手打结果')) return r;
+  }
+  return { timeout: true, advice: '', verdict: '', cue: null };
+}
+
+const manualSetup = JSON.parse(await evaluate(MANUAL_SETUP));
+console.log('手打结果·局面:', JSON.stringify(manualSetup));
+check('摆好的局面里最近的球是 1 号、且方向来自直撞（否则后面几杆测不到点上）',
+  manualSetup.target === 'b1' && manualSetup.from === 'direct', JSON.stringify(manualSetup));
+
+const manualHard = await manualShotAt('3.20', '0');
+console.log('手打结果·3.20 m/s:', JSON.stringify(manualHard));
+check(
+  '手打之后页面写出「手打结果」，且说清这一杆真的进了 1 号、母球也摔了（读错终局副本会写成「没有球进袋」）',
+  /^手打结果：进 1 号 · 母球落袋（/.test(manualHard.advice),
+  manualHard.advice || '超时'
+);
+check(
+  '手打结果的括号里带上力度与杆法两项（3.20 m/s · 中杆 · 无塞）',
+  /（3\.20 m\/s · 中杆 · 无塞）$/.test(manualHard.advice),
+  manualHard.advice || '超时'
+);
+
+// 同一张台子换 1.20 m/s 再打：1 号球照样进，但这一杆母球不进袋。
+// 如果「手打结果」读的是上一杆留下的副本、或干脆写死一份终局，这两杆就会一模一样。
+const manualSoft = await manualShotAt('1.20', '0', { reset: false });
+console.log('手打结果·1.20 m/s（同局面）:', JSON.stringify(manualSoft));
+check(
+  '同一局面换成 1.20 m/s：仍然进 1 号，但「母球落袋」不再出现——文档读的是这一杆的终局',
+  /^手打结果：进 1 号（1\.20 m\/s/.test(manualSoft.advice) && !/母球落袋/.test(manualSoft.advice),
+  manualSoft.advice || '超时'
+);
+check(
+  '练习模式打完把球位复位了（第二杆才能拿同一张台子作对比）',
+  manualSoft.cue !== null &&
+    Math.abs(manualSoft.cue.x - manualSetup.cue.x) < 1e-6 &&
+    Math.abs(manualSoft.cue.y - manualSetup.cue.y) < 1e-6,
+  JSON.stringify(manualSoft.cue)
+);
+
+// 再偏 8° 瞄准：这一杆压根碰不到 1 号球，结果文案不能还报「进 1 号」。
+const manualWide = await manualShotAt('3.20', '8');
+console.log('手打结果·瞄准偏 8°:', JSON.stringify(manualWide));
+check(
+  '瞄准偏 8° 之后不再报「进 1 号」——结果随输入变，不是一句算好的模板',
+  manualWide.advice.startsWith('手打结果') && !/进 1 号/.test(manualWide.advice) &&
+    manualWide.advice !== manualHard.advice,
+  manualWide.advice || '超时'
+);
+
+// 收拾干净：把偏移与局面还原，免得后面的用例读到这张特制的台子。
+await evaluate(`(() => {
+  document.getElementById('aimOffset').value = '0';
+  document.getElementById('power').value = '2.20';
+  window.__app.resetLayout();
+})()`);
+
 // ------------------------------------------------------------ 经典垂直拉杆能量槽 (Power Meter)
 const powerMeterTest = await evaluate(`(() => {
   const meter = document.getElementById('cuePowerMeter');
