@@ -33,7 +33,7 @@ const FIXTURES = [
   { id: 'd03-angle-b', balls: [[0, 2.1, 0.3], [1, 1.1, 0.85]], selected: '1|c-tl' },
   // 3 球 5 候选：剪枝真正开始起作用的最简局面
   { id: 'd05-three', balls: [[0, 0.45, 0.9], [1, 1.35, 0.55], [2, 2.0, 1.05]], selected: '1|c-tr' },
-  { id: 'd06-three-b', balls: [[0, 0.6, 0.62], [3, 1.7, 0.95], [5, 2.0, 0.4]], selected: '3|c-tr' },
+  { id: 'd06-three-b', balls: [[0, 0.6, 0.62], [3, 1.7, 0.95], [5, 2.0, 0.4]], selected: '5|c-br' },
   { id: 'd12-four', balls: [[0, 0.3, 0.3], [1, 1.2, 0.9], [2, 1.9, 1.15], [3, 2.3, 0.4]], selected: '1|m-t' },
   // 5 球 6 候选 / 5 球 7 候选：剪枝收益最大的两类
   { id: 'g5-0', balls: [[0, 1.5903, 1.1656], [1, 1.0927, 0.4764], [2, 1.2959, 0.7031], [3, 1.6082, 0.6738], [4, 0.5832, 0.5105]], selected: '2|m-b' },
@@ -55,8 +55,9 @@ const run = (layout, opts = {}, reverse = false) =>
   solveShot(table, makeBalls(layout, reverse), { ...NO_BUDGET, cueId: 'cue', ...opts });
 
 test('剪枝：简单局面（1~2 球必进球）与 exhaustive 选出同一杆', () => {
-  // d06-three-b 不在这个名单里：那一局两个候选的评分只差 1.8 分（且收紧网格的
-  // 3|c-tr 反而更高），新契约只要求 top-1 落在穷举 top-3 内——见下一个用例。
+  // d06-three-b 不在这个名单里：它是「1.7 力度档」的哨兵局面，收紧网格下
+  // 3|c-tr 曾顶到前面（成本 34.7 > 穷举 32.9，超 3% 硬线）；加回 1.7 后已与穷举同杆，
+  // 但这里仍只按「top-1 落在穷举 top-3 内」的通用契约检查——见下一个用例。
   const simple = FIXTURES.filter(
     (f) => f.balls.length <= 2 || f.id === 'd05-three'
   );

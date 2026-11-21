@@ -290,10 +290,35 @@ test('三步：会算「对手回我一杆之后」我有多难打，并且因�
     (s) => s.targetNumber === three.plan.targetNumber && s.pocketId === three.plan.pocketId
   );
   assert.equal(chosen.plies, 3, '被选中的方案必须真的算过第三层');
+
+  // 这一步守的是「三步确实看到了第三层」，**不是**「myEase 必须小于某个魔数」。
+  // myEase / opponentEase 都是启发式易度（0–100），会随杆法、力度档位整档位移：
+  // 同一局面 4 档网格是 56.6，5 档（加回 1.7）是 63.6。所以这里只断言**相对关系**——
+  // 两个量来自同一局面、同一尺度，档位一改两边一起动，断言不会因为标定漂移而假红。
+  assert.equal(typeof chosen.myEase, 'number', '三步必须给出「我」的易度');
   assert.ok(
-    typeof chosen.myEase === 'number' && chosen.myEase < 60,
-    `算过第三层就该知道我很难接着打，实际 myEase=${chosen.myEase}`
+    chosen.myEase >= 0 && chosen.myEase <= 100,
+    `易度是 0–100 的启发式分数，实际 ${chosen.myEase}`
   );
+
+  // (1) 同一方案内：我这一杆打完，对手很好打（opponentEase 高）；对手回我一杆之后
+  //     就轮到我难打（myEase 明显低）。实测 5 档 93.6 vs 63.6（差 30.0），
+  //     4 档 93.6 vs 56.6（差 37.0）——两种网格都远大于这里的 15。
+  assert.ok(
+    chosen.opponentEase - chosen.myEase > 15,
+    `对手回我一杆之后我应该明显更难打：opponentEase=${chosen.opponentEase} myEase=${chosen.myEase}`
+  );
+
+  // (2) 跨候选：同一批里也算过第三层的另一个候选（4@m-b）留下的是好球（91.1），
+  //     被选中的这杆要比它低至少 10 分。这就是标题里「并且因此换方案」的落点。
+  const deepOthers = three.scores.filter((s) => s.plies === 3 && s !== chosen);
+  assert.ok(deepOthers.length > 0, '深度那一层至少要看两个候选，否则比不出分歧');
+  for (const other of deepOthers) {
+    assert.ok(
+      chosen.myEase <= other.myEase - 10,
+      `被选中的方案应该让我更难接着打：${chosen.targetNumber}@${chosen.pocketId} ${chosen.myEase} vs ${other.targetNumber}@${other.pocketId} ${other.myEase}`
+    );
+  }
 
   const twoChosen = two.scores[0];
   assert.equal(twoChosen.myEase, null, '两步不看这一层，不许假装看过');

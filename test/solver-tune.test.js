@@ -156,8 +156,9 @@ test('网格：exhaustive 与默认路径在简单必进球局面上给出同一
 });
 
 test('网格：默认收紧版与 exhaustive 的完整旧网格是两套参数，互不污染', () => {
-  // 默认网格（收紧）：4 档力度、中杆 + 高杆、加塞只在最优速度补、不扫瞄准偏移
-  assert.deepEqual([...SOLVE_TUNE_GRID.speedFactors], [0.8, 1.0, 1.2, 1.45]);
+  // 默认网格（收紧）：5 档力度（1.7 是 d06 那类超量走位局面的唯一解，删不得）、
+  // 中杆 + 高杆、加塞只在最优速度补、不扫瞄准偏移
+  assert.deepEqual([...SOLVE_TUNE_GRID.speedFactors], [0.8, 1.0, 1.2, 1.45, 1.7]);
   assert.deepEqual([...SOLVE_TUNE_GRID.centerTipBs], [0.55]);
   assert.deepEqual([...SOLVE_TUNE_GRID.spinTipAs], [-0.35, 0.35]);
   assert.equal(SOLVE_TUNE_GRID.spinOverAllSpeeds, false);
@@ -175,7 +176,9 @@ test('网格：默认收紧版与 exhaustive 的完整旧网格是两套参数�
   // 两套都是冻结对象：运行时改一个字段就等于悄悄改掉验收基准
   assert.ok(Object.isFrozen(SOLVE_TUNE_GRID));
   assert.ok(Object.isFrozen(SOLVE_TUNE_GRID_LEGACY));
-  assert.notDeepEqual([...SOLVE_TUNE_GRID.speedFactors], [...SOLVE_TUNE_GRID_LEGACY.speedFactors]);
+  // 力度档位加回 1.7 后两套的第一个字段已相同，改盯仍然分叉的杆法/偏移
+  assert.notDeepEqual([...SOLVE_TUNE_GRID.centerTipBs], [...SOLVE_TUNE_GRID_LEGACY.centerTipBs]);
+  assert.notDeepEqual([...SOLVE_TUNE_GRID.aimOffsetsDeg], [...SOLVE_TUNE_GRID_LEGACY.aimOffsetsDeg]);
 
   // exhaustive 走旧网格、默认走新网格（源码级钉住分支）
   assert.match(
@@ -204,19 +207,23 @@ test('网格：细扫循环确实消费 grid 的每个字段（常量改了循�
   assert.match(solver, /grid\.widenTips\s*===\s*'base'/, 'widen 的杆法清单必须由 grid 决定');
 
   // 每个候选的枪数上限必须与网格对得上：(1 支候选自带杆 + 中心杆) × 力度
-  // + 加塞重扫（只在最优速度上 2 枪）+ 1 枪录母球路线。默认网格 = 2×4 + 2 + 1 = 11。
+  // + 加塞重扫（只在最优速度上 2 枪）+ 1 枪录母球路线。默认网格 = 2×5 + 2 + 1 = 13。
+  // 加塞那一项必须跟着 speedFactors.length 走：加回 1.7 时若这里还写死 4，
+  // 「常量改了、循环没跟上」这类漏改就会被算成旧枪数而漏掉。
+  const gridSpeeds = SOLVE_TUNE_GRID.speedFactors.length;
   const perCandidate =
-    (1 + SOLVE_TUNE_GRID.centerTipBs.length) * SOLVE_TUNE_GRID.speedFactors.length +
-    SOLVE_TUNE_GRID.spinTipAs.length * (SOLVE_TUNE_GRID.spinOverAllSpeeds ? 4 : 1) +
+    (1 + SOLVE_TUNE_GRID.centerTipBs.length) * gridSpeeds +
+    SOLVE_TUNE_GRID.spinTipAs.length * (SOLVE_TUNE_GRID.spinOverAllSpeeds ? gridSpeeds : 1) +
     1;
-  assert.equal(perCandidate, 11, '默认网格下单候选最多 11 枪');
+  assert.equal(perCandidate, 13, '默认网格下单候选最多 13 枪');
   // 加塞只补最优那一档速度：重扫时只有 1 档速度 × 2 支塞 = 2 枪
-  const spinShots = SOLVE_TUNE_GRID.spinTipAs.length * (SOLVE_TUNE_GRID.spinOverAllSpeeds ? 4 : 1);
+  const spinShots = SOLVE_TUNE_GRID.spinTipAs.length * (SOLVE_TUNE_GRID.spinOverAllSpeeds ? gridSpeeds : 1);
   assert.equal(spinShots, 2, '加塞重扫最多 2 枪（只在最优速度上）');
   // exhaustive 仍是完整旧网格：3 杆法 × 5 力度 + 2 塞 × 5 力度 + 1 枪录路线 = 26
+  const legacySpeeds = SOLVE_TUNE_GRID_LEGACY.speedFactors.length;
   const legacyPerCandidate =
-    (1 + SOLVE_TUNE_GRID_LEGACY.centerTipBs.length) * SOLVE_TUNE_GRID_LEGACY.speedFactors.length +
-    SOLVE_TUNE_GRID_LEGACY.spinTipAs.length * (SOLVE_TUNE_GRID_LEGACY.spinOverAllSpeeds ? 5 : 1) +
+    (1 + SOLVE_TUNE_GRID_LEGACY.centerTipBs.length) * legacySpeeds +
+    SOLVE_TUNE_GRID_LEGACY.spinTipAs.length * (SOLVE_TUNE_GRID_LEGACY.spinOverAllSpeeds ? legacySpeeds : 1) +
     1;
   assert.equal(legacyPerCandidate, 26, 'exhaustive 的完整网格不许被收紧');
 });
@@ -255,7 +262,7 @@ test('网格：收紧后 3 球局面的仿真次数落在目标以内', () => {
   const balls = makeBalls([[0, 0.45, 0.9], [1, 1.35, 0.55], [2, 2.0, 1.05]]);
   const cands = solveShot(table, balls, { ...NO_BUDGET, cueId: 'cue' });
   assert.ok(cands.length > 0, 'd05-three 必须有解');
-  // 每个候选最多 11 枪，三个候选 ≤ 33；这里只是防止网格被悄悄放大
+  // 每个候选最多 13 枪，三个候选 ≤ 39；这里只是防止网格被悄悄放大
   assert.ok(cands.length <= 3, `默认路径返回的候选数应 ≤ SOLVE_PRUNE_K，实际 ${cands.length}`);
 });
 
@@ -315,4 +322,27 @@ test('加塞覆盖：g3-6 / g4-2 同杆，且走位分不低于穷举的 97%', (
       );
     }
   }
+});
+
+// ── 质量回归：d06-three-b（「1.7 力度档不能删」的哨兵）──
+//
+// 这一局曾是 4 档网格下**唯一**超过 3% 质量硬线的局面：删掉 1.7 之后，默认选
+// 3号→右中袋（成本 34.7、留下 62.04、下杆容差 0.43），而穷举是 5号→右底袋
+// （成本 32.9、留下 79.62、容差 1.07）——损失 5.47%。根因就是缺了「超量力度」
+// 这一档：母球要走到下一杆位，种子速度的 1.45 倍不够。加回 1.7 后逐位恢复。
+// 坐标取自 48 个冻结局面（%TEMP% 基准脚本同一份），别改：换了坐标这条就失去哨兵意义。
+const D06_BALLS = [[0, 0.6, 0.62], [3, 1.7, 0.95], [5, 2.0, 0.4]];
+
+test('质量回归：d06-three-b 的质量损失不超过 3%（曾因删掉 1.7 掉 5.47%）', () => {
+  const opts = { ...NO_BUDGET, cueId: 'cue' };
+  const def = solveShot(table, makeBalls(D06_BALLS), opts);
+  const full = solveShot(table, makeBalls(D06_BALLS), { ...opts, exhaustive: true });
+  assert.ok(def.length > 0 && full.length > 0, 'd06：两边都该有解');
+  assert.equal(shotKey(def[0]), '5|c-br', 'd06：默认应选 5 号→右底袋（只有 1.7 档够走位）');
+  assert.equal(shotKey(def[0]), shotKey(full[0]), 'd06：默认与穷举必须同杆');
+  // candidate.value 是成本，越小越好：默认最多接受 3% 的恶化
+  assert.ok(
+    def[0].value <= full[0].value * 1.03 + 1e-9,
+    `d06：默认 value=${def[0].value} 比穷举 value=${full[0].value} 差出 3% 以上`
+  );
 });
