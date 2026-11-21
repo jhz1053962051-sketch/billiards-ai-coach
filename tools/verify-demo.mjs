@@ -42,6 +42,10 @@ const chrome = spawn(
     '--disable-gpu',
     '--no-first-run',
     '--no-default-browser-check',
+    // GitHub Actions 的 Linux runner 上 /dev/shm 只有 64MB，Chrome 把共享内存段
+    // 放在那里，写满就会整进程崩掉（表现为 Target closed / SIGTRAP）。CI 上实测
+    // 到过 node 24 的 E2E 偶发失败，cdp.mjs 的启动参数早就有这一项，这里补齐。
+    '--disable-dev-shm-usage',
     '--window-size=1440,900',
     'about:blank',
   ],
