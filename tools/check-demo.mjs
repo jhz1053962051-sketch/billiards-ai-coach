@@ -199,6 +199,197 @@ checked++;
   }
 }
 
+// ---------------------------------------------------------------- state.js 零 DOM
+//
+// demo/state.js 的契约是「纯状态层，零 DOM 访问」——它存在的唯一理由就是能在
+// Node 里被单测直接加载。上面那些 `await import()` 只兜得住**直接**写 document
+// 这种硬错；window.foo / navigator.x / new Image() / performance.now() 里有的在
+// Node 22 恰好存在、有的是惰性求值，import 过去一声不响，等到单测真跑到那一行才炸，
+// 而在浏览器里又是另一套语义。所以这条契约得静态钉住，而不是留在文件头的注释里。
+//
+// 选这组词的理由：
+//   document / window / globalThis        —— 浏览器全局，也是抓 DOM 的两个入口
+//   localStorage / sessionStorage         —— 浏览器存储（本层只允许经由 demo/save.js）
+//   navigator                             —— 平台信息，Node 22 里真的存在，最容易漏
+//   requestAnimationFrame                 —— 帧循环，属于渲染层
+//   HTMLCanvasElement / CanvasRenderingContext2D / Element / Event
+//                                         —— 判断「这是不是 DOM 对象」的常见写法
+//   addEventListener                      —— 绑事件意味着日后要有人解绑，不是纯状态
+//   new Image                             —— 唯一按构造式用的全局；只认 `new Image`，
+//                                            免得把 `Image` 这种普通标识符也算进来
+
+// 关键字一律按「整词」匹配：HTMLCanvasElement 不会被 Element 重复计一次，
+// documentElement / EventTarget 这种也不会误伤。
+const DOM_KEYWORDS = [
+  'document',
+  'window',
+  'globalThis',
+  'localStorage',
+  'sessionStorage',
+  'navigator',
+  'requestAnimationFrame',
+  'HTMLCanvasElement',
+  'CanvasRenderingContext2D',
+  'Element',
+  'Event',
+  'addEventListener',
+  'new Image',
+];
+
+// 把注释和字符串字面量抹成空格，得到「只剩代码」的等长文本。
+// 等长是关键：行号可以直接拿 index 数 \n 算，报错才指得到原始行。
+//
+// 为什么要真扫一遍而不是几条正则：
+//   - 本仓库有 http:// 这种含 // 的字符串（demo/file-guard.js），裸正则会把
+//     整行后半截当注释吃掉，把命中藏起来；
+//   - 反过来，错误文案里提一句 "window" 不该算违规，所以字符串内容也要抹掉，
+//     只留下引号本身（引号留着，避免 doc + 'ument' 拼成一个假关键字）。
+// 模板字面量里的 ${...} 是**代码**，要递归扫；字面量部分是内容，抹掉。
+// 正则字面量按「前一个有意义字符 / 前一个关键字」判断，抹掉整段：
+// 既不让 /\/\// 被当成行注释，也不让 /document/ 变成假命中。
+// 已知精度取舍：正则判定用的是经典启发式（上一字符属于 ( , = : [ ! & | ? { } ; 等
+// 或紧跟在 return / typeof / case 之后），不是完整的词法分析；极端写法可能判错，
+// 但判错的两种后果都只会落在同一行内，不会让别的行假绿。
+function stripCommentsAndStrings(src) {
+  const out = src.split('');
+  const n = src.length;
+  const blank = (from, to) => {
+    for (let k = Math.max(0, from); k < Math.min(to, n); k++) {
+      if (out[k] !== '\n' && out[k] !== '\r') out[k] = ' ';
+    }
+  };
+  const frames = [{ kind: 'code', depth: 0 }];
+  const REGEX_AFTER_WORD = new Set([
+    'return', 'typeof', 'instanceof', 'in', 'of', 'new',
+    'delete', 'void', 'case', 'do', 'else', 'yield', 'await',
+  ]);
+  let i = 0;
+  let prevSig = '';
+  let prevWord = '';
+
+  while (i < n) {
+    const frame = frames[frames.length - 1];
+    const c = src[i];
+    const c2 = src[i + 1];
+
+    if (frame.kind === 'template') {
+      if (c === '\\') { blank(i, i + 2); i += 2; continue; }
+      if (c === '`') { frames.pop(); prevSig = '`'; prevWord = ''; i++; continue; }
+      if (c === '$' && c2 === '{') {
+        frames.push({ kind: 'code', depth: 0 });
+        blank(i, i + 2); i += 2; prevSig = '{'; prevWord = ''; continue;
+      }
+      blank(i, i + 1); i++; continue;
+    }
+
+    if (c === '/' && c2 === '/') {
+      const s = i; i += 2;
+      while (i < n && src[i] !== '\n') i++;
+      blank(s, i); continue;
+    }
+    if (c === '/' && c2 === '*') {
+      const s = i; i += 2;
+      while (i < n && !(src[i] === '*' && src[i + 1] === '/')) i++;
+      i = Math.min(n, i + 2);
+      blank(s, i); continue;
+    }
+    const regexLooksRight = prevSig === ''
+      || '(),=:[!&|?{};+-*%<>~^'.includes(prevSig)
+      || REGEX_AFTER_WORD.has(prevWord);
+    if (c === '/' && regexLooksRight) {
+      const s = i; i++;
+      let inClass = false;
+      while (i < n) {
+        const d = src[i];
+        if (d === '\\') { i += 2; continue; }
+        if (d === '\n') break;
+        if (d === '[') inClass = true;
+        else if (d === ']') inClass = false;
+        else if (d === '/' && !inClass) { i++; break; }
+        i++;
+      }
+      blank(s, i); prevSig = ')'; prevWord = ''; continue;
+    }
+    if (c === '"' || c === "'") {
+      const q = c; const s = i; i++;
+      while (i < n && src[i] !== q) { if (src[i] === '\\') i++; i++; }
+      i = Math.min(n, i + 1);
+      blank(s + 1, i - 1);
+      prevSig = q; prevWord = ''; continue;
+    }
+    if (c === '`') { frames.push({ kind: 'template' }); prevSig = '`'; prevWord = ''; i++; continue; }
+    if (c === '{') { frame.depth += 1; prevSig = '{'; prevWord = ''; i++; continue; }
+    if (c === '}') {
+      if (frame.depth === 0 && frames.length > 1) frames.pop();
+      else frame.depth -= 1;
+      prevSig = '}'; prevWord = ''; i++; continue;
+    }
+    if (/[A-Za-z0-9_$]/.test(c)) {
+      prevWord = /[A-Za-z0-9_$]/.test(prevSig) ? prevWord + c : c;
+      prevSig = c; i++; continue;
+    }
+    if (!/\s/.test(c)) { prevSig = c; prevWord = ''; }
+    i++;
+  }
+  return out.join('');
+}
+
+/** 返回 [{ kw, line, text }]：line 是原始文件行号，text 是那一行的原文（去首尾空白）。 */
+function findDomRefs(src) {
+  const code = stripCommentsAndStrings(src);
+  const lines = src.split('\n');
+  const hits = [];
+  for (const kw of DOM_KEYWORDS) {
+    const re = kw.includes(' ')
+      ? new RegExp(`\\b${kw.split(/\s+/)[0]}\\s+${kw.split(/\s+/)[1]}\\b`, 'g')
+      : new RegExp(`(?<![\\w$])${kw}(?![\\w$])`, 'g');
+    for (const m of code.matchAll(re)) {
+      const line = code.slice(0, m.index).split('\n').length;
+      hits.push({ kw, line, text: (lines[line - 1] ?? '').trim() });
+    }
+  }
+  return hits;
+}
+
+{
+  const rel = 'demo/state.js';
+  const statePath = path.join(root, rel);
+  checked++;
+  if (!fs.existsSync(statePath)) {
+    problems.push(`${rel}: 文件不存在——纯状态层被搬走或改名了？`);
+  } else {
+    const src = fs.readFileSync(statePath, 'utf8');
+    const hits = findDomRefs(src);
+    for (const kw of DOM_KEYWORDS) checked++;
+    // 报错要能直接指到行：只说「有一条失败」等于让人从头翻 270 行。
+    for (const h of hits) {
+      problems.push(`${rel}:${h.line} 出现 DOM 全局 ${h.kw}，状态层要能在 Node 里裸跑：${h.text}`);
+    }
+
+    // 检测器自检：往同一套 findDomRefs 里喂合成样本。
+    // 少了这一步，哪天剥注释写坏了（比如把整段抹空、或把代码也当字符串抹掉），
+    // 上面 13 项会永远全绿而没有任何东西会说话——和 verify-pose 缺素材仍报
+    // 「全部通过」是同一类假绿。
+    checked++;
+    const canary = findDomRefs('const _x = document.title;\n');
+    if (canary.length !== 1 || canary[0].kw !== 'document' || canary[0].line !== 1) {
+      problems.push('tools/check-demo.mjs: 零 DOM 检测器自检没命中合成的 document（检测器坏了，上面那条断言是假绿）');
+    }
+    checked++;
+    const decoy = findDomRefs([
+      '// document.title 只是注释',
+      '/* window.localStorage */',
+      "const s = 'window.navigator';",
+      'const t = `new Image()`;',
+      'const re = /document/;',
+      'const _y = document.readyState;',
+    ].join('\n') + '\n');
+    if (decoy.length !== 1 || decoy[0].line !== 6) {
+      problems.push(`tools/check-demo.mjs: 零 DOM 检测器把注释/字符串算成了命中（应只报第 6 行，实际 ${JSON.stringify(decoy.map((h) => h.line))}）`);
+    }
+  }
+}
+
 console.log(`检查 ${checked} 项`);
 if (problems.length) {
   console.error('问题:\n' + problems.join('\n'));
