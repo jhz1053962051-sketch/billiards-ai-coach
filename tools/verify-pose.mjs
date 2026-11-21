@@ -19,8 +19,10 @@
 //      「没识别出出杆」的 unknown，而不是从噪声里硬凑出 5 条结论。
 //      假动作比没有结论更有害，这条断言就是为了钉住它。
 //      照片缺失时（干净 clone）改喂一张就地生成的空白图，验「加载链路通不通」
-//      与「认不出人时不许编报告」——否则三条路径全跳过，脚本会打印
-//      「全部通过」却一项都没验。
+//      与「认不出人时不许编报告」。这 3 条通过后，照片静图与录像反例这两条
+//      真路径会以「缺素材」记进跳过清单——以前正是这里只报「通过 3 项」，
+//      读起来像三条路径都过了。汇总行现在写「通过 X 项，跳过 Y 项（缺素材）」，
+//      POSE_STRICT=1 时跳过直接算失败。
 //      另外：一条 check 都没跑到时脚本退非零，不允许出现这种假绿。
 //
 // 必须在 sandbox_permissions: "danger-full-access" 下运行（Chrome 多进程要建命名管道）。
@@ -30,6 +32,7 @@ import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { launch } from './cdp.mjs';
+import { judgePose } from './gate.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const BASE = process.env.POSE_BASE ?? 'http://127.0.0.1:4173';
@@ -208,13 +211,15 @@ try {
   // ---------------------------------------------------------------- 图片
   log('\n[1/3] 图片路径');
   // 素材放在 _research/（已 gitignore，且是第三方图库的图，不适合随仓库分发）。
-  // 缺了就明确报跳过，绝不拿"没跑"冒充"通过"。
+  // 缺了就明确报跳过，绝不拿"没跑"冒充"通过"。这条路径会少验哪些东西不在这里
+  // 记：下面 [3/3] 的降级分支会把它连同「录像反例」一起记进跳过清单，避免同一
+  // 件事在清单里出现两遍。
   let hasPhoto = true;
   try {
     await fs.access(PHOTO);
   } catch {
     hasPhoto = false;
-    skipped(`${path.relative(ROOT, PHOTO)} 不存在，跑 node _research/fetch-snooker.mjs 可下载候选照片`);
+    log(`  （缺素材：${path.relative(ROOT, PHOTO)} 不存在，跳过本路径）`);
   }
 
   let report = null;
@@ -271,7 +276,7 @@ try {
     await fs.access(REAL_VIDEO);
   } catch {
     hasReal = false;
-    skipped(`${path.relative(ROOT, REAL_VIDEO)} 不存在，跑 node _research/fetch-videos.mjs 可下载`);
+    skipped(`缺素材：${path.relative(ROOT, REAL_VIDEO)} 不存在，跑 node _research/fetch-videos.mjs 可下载`);
   }
 
   if (hasReal) {
@@ -340,6 +345,13 @@ try {
     check(/没有检测到人/.test(statusText), `空白图说清认不出（${statusText}）`);
     check((await page.evaluate('window.__pose.report === null')) === true, '没编出报告');
     check((await page.evaluate('window.__pose.frames')) === 0, '没留下伪造的帧');
+
+    // 这 3 条只证明「加载链路通 + 认不出人时不许编结论」，换掉了原来那两条路径：
+    // 照片静图的 7 项站姿与 DOM 一致性没验，录像反例的「静止画面只给 1 条 unknown」
+    // 也没验。缺素材不是代码坏了（所以不退 1），但必须记账——不记的话汇总里
+    // 「通过 3 项」会被读成「三条路径都过了」，那正是这次要修的假绿。
+    skipped(`照片静图路径（缺素材：${path.relative(ROOT, PHOTO)} 不存在，跑 node _research/fetch-snooker.mjs 可下载）`);
+    skipped('录像反例路径（缺素材：没有照片就合成不出「人在但不出杆」的静止录像）');
   } else {
     const photoB64 = (await fs.readFile(PHOTO)).toString('base64');
     const b64 = await page.evaluate(STILL_SCRIPT(`data:image/png;base64,${photoB64}`));
@@ -385,14 +397,23 @@ try {
 
 console.log('');
 if (skip.length) console.log(`跳过 ${skip.length} 条：\n- ${skip.join('\n- ')}`);
-if (fail.length) {
-  console.error(`失败 ${fail.length} 项：\n- ${fail.join('\n- ')}`);
-  process.exit(1);
-}
-// 一项都没跑就退 0，等于「没验的东西都算过」。干净 clone 缺素材时正是这样，
-// 以前会打印一句「全部通过」把人骗过去。
-if (passed === 0) {
+// 一条都没验到就退 1。规则的实现在 tools/gate.mjs 的 judgePose 里（passed === 0
+// 的分支），单测覆盖的也是那边；这里保留一次提前判定，是因为 check-demo.mjs 会
+// 用静态断言盯着本文件必须有这道守卫——把判定搬进纯函数时，别顺手把这道看得见
+// 的门也搬走，否则静态检查会误判成「假绿又回来了」。
+if (passed === 0 && fail.length === 0) {
   console.error('一条都没验到（素材缺失或页面没起来），不能算通过。');
   process.exit(1);
 }
-console.log(`全部通过（${passed} 项）`);
+// 判定交给纯函数（tools/gate.mjs）：passed/failed/skipped 三样直接喂进去，
+// 单测就能覆盖「缺素材但不退 1」「POSE_STRICT 下退 1」这些分支。
+// 为什么缺素材默认不退 1：干净 clone 本来就拿不到第三方素材，判失败会把
+// 「没素材」误报成「代码坏了」；要强制一条不漏时用 POSE_STRICT=1。
+const gate = judgePose({
+  passed,
+  failed: fail,
+  skipped: skip,
+  strict: process.env.POSE_STRICT === '1',
+});
+for (const line of gate.lines) (gate.exitCode === 0 ? console.log : console.error)(line);
+if (gate.exitCode !== 0) process.exit(gate.exitCode);
