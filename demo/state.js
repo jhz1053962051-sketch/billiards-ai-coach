@@ -22,6 +22,42 @@ export function clamp(v, lo, hi) {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
+// ---------------------------------------------------------------- 玩法 ↔ 球台
+
+/**
+ * 每种玩法默认配哪张台。
+ *
+ * 斯诺克必须是 12 尺台：彩球点位（开球线 737 mm、黑球距顶库 324 mm）是按
+ * 3569 × 1778 mm 定的，搬到 9 尺台上整套点位会挤成一堆。
+ * 八球默认 8 尺中式台（constants.js 里自己写的「国内球房最常见」），
+ * 九球按惯例用 9 尺美式台——和 demo/app.js 里启动时那张台一致。
+ */
+export const DEFAULT_TABLE_BY_KIND = Object.freeze({
+  eightball: 'pool8',
+  nineball: 'pool9',
+  snooker: 'snooker',
+});
+
+/**
+ * 切到某个玩法之后该用哪张台。
+ *
+ * `manualByKind` 是「玩家在这套玩法下自己用球台下拉选过的台」，形如
+ * `{ eightball: 'pool9' }`。显式选择优先于默认台：切走再切回来不能把人家
+ * 选的台冲掉；但斯诺克例外，它只能配 12 尺台（理由见上），选了也不认。
+ *
+ * 返回值是球台 id（`TABLE_PRESETS` 的 key），调用方拿去喂 `createTable`。
+ * 玩法不认识时返回 null——这里只回答「该换哪张台」，玩法合法性由
+ * createRack / createGame 去抛，不要在这个函数里重复一套校验。
+ */
+export function tableForKind(kind, manualByKind = {}) {
+  const fallback = DEFAULT_TABLE_BY_KIND[kind];
+  if (!fallback) return null;
+  // 斯诺克的点位是按 12 尺台钉死的，玩家选了别的台也不认。
+  if (kind === 'snooker') return 'snooker';
+  const manual = manualByKind?.[kind];
+  return typeof manual === 'string' && manual ? manual : fallback;
+}
+
 // ---------------------------------------------------------------- 力度档位
 
 /**

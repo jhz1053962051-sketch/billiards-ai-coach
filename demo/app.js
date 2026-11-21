@@ -59,6 +59,7 @@ import {
   restorePositions,
   shouldAutoShoot,
   snapshotPositions,
+  tableForKind,
   undoLabel,
   unpackHistory,
 } from './state.js';
@@ -117,8 +118,12 @@ const state = {
   gSolution: null,
   autoOpponent: true,
   opponentThinking: false,
-  // 玩法：'eightball' | 'nineball'。摆球形状、规则判定、可否分组都由它决定。
+  // 玩法：'eightball' | 'nineball' | 'snooker'。摆球形状、规则判定、可否分组都由它决定。
   gameKind: 'eightball',
+  // 玩家用球台下拉**自己选过**的台，按玩法分开记：{ gameKind: presetId }。
+  // 切玩法会按该玩法的默认台换台（八球 pool8 / 九球 pool9 / 斯诺克 snooker），
+  // 但玩家显式选过的台不能被冲掉——切走再切回来还得是他选的那张。
+  tableManual: {},
   // 没有进攻机会时要不要找防守。默认开——关掉就退回「兜底直撞」，
   // 那个开关存在的理由和 autoOpponent 一样：想让用户能对比两种口径。
   allowSafety: true,
@@ -355,6 +360,9 @@ function setTablePreset(presetId) {
   resetLayout();
   resize();
   if (state.mode === 'game') newGame();
+  // 下拉要跟着走：读档换台、以及「切玩法顺带换台」都会走到这里，
+  // 不回调下拉的话界面上显示的台和实际在用的台就不是同一张了。
+  $('tablePreset').value = next.preset;
   $('subtitle').textContent =
     `${next.label}（${next.length} × ${next.width} 米）· 换台后已重摆`;
 }
@@ -2404,7 +2412,11 @@ $('gShoot').addEventListener('click', gameShoot);
 $('gUndo').addEventListener('click', undoGame);
 $('gRerack').addEventListener('click', doRerack);
 $('removeBall').addEventListener('click', removeBall);
-$('tablePreset').addEventListener('change', (ev) => setTablePreset(ev.target.value));
+// 玩家显式换台：记在当前玩法名下，之后切走再切回来（以及切玩法时）都保留。
+$('tablePreset').addEventListener('change', (ev) => {
+  state.tableManual[state.gameKind] = ev.target.value;
+  setTablePreset(ev.target.value);
+});
 $('viewToggle').addEventListener('click', toggleView);
 
 $('showCone').addEventListener('change', render);
@@ -2425,11 +2437,20 @@ $('gameKind').addEventListener('change', (ev) => {
   state.gameKind = GAME_KINDS[v] ? v : 'eightball';
   // 换玩法等于换一套规则（能否分组、先碰哪颗、9 号进袋算不算赢），
   // 旧局不能就地续上，所以直接开新的一局。
-  // 斯诺克还得配斯诺克台：它的彩球点位（开球线 737 mm、黑球距顶库 324 mm）
-  // 是按 12 尺台算的，摆在 9 尺台上点位会挤在一起。
-  if (state.gameKind === 'snooker' && state.table?.id !== 'snooker') {
-    $('tablePreset').value = 'snooker';
-    $('tablePreset').dispatchEvent(new Event('change'));
+  // 球台也得跟着换：斯诺克的彩球点位（开球线 737 mm、黑球距顶库 324 mm）
+  // 是按 12 尺台算的，摆在 9 尺台上点位会挤在一起；八球 / 九球则回各自的默认台。
+  // 以前这里只写了「切到斯诺克就换台」这一半，切走那条路没有——实测从斯诺克切回
+  // 八球，kind 已经变成 eightball，台面还是 3.569 m 的斯诺克台，15 颗球按错误
+  // 尺寸摆出来。哪张台由 state.js 的 tableForKind 决定（纯函数，可单测）：
+  // 玩家自己选过的台优先，斯诺克除外。
+  const target = tableForKind(state.gameKind, state.tableManual);
+  if (target && target !== table.preset) {
+    // setTablePreset 会重新摆球（旧台坐标对新台没有意义），球局模式下还会直接
+    // 开新的一局，所以这里不再重复 newGame()。
+    setTablePreset(target);
+    // 练习模式下它不开局，但 state.game 可能还停在旧玩法的局上；对着新玩法
+    // 重开一局，免得之后切到球局时拿旧 kind 的局面直接用。
+    if (state.mode !== 'game') newGame();
     return;
   }
   newGame();

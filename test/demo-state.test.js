@@ -13,8 +13,10 @@ import assert from 'node:assert/strict';
 import { createTable } from '../src/table.js';
 import { createBall } from '../src/physics.js';
 import { cloneGame, createGame, numbersOnTable, legalTargetNumbers } from '../src/rules.js';
+import { createRack } from '../src/rack.js';
 
 import {
+  DEFAULT_TABLE_BY_KIND,
   HISTORY_LIMIT,
   autoPauseHint,
   captureBallFrame,
@@ -33,6 +35,7 @@ import {
   saveCoord,
   shouldAutoShoot,
   snapshotPositions,
+  tableForKind,
   undoLabel,
   unpackHistory,
   utf8Bytes,
@@ -818,4 +821,104 @@ test('autoPauseHint：暂停时给可点的恢复入口，关掉开关时说清�
   assert.equal(autoPauseHint({ game: { ...opponentTurn, phase: 'ended' }, autoOpponent: false, autoPaused: false }), null);
   assert.equal(autoPauseHint({ game: null, autoOpponent: true, autoPaused: true }), null);
   assert.equal(autoPauseHint(null), null);
+});
+// ---------------------------------------------------------------- 玩法 ↔ 球台
+
+// 真机实测过的坑：从斯诺克切回八球 / 九球，玩法换了、球台还停在 12 尺斯诺克台上。
+// 原因是 demo/app.js 的 #gameKind 监听器只写了「切到斯诺克→换台」这一半，
+// 切走那条路没有，于是 kind=eightball 却按 3.569 m 的台面摆 15 颗三角。
+// 该用哪张台由 tableForKind 决定，这里把它钉住。
+
+test('tableForKind：八球回 pool8、九球 pool9、斯诺克 snooker（切走也要换回来）', () => {
+  // 关键回归：手上有斯诺克的显式选台记录时，切到八球仍然要回 8 尺台
+  const manual = { snooker: 'snooker' };
+  assert.equal(tableForKind('eightball', manual), 'pool8');
+  assert.equal(tableForKind('nineball', manual), 'pool9');
+  assert.equal(tableForKind('snooker', manual), 'snooker');
+
+  // 不传第二个参数也要能用（app.js 的 tableManual 初始就是空的）
+  assert.equal(tableForKind('eightball'), 'pool8');
+  assert.equal(tableForKind('nineball'), 'pool9');
+  assert.equal(tableForKind('snooker'), 'snooker');
+});
+
+test('tableForKind：默认台全是真预设，createTable 不会抛「球台参数非法」', () => {
+  // src/table.js 最近加了几何自洽校验：非法参数会直接抛错。切台路径必须过得了这一关。
+  const tables = {
+    pool8: createTable(DEFAULT_TABLE_BY_KIND.eightball),
+    pool9: createTable(DEFAULT_TABLE_BY_KIND.nineball),
+    snooker: createTable(DEFAULT_TABLE_BY_KIND.snooker),
+  };
+  assert.equal(tables.pool8.length, 2.24, '八球默认 8 尺中式台');
+  assert.equal(tables.pool9.length, 2.54, '九球默认 9 尺美式台');
+  assert.equal(tables.snooker.length, 3.569, '斯诺克 12 尺台');
+  // 预设 id 要和游戏里一致，否则存档里的 table.id 对不上
+  assert.equal(tables.pool8.preset, 'pool8');
+  assert.equal(tables.pool9.preset, 'pool9');
+  assert.equal(tables.snooker.preset, 'snooker');
+});
+
+test('tableForKind：玩家显式选过的台优先，且不串到别的玩法上', () => {
+  // 在八球下手选 9 尺台：切九球再切回八球，还得是他选的那张
+  assert.equal(tableForKind('eightball', { eightball: 'pool9' }), 'pool9');
+  assert.equal(tableForKind('nineball', { nineball: 'pool8' }), 'pool8');
+  // 八球名下的选择不能影响九球
+  assert.equal(tableForKind('nineball', { eightball: 'pool8' }), 'pool9');
+  // 空串 / 非字符串当成「没选过」，退回默认台，别把空 id 喂给 createTable
+  assert.equal(tableForKind('eightball', { eightball: '' }), 'pool8');
+  assert.equal(tableForKind('eightball', { eightball: null }), 'pool8');
+  assert.equal(tableForKind('nineball', null), 'pool9', '第二参数是 null 也不能炸');
+});
+
+test('tableForKind：斯诺克不吃显式选台（彩球点位按 12 尺台钉死）', () => {
+  assert.equal(tableForKind('snooker', { snooker: 'pool9' }), 'snooker');
+  assert.equal(tableForKind('snooker', { snooker: 'pool8' }), 'snooker');
+});
+
+test('tableForKind：不认识的玩法返回 null，让调用方保持现状而不是乱换台', () => {
+  for (const bad of ['', 'eight-ball', '9ball', undefined, null]) {
+    assert.equal(tableForKind(bad), null);
+  }
+  // 手动记录里就算有同名 key 也不能给一个假台出来
+  assert.equal(tableForKind('bogus', { bogus: 'pool8' }), null);
+});
+
+test('切玩法后的球台能直接摆球：斯诺克 → 八球是 16 颗、九球 10 颗，全在台内', () => {
+  const racks = {
+    eightball: createRack('eightball', createTable(tableForKind('eightball', {})), { seed: 7 }),
+    nineball: createRack('nineball', createTable(tableForKind('nineball', {})), { seed: 7 }),
+  };
+
+  assert.equal(racks.eightball.length, 16, '母球 + 15 颗');
+  assert.equal(racks.nineball.length, 10, '母球 + 1~9 号');
+
+  for (const [kind, rack] of Object.entries(racks)) {
+    const t = createTable(tableForKind(kind, {}));
+    for (const b of rack) {
+      assert.ok(b.x > 0 && b.x < t.length, `${kind}: ${b.id} 的 x 出界了（${b.x}）`);
+      assert.ok(b.y > 0 && b.y < t.width, `${kind}: ${b.id} 的 y 出界了（${b.y}）`);
+    }
+  }
+  // 8 号 / 9 号必须各有且只有一颗，换个 kind 摆球时最容易漏的就是这两颗
+  assert.equal(racks.eightball.filter((b) => b.id === 'b8').length, 1);
+  assert.equal(racks.nineball.filter((b) => b.id === 'b9').length, 1);
+});
+
+test('切台后存档的 table.id 与实际台一致，读档能还原成同一张台', () => {
+  const presetId = tableForKind('eightball', { eightball: 'pool9' });
+  const t = createTable(presetId);
+  const balls = createRack('eightball', t, { seed: 7 }).map((b) => createBall(b.id, b.x, b.y, b));
+  const game = createGame(t, balls, { names: ['你', '对手'], kind: 'eightball' });
+
+  const store = memoryStore();
+  assert.equal(writeSave(game, store, { now: 1700000000000 }), true);
+  const saved = readSave(store);
+  assert.ok(saved, '存完必须读得回来');
+  assert.equal(saved.table.id, 'pool9', '存档里记的必须是玩家选的那张台');
+  assert.equal(saved.kind, 'eightball');
+
+  // 读档路径（app.js 的 applyLoadedGame）就是按 table.id 再 createTable 一次
+  const reloaded = createTable(saved.table.id);
+  assert.equal(reloaded.preset, t.preset);
+  assert.equal(reloaded.length, t.length);
 });
