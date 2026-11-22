@@ -395,6 +395,10 @@ export function resolveSnooker(game, facts) {
   }
   if (respotTie) next.turn = opp;
   st.ballOn = ballOnNext;
+  // 红球数按台面实数回写：这个字段是存档 / 撤销栈的一部分（save.js 直接存
+  // snooker.reds，历史步里也存），以前从不更新，读档后恒为 15，把中盘的比赛
+  // 状态写坏——「红球还剩几颗」不是显示用的装饰，是状态。
+  st.reds = redsLeft;
   next.breakShot = false;
   next.shots += 1;
 

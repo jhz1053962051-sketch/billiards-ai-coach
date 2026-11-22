@@ -362,3 +362,74 @@ test('斯诺克：snookerTargets 能按「红球 / 任意彩球 / 指定彩球�
   assert.deepEqual(snookerTargets(g, [1, 16]), [], '该打的球不在台上就返回空，不能骗求解器去打别的');
   assert.deepEqual(initialSnooker(15), { scores: [0, 0], ballOn: 'red', reds: 15 });
 });
+
+/**
+ * 造一杆的事实，但**保留**其它球原有的进袋状态。
+ *
+ * factsOf 会把没列进 pocketed 的球一律当成「还在台上」，连续打两杆时那等于把
+ * 上一杆打掉的红球又搬回来——测「红球数一杆一杆减少」时必须用这个版本。
+ */
+function potFacts(game, ids, spec = {}) {
+  const potted = new Set(ids);
+  const pocketed = [];
+  for (const id of potted) {
+    const b = game.balls.find((x) => x.id === id);
+    assert.ok(b, `potFacts：没有这颗球 ${id}`);
+    pocketed.push({ id, number: b.number, pocket: 'c-br' });
+  }
+  const ballsAfter = game.balls.map((b) =>
+    potted.has(b.id)
+      ? { id: b.id, x: 0.02, y: 0.02, pocketed: true, pocket: 'c-br' }
+      : { id: b.id, x: b.x, y: b.y, pocketed: Boolean(b.pocketed), pocket: b.pocket }
+  );
+  return {
+    ...factsOf(game, spec),
+    pocketed,
+    ballsAfter,
+    onTableBefore: game.balls.filter((b) => !b.pocketed && b.number !== 0).map((b) => b.number),
+    onTableAfter: ballsAfter
+      .filter((b) => !b.pocketed)
+      .map((b) => game.balls.find((x) => x.id === b.id).number),
+  };
+}
+
+test('斯诺克：reds 字段跟着台面红球数走，打进 N 颗红球后是 15 - N', () => {
+  let g = createGame(table, createRack('snooker', table, { seed: 5 }), { kind: 'snooker' });
+  const redsOnTable = () => g.balls.filter((b) => isRed(b.number) && !b.pocketed).length;
+  assert.equal(g.snooker.reds, 15, '开局的 15 颗红球');
+
+  // 红球 1 → 自由彩球（蓝）→ 红球 2 → 红球 3：真实节奏，彩球回位不占红球数。
+  let expect = 15;
+  for (const n of [1, 2, 3]) {
+    const id = g.balls.find((b) => b.number === n).id;
+    g = resolveShot(g, potFacts(g, [id], { firstContact: n, rails: ['x'] })).next;
+    expect -= 1;
+    assert.equal(g.snooker.reds, expect, `打进 ${n} 号红球后 reds 必须是 ${expect}`);
+    assert.equal(g.snooker.reds, redsOnTable(), 'reds 与台面实数必须一致（存档按这个字段写）');
+
+    // 打进一颗自由彩球：它回位，红球数不变。
+    const blue = g.balls.find((b) => b.number === BLUE).id;
+    g = resolveShot(g, potFacts(g, [blue], { firstContact: BLUE, rails: ['x'] })).next;
+    assert.equal(g.snooker.reds, expect, '彩球进袋回位，红球数不受影响');
+    assert.equal(g.balls.find((b) => b.number === BLUE).pocketed, false);
+  }
+});
+
+test('斯诺克：最后一颗红球打完后 reds 归零，ballOn 停在「该打彩球」', () => {
+  const balls = [
+    createBall('cue', 0.6, 0.9, { number: 0 }),
+    createBall('b1', 1.6, 0.9, { number: 1, color: '#c8281f' }),
+    createBall('b' + YELLOW, 0.737, 0.597, { number: YELLOW }),
+    createBall('b' + BROWN, 0.737, 0.889, { number: BROWN }),
+    createBall('b' + BLACK, 3.245, 0.889, { number: BLACK }),
+  ];
+  const g = createGame(table, balls, { kind: 'snooker' });
+  assert.equal(g.snooker.reds, 1, '台面上只有一颗红球');
+  const { next, report } = resolveShot(
+    g,
+    potFacts(g, ['b1'], { firstContact: 1, rails: ['x'] })
+  );
+  assert.equal(next.snooker.reds, 0, '最后一颗红球打完后红球数为 0');
+  assert.equal(next.snooker.ballOn, 'color', '红球清空后还有一次自由选彩球的机会');
+  assert.equal(report.continuing, true);
+});
