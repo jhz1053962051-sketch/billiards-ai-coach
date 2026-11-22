@@ -7,7 +7,8 @@
 //   母球到撞击点之间还会因为滑移走一小段弧线、目标球出球后还要先滑后滚。
 //   这些效应单独都在 0.1°–2° 量级，叠起来正好是袋口宽度。
 //   实测：只靠解析解的推荐杆成功率 65%；加上仿真验证后能到 95% 以上。
-//   一次仿真 0.8 ms，验证十几次也就十几毫秒，完全付得起。
+//   一次整杆仿真（复制球 → strike → runShot 跑到全部停稳）实测中位 0.12 ms
+//   （9 杆典型局面 × 100 次），验证三十几次也就几毫秒，完全付得起。
 
 import { PHYS, SPEED, MAX_TIP_OFFSET, SEARCH_DT, SOLVE_MAX_TIME, TUNE_MAX_TIME, MAX_CUT_DEG, SOLVE_PRUNE_K, SOLVE_PRUNE_FALLBACK, SOLVE_TUNE_GRID, SOLVE_TUNE_GRID_LEGACY } from './constants.js';
 import { V, DEG } from './geometry.js';
