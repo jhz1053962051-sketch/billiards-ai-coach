@@ -16,7 +16,7 @@
 import { cloneGame, legalTargetNumbers, numbersOnTable } from '../src/rules.js';
 import { SEARCH_DT } from '../src/constants.js';
 import { createWorld, strike, stepWorld, allStopped, createRollTracker } from '../src/physics.js';
-import { pocketName } from '../src/solver.js';
+import { cueRestText, pocketName } from '../src/solver.js';
 
 // ---------------------------------------------------------------- 数值
 
@@ -196,6 +196,141 @@ export function describeManualShot(balls) {
   if (cuePocketed) detail.push('母球落袋');
   if (!pocketed.length && !cuePocketed) detail.push('没有球进袋');
   return { pocketed, cuePocketed, detail };
+}
+
+// ---------------------------------------------------------------- 手打之后：下一杆
+
+/**
+ * 终局求解慢到这个毫秒数就不再等它，改口说「点求解看看」。
+ *
+ * 实测这台机器上「跳过组合球/翻袋」的终局求解：2 球 2–3 ms、满台 15 ms 上下。
+ * 50 ms 已经等于三帧（20 fps 的回放），回放结束后再卡这么久，用户会以为页面
+ * 死了。这条阈值只负责「别把画面拖住」，不许用它把已有候选藏起来——超时那
+ * 一档文案只是改口指向「求解」按钮，不是说没有球可打。
+ */
+export const NEXT_SHOT_SLOW_MS = 50;
+
+/**
+ * 瞄准偏离到多少度才在播报里提一句。
+ *
+ * 滑块量程 ±8°、步进 0.05°：0.05° 在 1 米外只偏不到 1 毫米，每条播报都挂个
+ * 尾巴只会变成噪音。0.2° 在 1 米外约偏 3.5 毫米，已经能明显改变薄球的进球率
+ * ——够格让用户知道「这一杆不是你本来该打的方向」。低于它一律不提。
+ */
+export const AIM_NOTE_MIN_DEG = 0.2;
+
+/**
+ * 偏离推荐方向时补的那半句。没调过瞄准（touched 为假）就一个字都不加：
+ * 那时偏移量只是面板上的初值，不代表用户做过选择。
+ */
+function aimOffsetNote(aimFrom, aimOffsetDeg, touched) {
+  if (!touched) return '';
+  const off = Number(aimOffsetDeg);
+  if (!Number.isFinite(off) || Math.abs(off) < AIM_NOTE_MIN_DEG) return '';
+  // 直撞局面（from === 'direct'）没有「推荐方向」可言，说成「推荐」就是撒谎
+  const label = aimFrom === 'solution' ? '已偏离推荐' : '已偏离直指方向';
+  return `${label} ±${Math.abs(off).toFixed(1)}°`;
+}
+
+/**
+ * 一颗候选球怎么说人话：`3 号→右下底袋，容错 ±0.6°，母球停在台面上右（距上库 35 厘米）`。
+ *
+ * 袋名和母球停位都用求解器现成的函数，不在这里重写一套坐标系说法。
+ * 候选缺字段时退化成能说的那几项，一项都没有就返回空串，由调用方兜底。
+ */
+function nextCandidateText(candidate, table) {
+  const bits = [];
+  const number = candidate?.targetNumber;
+  const pocket = candidate?.pocketId ? pocketName(candidate.pocketId) : '';
+  if (typeof number === 'number' && pocket) bits.push(`${number} 号→${pocket}`);
+  const tol = Number(candidate?.toleranceDeg);
+  if (Number.isFinite(tol) && tol > 0) bits.push(`容错 ±${tol.toFixed(1)}°`);
+  if (candidate?.cueRest) {
+    // cueRestText 是同一个求解器里的「母球建议停位：台面上右（距上库 35 厘米）」，
+    // 这里只换个动词接在「下一步」后面，位置说法保持完全一致。
+    bits.push(cueRestText(table, candidate.cueRest).replace('母球建议停位：', '母球停在'));
+  }
+  return bits.join('，');
+}
+
+/**
+ * 「下一步」那一段。分支顺序就是用户脑子里的顺序：
+ * 先问这局还打不打，再问有没有球能先碰，最后才谈怎么打进。
+ */
+function nextStepText({ balls, candidates, table, finished, solveMs }) {
+  if (finished) return '本局已结束';
+
+  const list = Array.isArray(balls) ? balls.filter((b) => b && typeof b.number === 'number') : [];
+  const live = list.filter((b) => b.number !== 0 && !b.pocketed);
+  if (!live.length) return '没有可以合法先碰的球';
+
+  const cue = list.find((b) => b.number === 0);
+  // 母球在袋里：从袋里出杆这件事不存在，任何「先碰某颗球」的建议都是假的。
+  // 实测这种局面求解也必然返回空（母球停在袋里，假想球全算不出来），
+  // 所以直接把话说全：先摆回台面。
+  if (cue?.pocketed) return '没有可以合法先碰的球（母球落袋，先把它摆回台面）';
+
+  // 没跑求解（抛错）或者跑得太慢：不假装自己看过局面，把活儿交回给「求解」
+  if (!Number.isFinite(solveMs) || solveMs >= NEXT_SHOT_SLOW_MS) return '点「求解」看看';
+
+  const best = Array.isArray(candidates) ? candidates[0] : null;
+  const text = best ? nextCandidateText(best, table) : '';
+  if (!text) return '没有直接的进球线，点「求解」看组合球或防守';
+  return text;
+}
+
+/**
+ * 手打一杆之后，把「这一杆的结果 + 下一步怎么打」拼成一整段播报。
+ *
+ * 纯函数：不碰 DOM、不跑物理、不读全局，求解结果由调用方（demo/app.js）算好传进来。
+ * 这样同一段文案在 Node 单测里几毫秒能验一遍，不用起 Chrome 等回放。
+ *
+ * @param {object} input
+ * @param {{detail: string[], pocketed: number[], cuePocketed: boolean}} input.outcome
+ *        describeManualShot 的结果
+ * @param {object[]} input.balls        终局局面（用来判断还有没有球能先碰、母球在不在）
+ * @param {object[]|null} input.candidates  solveShot 的结果；null 表示没算出来
+ * @param {object} [input.table]        球台，交给 cueRestText 说「距上库 35 厘米」
+ * @param {boolean} [input.finished]    这一杆是否打完了这一局（清台 / 黑八结束）
+ * @param {'solution'|'direct'} [input.aimFrom]  这一杆的方向来自求解还是直撞
+ * @param {number} [input.aimOffsetDeg] 相对推荐方向的偏移（度）
+ * @param {boolean} [input.touched]     用户是否动过手打滑块
+ * @param {number} [input.speed]        手打力度（m/s）
+ * @param {string} [input.tipBLabel]    杆法文字（中杆/高杆…）
+ * @param {string} [input.tipALabel]    塞的文字（无塞/左塞…）
+ * @param {number|null} [input.solveMs] 终局求解耗时；null / 非有限值表示没算成
+ * @returns {string} 例如
+ *   `手打结果：进 1 号 · 母球落袋（3.20 m/s · 中杆 · 无塞）｜下一步：3 号→右下底袋，容错 ±0.6°`
+ */
+export function describeNextShot(input) {
+  const {
+    outcome,
+    balls,
+    candidates = null,
+    table = null,
+    finished = false,
+    aimFrom = 'direct',
+    aimOffsetDeg = 0,
+    touched = false,
+    speed,
+    tipBLabel = '',
+    tipALabel = '',
+    solveMs = null,
+  } = input ?? {};
+
+  const detail = outcome?.detail?.length ? outcome.detail.join(' · ') : '没有球进袋';
+
+  const params = [];
+  const v = Number(speed);
+  if (Number.isFinite(v)) params.push(`${v.toFixed(2)} m/s`);
+  if (tipBLabel) params.push(tipBLabel);
+  if (tipALabel) params.push(tipALabel);
+  const note = aimOffsetNote(aimFrom, aimOffsetDeg, touched);
+  if (note) params.push(note);
+
+  const head = params.length ? `手打结果：${detail}（${params.join(' · ')}）` : `手打结果：${detail}`;
+  const next = nextStepText({ balls, candidates, table, finished, solveMs });
+  return `${head}｜下一步：${next}`;
 }
 
 // ---------------------------------------------------------------- 空位

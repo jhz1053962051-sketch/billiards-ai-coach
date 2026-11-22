@@ -1674,8 +1674,13 @@ check(
   manualHard.advice || '超时'
 );
 check(
-  '手打结果的括号里带上力度、杆法、塞三项（3.20 m/s · 中杆 · 无塞）',
-  /（3\.20 m\/s · 中杆 · 无塞）$/.test(manualHard.advice),
+  '手打结果的括号里带上力度、杆法、塞三项，后面接「下一步」（母球落袋时不许编一句有球可打）',
+  /（3\.20 m\/s · 中杆 · 无塞）｜下一步：/.test(manualHard.advice),
+  manualHard.advice || '超时'
+);
+check(
+  '母球落袋之后「下一步」说的是没有可以合法先碰的球（求解器同一句话），并提醒把母球摆回台面',
+  /｜下一步：没有可以合法先碰的球（母球落袋，先把它摆回台面）$/.test(manualHard.advice),
   manualHard.advice || '超时'
 );
 
@@ -1686,6 +1691,13 @@ console.log('手打结果·1.20 m/s（同局面）:', JSON.stringify(manualSoft)
 check(
   '同一局面换成 1.20 m/s：仍然进 1 号，但「母球落袋」不再出现——文案读的是这一杆的终局',
   /^手打结果：进 1 号（1\.20 m\/s/.test(manualSoft.advice) && !/母球落袋/.test(manualSoft.advice),
+  manualSoft.advice || '超时'
+);
+// 母球留在台面上时，「下一步」必须落到具体的一杆：球号 + 袋口 + 容错，
+// 而不是一句「见候选」把活推回给用户。球号/袋口不写死，换局面也得成立。
+check(
+  '母球留在台面时「下一步」给出具体的球号与袋口，并带容错角度',
+  /｜下一步：\d+ 号→[^，]+，容错 ±[\d.]+°/.test(manualSoft.advice),
   manualSoft.advice || '超时'
 );
 check(
@@ -1704,6 +1716,19 @@ check(
   manualWide.advice.startsWith('手打结果') && !/进 1 号/.test(manualWide.advice) &&
     manualWide.advice !== manualHard.advice,
   manualWide.advice || '超时'
+);
+
+// 偏离推荐：先真求解一次，让这一杆的方向有「推荐值」可比，再故意偏 3° 打一杆。
+// 没有推荐值（直撞局面）时文案得说「偏离直指方向」，那是另一条分支，单测里钉着。
+await evaluate(MANUAL_SETUP);
+await evaluate(`document.getElementById('solve').click()`);
+await sleep(300);
+const manualOffset = await manualShotAt('1.20', '3', { reset: false });
+console.log('手打结果·偏离推荐 3°:', JSON.stringify(manualOffset));
+check(
+  '偏离推荐瞄准 3° 之后，播报点出「已偏离推荐 ±3.0°」，不再让用户以为自己打的是推荐方向',
+  /已偏离推荐 ±3\.0°/.test(manualOffset.advice),
+  manualOffset.advice || '超时'
 );
 
 // 收拾干净：把偏移与局面还原，免得后面的用例读到这张特制的台子。

@@ -59,6 +59,7 @@ import {
   clamp,
   currentAim,
   describeManualShot,
+  describeNextShot,
   esc,
   findSpot,
   getAimHUDInfo,
@@ -1942,17 +1943,53 @@ function shootManual() {
   else shootGameWith(shot, aim);
 }
 
+/**
+ * 拿这一杆的终局算一次「下一杆」，顺带记下花了多久。
+ *
+ * 两处刻意的地方：
+ * 1. `extras: false` —— 组合球/翻袋那条路实测能吃到 60 ms 以上（求解器注释里写着），
+ *    而这里只是回放结束的一句话，不值得为它多等。真需要组合球时文案会指向「求解」，
+ *    那个按钮走的还是完整求解。
+ * 2. 抛错不往外冒 —— 找不到母球之类的问题不该让一杆球的播报整个消失。
+ */
+function solveNextShot(balls) {
+  const t0 = performance.now();
+  try {
+    return { candidates: solveShot(table, balls, { extras: false }), ms: performance.now() - t0 };
+  } catch {
+    return { candidates: null, ms: performance.now() - t0 };
+  }
+}
+
 /** 练习模式：按给定的杆打，打完复位到原局面。 */
 function shootPracticeWith(shot, aim) {
   const sim = simulateFrames(state.balls, table, shot, SEARCH_DT);
   if (!sim) return;
   // balls 是模拟那份副本的终局：手打结果描述要读它，和改动前读的是同一个数组。
   const { frames, dt, balls: copy } = sim;
+  // 求解放在回放开始之前：它是同步的，等动画跑完再算，卡顿就正好落在文案该出现的
+  // 那一刻。提前算完，慢也只是点下去那一下多一点延迟，回放本身不受影响。
+  const next = solveNextShot(copy);
   const original = snapshotPositions(state.balls);
   replay(frames, dt, () => {
     const outcome = describeManualShot(copy);
     setAdvice(
-      `手打结果：${outcome.detail.join(' · ')}（${state.manual.speed.toFixed(2)} m/s · ${$('tipBVal').textContent} · ${$('tipAVal').textContent}）`,
+      describeNextShot({
+        outcome,
+        balls: copy,
+        candidates: next.candidates,
+        table,
+        // 练习局就三颗球，一杆清完就没什么可打的下文了：说「本局已结束」，
+        // 别让用户以为台面深处还有球等着他。
+        finished: numbersOnTable(copy).length === 0,
+        aimFrom: aim.from,
+        aimOffsetDeg: state.manual.aimOffsetDeg,
+        touched: state.manual.touched,
+        speed: state.manual.speed,
+        tipBLabel: $('tipBVal').textContent,
+        tipALabel: $('tipAVal').textContent,
+        solveMs: next.ms,
+      }),
       aim.from === 'solution' ? '方向取自求解结果 + 你调的偏移' : '方向直指最近的球（没有求解）'
     );
     restorePositions(state.balls, original);

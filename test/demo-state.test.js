@@ -16,14 +16,17 @@ import { cloneGame, createGame, numbersOnTable, legalTargetNumbers } from '../sr
 import { createRack } from '../src/rack.js';
 
 import {
+  AIM_NOTE_MIN_DEG,
   DEFAULT_TABLE_BY_KIND,
   HISTORY_LIMIT,
+  NEXT_SHOT_SLOW_MS,
   autoPauseHint,
   captureBallFrame,
   clamp,
   copyBallsForShot,
   currentAim,
   describeManualShot,
+  describeNextShot,
   esc,
   findSpot,
   getAimHUDInfo,
@@ -1401,7 +1404,213 @@ test('saveFailureKind：存储打不开（隐私模式）与配额满分开报�
       err.name = 'QuotaExceededError';
       throw err;
     },
-    removeItem: () => {},
+    removeItem() {},
   };
   assert.equal(saveFailureKind(full), 'quota');
+});
+
+// ---------------------------------------------------------------- 手打之后：下一杆
+//
+// 手打一杆之后，光说「进/没进」等于什么都没说——用户真正要看的是下一杆怎么打。
+// 这里钉的就是那段拼接：求解结果怎么说成人话、无球可碰与局已结束怎麼区分、
+// 瞄准偏了要不要提一句。求解本身在 demo/app.js 里调，函数只吃现成的结果。
+
+const nextTable = createTable('pool8');
+
+/** 造一颗球的最小形状（describeNextShot 只读 number / pocketed）。 */
+function ball(number, pocketed = false) {
+  return { number, pocketed };
+}
+
+/** 造一条求解候选（字段名与 src/solver.js 的候选一致）。 */
+function candidate(overrides = {}) {
+  return {
+    targetNumber: 2,
+    pocketId: 'c-br',
+    toleranceDeg: 0.57,
+    cueRest: { x: nextTable.length * 0.85, y: nextTable.width * 0.85 },
+    ...overrides,
+  };
+}
+
+test('describeNextShot：有可打目标时说清球号、袋口、容错和母球停哪儿', () => {
+  const text = describeNextShot({
+    outcome: { detail: ['进 1 号'], pocketed: [1], cuePocketed: false },
+    balls: [ball(0), ball(2), ball(3)],
+    candidates: [candidate()],
+    table: nextTable,
+    speed: 1.2,
+    tipBLabel: '中杆',
+    tipALabel: '无塞',
+    solveMs: 3,
+  });
+
+  assert.equal(
+    text,
+    '手打结果：进 1 号（1.20 m/s · 中杆 · 无塞）｜下一步：2 号→右下底袋，容错 ±0.6°，母球停在台面上右（距上库 17 厘米）'
+  );
+  // 候选缺失的字段不能变成 undefined / null 混进文案
+  assert.ok(!/undefined|null|NaN/.test(text), text);
+});
+
+test('describeNextShot：候选里没有母球停位时就只报球号与容错，不硬编一句定位', () => {
+  const text = describeNextShot({
+    outcome: { detail: ['没有球进袋'], pocketed: [], cuePocketed: false },
+    balls: [ball(0), ball(3)],
+    candidates: [candidate({ cueRest: null, targetNumber: 3, pocketId: 'm-t', toleranceDeg: 0.21 })],
+    table: nextTable,
+    speed: 2,
+    tipBLabel: '高杆',
+    tipALabel: '左塞',
+    solveMs: 1,
+  });
+  assert.ok(text.includes('｜下一步：3 号→上中袋，容错 ±0.2°'), text);
+  assert.ok(!text.includes('母球停在'), text);
+});
+
+test('describeNextShot：台面上没有活着的号码球时说「没有可以合法先碰的球」', () => {
+  const text = describeNextShot({
+    outcome: { detail: ['进 3 号'], pocketed: [3], cuePocketed: false },
+    balls: [ball(0), ball(3, true)],
+    candidates: [],
+    table: nextTable,
+    speed: 1.2,
+    tipBLabel: '中杆',
+    tipALabel: '无塞',
+    solveMs: 2,
+  });
+  assert.ok(text.endsWith('｜下一步：没有可以合法先碰的球'), text);
+});
+
+test('describeNextShot：母球落袋时说清「先把它摆回台面」，不是干巴巴一句没球可打', () => {
+  const text = describeNextShot({
+    outcome: { detail: ['进 1 号', '母球落袋'], pocketed: [1], cuePocketed: true },
+    balls: [ball(0, true), ball(2), ball(3)],
+    candidates: [], // 母球在袋里，求解必然返回空
+    table: nextTable,
+    speed: 3.2,
+    tipBLabel: '中杆',
+    tipALabel: '无塞',
+    solveMs: 0.4,
+  });
+  assert.ok(text.includes('｜下一步：没有可以合法先碰的球（母球落袋，先把它摆回台面）'), text);
+});
+
+test('describeNextShot：这一杆把台面清完了就说「本局已结束」', () => {
+  const text = describeNextShot({
+    outcome: { detail: ['进 5 号'], pocketed: [5], cuePocketed: false },
+    balls: [ball(0), ball(5, true)],
+    finished: true,
+    speed: 1.2,
+    tipBLabel: '中杆',
+    tipALabel: '无塞',
+    solveMs: 1,
+  });
+  assert.ok(text.endsWith('｜下一步：本局已结束'), text);
+});
+
+test('describeNextShot：偏离推荐方向超过 0.2° 才提那一句', () => {
+  const base = {
+    outcome: { detail: ['进 1 号'], pocketed: [1], cuePocketed: false },
+    balls: [ball(0), ball(2)],
+    candidates: [candidate()],
+    table: nextTable,
+    speed: 1.2,
+    tipBLabel: '中杆',
+    tipALabel: '无塞',
+    solveMs: 3,
+    touched: true,
+    aimFrom: 'solution',
+  };
+
+  const far = describeNextShot({ ...base, aimOffsetDeg: -3 });
+  assert.ok(far.includes('（1.20 m/s · 中杆 · 无塞 · 已偏离推荐 ±3.0°）'), far);
+
+  // 阈值以下不提：滑块步进 0.05°，0.15° 在 1 米外偏不到 3 毫米，提了只是噪音
+  const near = describeNextShot({ ...base, aimOffsetDeg: AIM_NOTE_MIN_DEG * 0.75 });
+  assert.ok(!near.includes('已偏离'), near);
+
+  // 没动过滑块（touched 为假）时偏移量只是面板初值，不代表用户做过选择
+  const untouched = describeNextShot({ ...base, aimOffsetDeg: 3, touched: false });
+  assert.ok(!untouched.includes('已偏离'), untouched);
+});
+
+test('describeNextShot：没有推荐方向（直撞局面）时不能说成「偏离推荐」', () => {
+  const text = describeNextShot({
+    outcome: { detail: ['没有球进袋'], pocketed: [], cuePocketed: false },
+    balls: [ball(0), ball(2)],
+    candidates: [],
+    table: nextTable,
+    speed: 2,
+    tipBLabel: '中杆',
+    tipALabel: '无塞',
+    solveMs: 2,
+    touched: true,
+    aimFrom: 'direct',
+    aimOffsetDeg: 2.5,
+  });
+  assert.ok(text.includes('已偏离直指方向 ±2.5°'), text);
+  assert.ok(!text.includes('已偏离推荐'), text);
+});
+
+test('describeNextShot：求解太慢或干脆没算成都只指向「求解」按钮，不留一句编出来的建议', () => {
+  const slow = describeNextShot({
+    outcome: { detail: ['进 1 号'], pocketed: [1], cuePocketed: false },
+    balls: [ball(0), ball(2)],
+    candidates: [candidate()],
+    table: nextTable,
+    speed: 1.2,
+    tipBLabel: '中杆',
+    tipALabel: '无塞',
+    solveMs: NEXT_SHOT_SLOW_MS + 1,
+  });
+  assert.ok(slow.endsWith('｜下一步：点「求解」看看'), slow);
+
+  const failed = describeNextShot({
+    outcome: { detail: ['进 1 号'], pocketed: [1], cuePocketed: false },
+    balls: [ball(0), ball(2)],
+    candidates: null, // 求解抛错
+    table: nextTable,
+    speed: 1.2,
+    tipBLabel: '中杆',
+    tipALabel: '无塞',
+    solveMs: null,
+  });
+  assert.ok(failed.endsWith('｜下一步：点「求解」看看'), failed);
+});
+
+test('describeNextShot：求解很快但一条候选都没有时说「没有直接的进球线」，不假装看得见球', () => {
+  const text = describeNextShot({
+    outcome: { detail: ['没有球进袋'], pocketed: [], cuePocketed: false },
+    balls: [ball(0), ball(2), ball(3)],
+    candidates: [],
+    table: nextTable,
+    speed: 1.2,
+    tipBLabel: '中杆',
+    tipALabel: '无塞',
+    solveMs: 4,
+  });
+  assert.ok(text.includes('｜下一步：没有直接的进球线，点「求解」看组合球或防守'), text);
+});
+
+test('describeNextShot：空态与异常输入不抛，也不会拼出 undefined', () => {
+  for (const input of [undefined, null, {}, { outcome: null, balls: null, candidates: 'x' }, { balls: 5 }]) {
+    const text = describeNextShot(input);
+    assert.equal(typeof text, 'string');
+    assert.ok(text.startsWith('手打结果：'), text);
+    assert.ok(text.includes('｜下一步：'), text);
+    assert.ok(!/undefined|null|NaN|\[object/.test(text), text);
+  }
+  // 候选是个形状不对的东西时退化成「点求解看看」，不能让整段播报消失
+  const weird = describeNextShot({
+    outcome: { detail: [] },
+    balls: [ball(0), ball(2)],
+    candidates: [{}],
+    table: nextTable,
+    speed: 1,
+    tipBLabel: '中杆',
+    tipALabel: '无塞',
+    solveMs: 1,
+  });
+  assert.ok(weird.includes('｜下一步：没有直接的进球线'), weird);
 });
