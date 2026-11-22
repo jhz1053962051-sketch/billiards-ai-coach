@@ -27,6 +27,8 @@ import {
   findFirstEvent,
   cushionTOI,
   ballTOI,
+  pruneHitCount,
+  resetPruneHitCount,
 } from '../src/physics.js';
 
 const table = createTable('pool9');
@@ -177,4 +179,64 @@ test('findFirstEvent：缓冲复用不残留上一次调用的命中（连续调
   }
   assert.equal(findFirstEvent(world, 1), null, '全部静止时必须返回 null');
   assert.equal(findFirstEvent(world, 1), null, '连问两次也必须都是 null');
+});
+
+// ── 剪枝「真的被触发」断言 ─────────────────────────────────────────────
+//
+// 上面那批等价性用例只能证明「剪枝没有改变结果」，证明不了「剪枝真的发生了」：
+// 剪枝失效时 findFirstEvent 退化成逐条扫 6 条库边的旧实现，结果逐位相同，所有等价性
+// 断言照样全绿——于是这个优化可以在没人发现的情况下一路失效，直到某天有人去量耗时。
+// 这里用 physics.js 的 pruneHitCount / resetPruneHitCount（模块级整数，剪枝分支每跳过
+// 一条球的一次库边扫描就 +1）把「剪枝发生过」变成可断言的量，并配一个反向用例，
+// 防止有人为了让正向用例更「稳定」而把条件放宽成无脑跳过库边扫描。
+
+test('库边剪枝：球离四壁都很远时，剪枝真的跳过了这一子步的库边 TOI', () => {
+  const R = table.ballRadius;
+  // 台面正中，朝右下走：到四面壁都还有一个半径以上的余量。
+  const world = createWorld(table, [
+    createBall('cue', table.length / 2, table.width / 2, { number: 0 }),
+  ]);
+  const b = world.balls[0];
+  b.vx = 2;
+  b.vy = 1;
+
+  // 先把「这一子步到不了任何一面壁」写成断言：台面尺寸或步长一变，前提会在这里先红，
+  // 而不是等到下面那句剪枝断言给出一个看不懂的失败。
+  const dx = Math.abs(b.vx) * DT;
+  const dy = Math.abs(b.vy) * DT;
+  assert.ok(b.x - R > dx && table.length - R - b.x > dx, '前提不成立：球沿 x 方向并不远离两壁');
+  assert.ok(b.y - R > dy && table.width - R - b.y > dy, '前提不成立：球沿 y 方向并不远离两壁');
+
+  resetPruneHitCount();
+  assert.equal(findFirstEvent(world, DT), null, '离四壁都很远，这一子步不该有任何事件');
+  assert.equal(pruneHitCount(), 1, '剪枝必须触发：这一子步 6 次库边 TOI 应当被整段跳过');
+});
+
+test('库边剪枝：球贴着库边时不得剪枝（不是无脑跳过）', () => {
+  const R = table.ballRadius;
+  const y = table.width / 2; // 避开左库两端角袋与中袋缺口的中间位置
+
+  // 情形一：球心贴库一个极小间隙，朝库走 —— 这一子步内必然撞库。
+  const near = createWorld(table, [createBall('cue', R + 1e-3, y, { number: 0 })]);
+  const b1 = near.balls[0];
+  b1.vx = -0.5;
+
+  resetPruneHitCount();
+  const hit = findFirstEvent(near, DT);
+  assert.equal(pruneHitCount(), 0, '球离库只有 1 mm 时剪枝不该触发');
+  assert.ok(hit, '贴库朝库走的球在 1/120 s 内必然撞库');
+  assert.equal(hit.kind, 'cushion');
+  assert.equal(hit.cushion.id, 'rail-l');
+
+  // 情形二：球心正好压在接触位置上（gap === 0，TOI 直接是 0）—— 同样不许剪。
+  const touching = createWorld(table, [createBall('cue', R, y, { number: 0 })]);
+  const b2 = touching.balls[0];
+  b2.vx = -0.5;
+
+  resetPruneHitCount();
+  const hit2 = findFirstEvent(touching, DT);
+  assert.equal(pruneHitCount(), 0, '球心压在库面上（TOI=0）时剪枝不该触发');
+  assert.ok(hit2, '已经接触库面且仍在靠近时必须有库边事件');
+  assert.equal(hit2.kind, 'cushion');
+  assert.equal(hit2.t, 0, '已接触且仍靠近，TOI 应当是 0');
 });

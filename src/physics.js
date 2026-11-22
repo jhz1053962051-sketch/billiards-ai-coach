@@ -146,9 +146,10 @@ export function ballSpeed(b) {
   return Math.sqrt(b.vx * b.vx + b.vy * b.vy);
 }
 
-export function isMoving(b) {
-  return b.vx !== 0 || b.vy !== 0;
-}
+// 这里曾有 isMoving(b)：曾用于「这颗球这一子步还要不要推进」的判断，返回
+// `b.vx !== 0 || b.vy !== 0`。生产代码与测试都零调用，唯一等价表达式已内联在
+// stepWorld 里的 `b.vx !== 0 || b.vy !== 0 || b.wz !== 0`（多判了侧旋，判据更全），
+// 故删除，不留只有导出、没人走的符号。
 
 export function allStopped(world) {
   // 索引 for 而不是 some + 箭头函数：这个函数每杆要跑几百次（runShot 每步一次），
@@ -353,6 +354,29 @@ export function ballTOI(a, b, horizon) {
 const EVENT_SCRATCH = { moving: [], t: 0, kind: '', ball: null, cushion: null, a: null, b: null };
 
 /**
+ * 库边剪枝的命中计数（仅测试用，对应 test/physics-event-buffer.test.js 的触发断言）。
+ *
+ * 剪枝是纯上界优化：被剪掉的那些子步在原实现里本来也只是白扫一遍 6 条库边、然后不填
+ * best，结果逐位相同，所以**等价性断言抓不到剪枝失效**——它悄悄退化成完全等于旧实现，
+ * 性能却回到剪枝之前。这里放一个模块级整数，剪枝分支每跳过一次库边扫描就 +1，让
+ * 「剪枝真的发生了」变成可观测的事实。
+ *
+ * 开销约束：只是热循环里的一次整数自增，不分配对象、不调函数、不打日志，
+ * 也不改变任何返回值（读它只在测试里）。
+ */
+let pruneHits = 0;
+
+/** @returns {number} 自上次 resetPruneHitCount 以来，被剪枝跳过的「球 × 子步」数 */
+export function pruneHitCount() {
+  return pruneHits;
+}
+
+/** 清零剪枝计数（测试用） */
+export function resetPruneHitCount() {
+  pruneHits = 0;
+}
+
+/**
  * 在给定时间内找最早接触事件。
  * 库边交点必须落在有效线段内：落在缺口上说明这里是袋口，球会穿过去而不是弹回来。
  *
@@ -406,6 +430,7 @@ export function findFirstEvent(world, horizon, buffer = EVENT_SCRATCH) {
       b.y - R > dyMax &&
       tableWidth - R - b.y > dyMax
     ) {
+      pruneHits++; // 仅测试可观测的整数自增，见顶部 pruneHits 的注释
       continue; // 离四面壁都远过这一子步能走的距离
     }
     for (let ci = 0; ci < cushions.length; ci++) {

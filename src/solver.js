@@ -1001,7 +1001,8 @@ function bankCandidates(table, balls, cueId, targets, opts, startedAt, budgetMs)
 /**
  * 翻袋第一步：目标球以什么方向出球能撞库进袋。
  *
- * 单球仿真 0.27 ms 一次，比整台仿真便宜 3 倍多，所以可以放心迭代。
+ * 实测单球仿真 0.067 ms 一次，整杆仿真 0.12 ms 一次，前者只便宜约 1.8 倍；
+ * 两者绝对值都小，迭代仍可以放心做。
  * 修正用「落点到袋心的角度偏差」——不能直接用位移量，因为中途可能撞好几次库。
  */
 function solveBankDirection(table, target, pocket, seedDir) {
