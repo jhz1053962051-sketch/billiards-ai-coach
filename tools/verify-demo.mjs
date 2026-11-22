@@ -1900,6 +1900,416 @@ console.log('第一人称·切换:', fpvActive, '切回:', topViewAfter);
   check('俯视按钮恢复俯视文案与普通样式', b.text.includes('俯视') && !b.hasFpvClass, JSON.stringify(b));
 }
 
+// ------------------------------------------------------------ 球局手打：进球续杆 / 犯规播报
+//
+// 练习模式的「手打结果」走 shootPracticeWith；球局手打走的是另一条分支
+// （simulateShot → resolveShot → finishGameShot），用户看到的是 #report 里那句
+// 规则播报加记分板上的回合标记。两边的文案来源完全不同——一个是
+// describeManualShot 拼的，一个是 rules.js 的 summarizeReport 拼的——所以练习模式
+// 那几条断言一条都盖不到这里：球局里母球摔袋会不会说清犯规、合法进球之后轮次
+// 有没有留住、犯规之后有没有交给对手还带持球，只能在这条分支上验。
+//
+// 局面自己摆：newGame 建一局八球，母球在台心，1 号球落在母球→左下角袋的连线上、
+// 离袋口 0.30 米，其余 14 颗沿右短库排成一列（离母球都 1.22 米开外，抢不走
+// 「最近的合法球」，1 号球离母球 1.12 米）。这条线上的两档力度实测不同：
+// 1.20 m/s 进 1 号、母球停在袋口不掉；3.20 m/s 连母球一起摔袋。
+const GAME_SETUP = `(() => {
+  const app = window.__app;
+  app.setMode('game');
+  // 关掉对手自动出杆：开着的话轮次一到对手它就自己打一杆，把刚结算的播报改掉，
+  // 「读页面文本」这条要求就无从谈起了（对手自动出杆另有专门的用例）。
+  const box = document.getElementById('autoOpponent');
+  if (box && box.checked) {
+    box.checked = false;
+    box.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  // 先把玩法钉成八球、球台钉成 2.54 m 的九尺台再开局。
+  // 前面几段用例（九球、斯诺克、存档）都动过这两个下拉，而 newGame() 只认
+  // 下拉里的值：留着九球，这一整段就在验九球——不分组、不判分组文案，
+  // 几何也是照着 2.54 m 台量出来的。两条都靠 change 事件改，走的才是
+  // 玩家点下拉时那条路（换玩法会换台、重开一局）。
+  const kindSel = document.getElementById('gameKind');
+  if (kindSel.value !== 'eightball') {
+    kindSel.value = 'eightball';
+    kindSel.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  const tableSel = document.getElementById('tablePreset');
+  if (tableSel.value !== 'pool9') {
+    tableSel.value = 'pool9';
+    tableSel.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  app.newGame();
+  const t = app.table;
+  const g = app.state.game;
+  const pk = t.pockets.find((p) => p.id === 'c-bl');
+  const cue = g.balls.find((b) => b.number === 0);
+  const b1 = g.balls.find((b) => b.number === 1);
+  const dx = pk.x - t.length * 0.5;
+  const dy = pk.y - t.width * 0.5;
+  const len = Math.hypot(dx, dy);
+  const ux = dx / len;
+  const uy = dy / len;
+  cue.x = pk.x - ux * 1.42;
+  cue.y = pk.y - uy * 1.42;
+  b1.x = pk.x - ux * 0.30;
+  b1.y = pk.y - uy * 0.30;
+  let k = 0;
+  for (const b of g.balls) {
+    if (b.number === 0 || b.number === 1) continue;
+    b.x = t.length * 0.98;
+    b.y = t.width * (0.135 + k++ * 0.0585);
+  }
+  for (const b of g.balls) {
+    b.vx = 0; b.vy = 0; b.wx = 0; b.wy = 0; b.wz = 0; b.pocketed = false;
+  }
+  g.breakShot = false;
+  g.open = true;
+  g.turn = 0;
+  g.phase = 'playing';
+  g.requiresRerack = false;
+  g.ballInHand = null;
+  g.pendingChoice = null;
+  g.shots = 0;
+  g.log = [];
+  g.players[0].group = null;
+  g.players[0].fouls = 0;
+  g.players[1].group = null;
+  g.players[1].fouls = 0;
+  app.state.history = [];
+  app.state.gSolution = null;
+  app.state.solution = null;
+  const aim = app.currentAim();
+  return JSON.stringify({
+    kind: g.kind,
+    tableLen: t.length,
+    open: g.open,
+    breakShot: g.breakShot,
+    target: aim ? aim.targetId : null,
+    from: aim ? aim.from : null,
+    cue: { x: cue.x, y: cue.y },
+    b1: { x: b1.x, y: b1.y },
+  });
+})()`;
+
+// 犯规局面：玩家已经拿到全色，台心摆一颗全色当合法目标（离母球 1.02 米），
+// 正中间插一颗花色挡路（0.51 米）——母球先碰到的必然是花色。
+// 其余球判为已进袋（"剩 N" 照实变少），这一杆才只可能出这一种犯规。
+const GAME_WRONG_BALL_SETUP = `(() => {
+  const app = window.__app;
+  const g = app.state.game;
+  const t = app.table;
+  const cue = g.balls.find((b) => b.number === 0);
+  const at = (n, fx, fy) => {
+    const b = g.balls.find((x) => x.number === n);
+    b.x = t.length * fx;
+    b.y = t.width * fy;
+    b.pocketed = false;
+    b.vx = 0; b.vy = 0; b.wx = 0; b.wy = 0; b.wz = 0;
+    return b;
+  };
+  cue.x = t.length * 0.5;
+  cue.y = t.width * 0.5;
+  cue.pocketed = false;
+  cue.vx = 0; cue.vy = 0; cue.wx = 0; cue.wy = 0; cue.wz = 0;
+  at(2, 0.90, 0.50);
+  at(9, 0.70, 0.50);
+  for (const b of g.balls) {
+    if (b.number === 0 || b.number === 2 || b.number === 9) continue;
+    b.pocketed = true;
+    b.vx = 0; b.vy = 0; b.wx = 0; b.wy = 0; b.wz = 0;
+  }
+  g.ballInHand = null;
+  g.requiresRerack = false;
+  g.turn = 0;
+  g.phase = 'playing';
+  // 分组直接钉住，不靠上一杆「恰好分了组」：这条用例只关心「先碰到的不是
+  // 合法目标球」，分组是谁给的与它无关。
+  g.open = false;
+  g.players[0].group = 'solid';
+  g.players[1].group = 'stripe';
+  const aim = app.currentAim();
+  return JSON.stringify({
+    target: aim ? aim.targetId : null,
+    group: g.players[0].group,
+  });
+})()`;
+
+const GAME_SNAP = `(() => {
+  const app = window.__app;
+  const g = app.state.game;
+  const turn = document.querySelector('#score .who.turn .nm');
+  const cue = g ? g.balls.find((b) => b.number === 0) : null;
+  const b1 = g ? g.balls.find((b) => b.number === 1) : null;
+  const log = document.getElementById('log');
+  return JSON.stringify({
+    animating: app.state.animating,
+    mode: app.state.mode,
+    shots: g ? g.shots : null,
+    turn: g ? g.turn : null,
+    phase: g ? g.phase : null,
+    history: app.state.history.length,
+    turnName: turn ? turn.textContent.trim() : null,
+    report: document.getElementById('report').textContent.replace(/\\s+/g, ' ').trim(),
+    logText: log.textContent.replace(/\\s+/g, ' ').trim(),
+    logRows: Array.from(log.children).map((el) => el.textContent.replace(/\\s+/g, ' ').trim()),
+    advice: document.getElementById('gAdvice').textContent.trim(),
+    verdict: document.getElementById('gVerdict').textContent.trim(),
+    undoLabel: document.getElementById('gUndo').textContent.trim(),
+    undoDisabled: document.getElementById('gUndo').disabled,
+    score: document.getElementById('score').textContent.replace(/\\s+/g, ' ').trim(),
+    cue: cue ? { x: cue.x, y: cue.y, pocketed: cue.pocketed } : null,
+    b1: b1 ? { x: b1.x, y: b1.y, pocketed: b1.pocketed } : null,
+    pauseHidden: document.getElementById('autoPauseBar').classList.contains('hidden'),
+    pauseText: document.getElementById('autoPauseText').textContent.replace(/\\s+/g, ' ').trim(),
+  });
+})()`;
+
+const gameSnap = async () => JSON.parse(await evaluate(GAME_SNAP));
+
+/**
+ * 球局里手打一杆，等回放真的结算完（不是等固定时长），再读页面。
+ * wantShots 是这一杆打完应该达到的杆数——靠它判定「这一杆真的发生了」。
+ */
+async function gameManualShot(speed, wantShots, { setup = null, offset = '0' } = {}) {
+  if (setup) await evaluate(setup);
+  await evaluate(`(() => {
+    document.getElementById('power').value = '${speed}';
+    document.getElementById('aimOffset').value = '${offset}';
+    document.getElementById('tipB').value = '0';
+    document.getElementById('tipA').value = '0';
+    document.getElementById('power').dispatchEvent(new Event('input', { bubbles: true }));
+    document.getElementById('shootManual').click();
+  })()`);
+  let last = null;
+  for (let i = 0; i < 60; i++) {
+    await sleep(200);
+    last = await gameSnap();
+    if (!last.animating && last.shots === wantShots) return last;
+  }
+  return { ...(last ?? {}), timeout: true };
+}
+
+// ---- 路径 1a：合法进球 → 续杆，轮次留在自己这边
+const gameSetup = JSON.parse(await evaluate(GAME_SETUP));
+console.log('球局手打·局面:', JSON.stringify(gameSetup));
+check(
+  '球局手打的局面是八球、2.54 m 九尺台，最近的合法球是 1 号、方向来自直撞（否则后面两杆打不到点上）',
+  gameSetup.kind === 'eightball' &&
+    Math.abs(gameSetup.tableLen - 2.54) < 1e-9 &&
+    gameSetup.target === 'b1' &&
+    gameSetup.from === 'direct',
+  JSON.stringify(gameSetup)
+);
+
+const potLegal = await gameManualShot('1.20', 1);
+console.log('球局手打·1.20 合法进球:', JSON.stringify(potLegal));
+check(
+  '球局里手打进 1 号：播报写明进了几号、并说「你 继续」',
+  /进 1 号/.test(potLegal.report) && /你 继续/.test(potLegal.report),
+  potLegal.report || '超时'
+);
+check(
+  '球局里手打进 1 号：播报没有冒犯规，轮次仍在自己这边（记分板上的回合标记还是「你」）',
+  !/犯规/.test(potLegal.report) && potLegal.turn === 0 && potLegal.turnName === '你',
+  `${potLegal.report} / turn=${potLegal.turnName}`
+);
+check(
+  '球局里手打进 1 号：播报说清分组结果（你拿到全色），记分板跟着换组',
+  /分组：你拿到全色/.test(potLegal.report) && /你 全色/.test(potLegal.score),
+  `${potLegal.report} / ${potLegal.score}`
+);
+check(
+  '球局手打的结果同时进「对局记录」：第 1 杆 · 进 1 号 · 你 继续',
+  potLegal.logRows.length === 1 && potLegal.logRows[0] === '第 1 杆 · 进 1 号 · 你 继续',
+  JSON.stringify(potLegal.logRows)
+);
+
+// ---- 路径 1b：同一局接着手打一次犯规（先碰非目标球）→ 播报说清犯规类型，轮次交给对手
+const wrongBallSetup = JSON.parse(await evaluate(GAME_WRONG_BALL_SETUP));
+console.log('球局手打·犯规局面:', JSON.stringify(wrongBallSetup));
+check(
+  '犯规局面摆好了：玩家已拿到全色，最近的合法目标是那颗全色（挡路的花色不算目标）',
+  wrongBallSetup.group === 'solid' && wrongBallSetup.target === 'b2',
+  JSON.stringify(wrongBallSetup)
+);
+
+const foulWrong = await gameManualShot('1.20', 2);
+console.log('球局手打·先碰非目标球:', JSON.stringify(foulWrong));
+check(
+  '球局里手打先碰到非目标球：播报点名犯规类型（母球先碰到的不是合法目标球，WPA 3.2）',
+  /犯规：母球先碰到的不是合法目标球（WPA 3\.2）/.test(foulWrong.report),
+  foulWrong.report || '超时'
+);
+check(
+  '犯规之后轮次交给对手：播报写「换 对手」，记分板回合标记也移到对手',
+  /换 对手/.test(foulWrong.report) && foulWrong.turn === 1 && foulWrong.turnName === '对手',
+  `${foulWrong.report} / turn=${foulWrong.turnName}`
+);
+check(
+  '犯规之后播报给出持球处理（在台面上点一下放母球），不是一句犯规就完了',
+  /持球：在台面上点一下放母球/.test(foulWrong.report),
+  foulWrong.report
+);
+check(
+  '犯规这一杆也进对局记录，且带犯规字样',
+  foulWrong.logRows.length === 2 && /第 2 杆/.test(foulWrong.logRows[0]) && /犯规/.test(foulWrong.logRows[0]),
+  JSON.stringify(foulWrong.logRows)
+);
+
+// ------------------------------------------------------------ 撤销之后手打
+//
+// 撤销会把局面退回去（undoGame 从 history 里弹一份快照装回来）。如果这条路上
+// 读的是撤销之前的球位副本——不管是 simulateShot 拿到了旧数组，还是
+// state.game.balls 没被换掉——页面不会报错，只会拿一张「1 号球已经没了、
+// 母球还在袋口」的台子算一杆，播报自然就错了。所以这里打完一杆、撤销、再打，
+// 拿第二杆的播报跟第一杆对着看：第一杆是「进 1 号 + 母球落袋」，
+// 第二杆必须是「进 1 号、没有母球落袋」——两边一模一样就说明读到的是旧副本。
+
+const undoSetup = JSON.parse(await evaluate(GAME_SETUP));
+const firstShot = await gameManualShot('3.20', 1);
+console.log('撤销后手打·第一杆（3.20，母球摔袋）:', JSON.stringify(firstShot));
+check(
+  '撤销用例的第一杆确实是「进球 + 母球落袋」的犯规杆（后面才有可撤销的东西）',
+  /进 1 号/.test(firstShot.report) && /犯规：母球落袋（WPA 3\.1）/.test(firstShot.report) &&
+    firstShot.shots === 1 && firstShot.history === 1,
+  firstShot.report || '超时'
+);
+
+const undone = JSON.parse(await evaluate(`(() => {
+  document.getElementById('gUndo').click();
+  return ${GAME_SNAP};
+})()`));
+console.log('撤销后手打·撤销之后:', JSON.stringify(undone));
+check(
+  '撤销之后局面真的退回去了：杆数归 0、撤销栈清空、母球和 1 号球都回到摆好的位置',
+  undone.shots === 0 && undone.history === 0 &&
+    undone.cue !== null && undone.cue.pocketed === false &&
+    Math.abs(undone.cue.x - undoSetup.cue.x) < 1e-6 &&
+    Math.abs(undone.cue.y - undoSetup.cue.y) < 1e-6 &&
+    undone.b1 !== null && undone.b1.pocketed === false &&
+    Math.abs(undone.b1.x - undoSetup.b1.x) < 1e-6,
+  JSON.stringify({ shots: undone.shots, history: undone.history, cue: undone.cue, b1: undone.b1 })
+);
+check(
+  '撤销之后页面上说得清退到哪儿了：播报「已撤销一步」、提示要重新求解、对局记录回到空',
+  /已撤销一步/.test(undone.report) && /撤销后要重新/.test(undone.verdict) &&
+    undone.logRows.length === 0 && undone.logText === '—',
+  `${undone.report} / ${undone.verdict} / log=${undone.logText}`
+);
+check(
+  '撤销之后撤销按钮自己变灰，不再挂着上一杆的计数',
+  undone.undoDisabled === true && !/（1）/.test(undone.undoLabel),
+  `${undone.undoLabel} disabled=${undone.undoDisabled}`
+);
+
+const afterUndoShot = await gameManualShot('1.20', 1);
+console.log('撤销后手打·撤销之后 1.20:', JSON.stringify(afterUndoShot));
+check(
+  '撤销之后立刻手打：这一杆照样进 1 号并且不摔母球（读到撤销前的球位副本会变成「没有球进袋」）',
+  /进 1 号/.test(afterUndoShot.report) && !/母球落袋/.test(afterUndoShot.report),
+  afterUndoShot.report || '超时'
+);
+check(
+  '撤销之后那一杆的播报跟撤销前那一杆不是同一句（缓存住上一杆结果的写法在这里会露出来）',
+  afterUndoShot.report !== firstShot.report && afterUndoShot.report.length > 0,
+  `${afterUndoShot.report} vs ${firstShot.report}`
+);
+check(
+  '撤销之后那一杆按新的一杆重新记账：对局记录只有第 1 杆、没有犯规字样',
+  afterUndoShot.logRows.length === 1 && /^第 1 杆 · 进 1 号 · 你 继续$/.test(afterUndoShot.logRows[0]),
+  JSON.stringify(afterUndoShot.logRows)
+);
+
+// ------------------------------------------------------------ 读档之后替对手手打
+//
+// 读档之后轮次常常落在对手那边，而读档本身会把自动出杆暂停（否则刚恢复的球位
+// 转脸就被对手改掉）。这段时间里「替对手打这一杆」是允许的——shootGameWith 的
+// 守卫只在「开着自动出杆且没暂停」时才拦。这里验的是：这一杆真的按对手的身份
+// 结算（播报里出现对手名、分组记到对手头上），而不是悄悄按自己的身份打掉。
+//
+// 存档 → 刷新 → 读档 是用户可见的一整条路。刷新之后页面里的状态全没了，
+// 只能靠 localStorage，所以这条用例是自包含的：前面留下的局面一个都用不上。
+
+await evaluate(GAME_SETUP);
+const savedTurn = JSON.parse(await evaluate(`(() => {
+  const app = window.__app;
+  app.state.game.turn = 1;
+  // 连着存两次：第一次可能被「存档已经被另一个标签页改过」挡下来，
+  // 第二次带上 saveOverwrite 就真的写了（两种情况下都落盘）。
+  app.saveGame();
+  app.saveGame();
+  return JSON.stringify({ report: document.getElementById('report').textContent.replace(/\\s+/g, ' ').trim() });
+})()`));
+console.log('读档后替对手·存档:', JSON.stringify(savedTurn));
+check('存了一份「轮到对手」的档，播报确认已存', /已存档：第 0 杆/.test(savedTurn.report), savedTurn.report);
+
+await send(ws, 'Page.navigate', { url: URL });
+await sleep(2500);
+const reloaded = JSON.parse(await evaluate(`(() => {
+  return JSON.stringify({ app: Boolean(window.__app), mode: window.__app ? window.__app.state.mode : null,
+    save: document.getElementById('saveInfo') ? document.getElementById('saveInfo').textContent.trim() : null });
+})()`));
+check('刷新之后页面重新起来，存档还在（localStorage 里那份没丢）', reloaded.app === true, JSON.stringify(reloaded));
+
+const loaded = JSON.parse(await evaluate(`(() => {
+  document.getElementById('loadGame').click();
+  return ${GAME_SNAP};
+})()`));
+console.log('读档后替对手·读档:', JSON.stringify(loaded));
+check(
+  '读档之后轮次落在对手那边，播报点名「轮到对手」',
+  loaded.mode === 'game' && loaded.turn === 1 && /轮到「对手」/.test(loaded.report),
+  `${loaded.mode} / turn=${loaded.turn} / ${loaded.report}`
+);
+check(
+  '读档之后自动出杆被暂停（否则对手马上自己打一杆，替它打这条路径根本没机会走）',
+  loaded.pauseHidden === false && /读档之后/.test(loaded.pauseText),
+  `${loaded.pauseText} hidden=${loaded.pauseHidden}`
+);
+
+// 关掉自动出杆再手打：读档后的暂停会在「玩家亲手打一杆」那一刻解除，
+// 到时候对手接着自己出杆，会把刚结算的播报改掉——那是另一条路径的事。
+const turnedOff = JSON.parse(await evaluate(`(() => {
+  const box = document.getElementById('autoOpponent');
+  box.checked = false;
+  box.dispatchEvent(new Event('change', { bubbles: true }));
+  return JSON.stringify({ autoOpponent: window.__app.state.autoOpponent });
+})()`));
+check('读档后关掉自动出杆，接下来这一杆由玩家替对手打', turnedOff.autoOpponent === false, JSON.stringify(turnedOff));
+
+const asOpponent = await gameManualShot('1.20', 1);
+console.log('读档后替对手·手打:', JSON.stringify(asOpponent));
+check(
+  '读档后替对手手打：这一杆真的发生了（杆数 0 → 1），没有停在「现在是对手回合」那类提示上',
+  asOpponent.shots === 1 && asOpponent.advice === '—' && !/没有可以打的球/.test(asOpponent.advice),
+  JSON.stringify({ shots: asOpponent.shots, advice: asOpponent.advice })
+);
+check(
+  '读档后替对手手打：播报按对手的身份结算（「对手 继续」），不是记在自己头上',
+  /进 1 号/.test(asOpponent.report) && /对手 继续/.test(asOpponent.report) && !/你 继续/.test(asOpponent.report),
+  asOpponent.report || '超时'
+);
+check(
+  '读档后替对手手打：分组记到对手头上，记分板把全色给对手、花色给自己',
+  /分组：对手拿到全色/.test(asOpponent.report) && /对手 全色/.test(asOpponent.score) &&
+    /你 花色/.test(asOpponent.score),
+  `${asOpponent.report} / ${asOpponent.score}`
+);
+check(
+  '读档后替对手手打：球位真的跟着变了（1 号球进袋、母球停在袋口），对局记录记在对手名下',
+  asOpponent.b1 !== null && asOpponent.b1.pocketed === true &&
+    asOpponent.cue !== null && asOpponent.cue.pocketed === false &&
+    (Math.abs(asOpponent.cue.x - loaded.cue.x) > 0.1 || Math.abs(asOpponent.cue.y - loaded.cue.y) > 0.1) &&
+    asOpponent.logRows.length === 1 && /对手 继续/.test(asOpponent.logRows[0]),
+  JSON.stringify({ cue: asOpponent.cue, was: loaded.cue, b1: asOpponent.b1, log: asOpponent.logRows })
+);
+
+// 收拾干净：回到练习模式的三球局，后面量布局的用例不该读到球局这套面板。
+await evaluate(`(() => {
+  window.__app.setMode('practice');
+  window.__app.resetLayout();
+})()`);
+
 // ------------------------------------------------------------ 窄屏（390×844）
 //
 // 页面上有 @media (max-width: 900px) 的窄屏布局，也就是说它声称在手机上能用。
