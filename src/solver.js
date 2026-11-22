@@ -10,10 +10,14 @@
 //   一次整杆仿真（复制球 → strike → runShot 跑到全部停稳）实测中位 0.12 ms
 //   （9 杆典型局面 × 100 次），验证三十几次也就几毫秒，完全付得起。
 
-import { PHYS, SPEED, MAX_TIP_OFFSET, SEARCH_DT, SOLVE_MAX_TIME, TUNE_MAX_TIME, MAX_CUT_DEG, SOLVE_PRUNE_K, SOLVE_PRUNE_FALLBACK, SOLVE_TUNE_GRID, SOLVE_TUNE_GRID_LEGACY } from './constants.js';
+// 本行曾导入 MAX_TIP_OFFSET，但全文件零引用，已移除。移除之后这个常量在
+// src/demo/test 里已无任何引用（只剩 constants.js:118 的定义）——是否连定义一起删，
+// 不在本轮改动范围，留给后续。
+import { PHYS, SPEED, SEARCH_DT, SOLVE_MAX_TIME, TUNE_MAX_TIME, MAX_CUT_DEG, SOLVE_PRUNE_K, SOLVE_PRUNE_FALLBACK, SOLVE_TUNE_GRID, SOLVE_TUNE_GRID_LEGACY } from './constants.js';
 import { V, DEG } from './geometry.js';
+// 本块曾导入 createBall，但全文件零引用（复制球的补全都走 sim.js 的 snapshotBall，
+// 求解器自己从不造球），已移除。
 import {
-  createBall,
   createWorld,
   strike,
   runShot,

@@ -172,17 +172,9 @@ function fmtValue(c) {
 
 const CATEGORY_LABEL = { setup: '站姿', stroke: '出杆' };
 
-// 单目相机天生测不准的指标（噪声与判定区间同量级）。界面上必须标出来，
-// 否则用户会以为「这一项没判」是自己的问题。
-const WEAK_LABEL = {
-  stance_width: '站姿宽度',
-  forearm_vertical: '后手前臂垂直',
-  bridge_arm_straight: '架桥臂伸展',
-  head_low: '头部高度',
-  torso_lean: '躯干前倾',
-  knee_bend: '屈膝程度',
-  head_over_cue: '头在球杆上方',
-};
+// 曾有一张 WEAK_LABEL（单目易失真指标的中文名表）：界面上实际用的是
+// report.weakMetrics 的 id 集合 + 每条 check 自带的 label，这张表从写下起就没被
+// 引用过，清理时删除。
 
 function renderChecks(report) {
   const groups = { setup: report.setup, stroke: report.stroke };

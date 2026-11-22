@@ -355,7 +355,9 @@ export function resolveSnooker(game, facts) {
     ended = true;
     if (st.scores[0] === st.scores[1]) {
       // 平分：黑球重摆，由对手从 D 内开球（规则原文是重摆黑球继续）。
-      notes.push('比分相同：黑球重摆，继续打。');
+      // 播报必须与下面 continuing = false / next.turn = opp 的实际结果一致，
+      // 否则读 notes 拼出来的话会和摘要的「换 玩家 2」打架。
+      notes.push('比分相同：黑球重摆，换对手在 D 区开球。');
       const black = next.balls.find((b) => b.number === BLACK);
       if (black) {
         // 黑球点上可能停着母球或别的球，直接摆上去就是一颗球压另一颗——
