@@ -920,8 +920,9 @@
     header nav { justify-self: end; }
     /* 台面高度跟着 canvas 实际高度收紧，不再留 48vh 的死高度。
        竖屏手机下 canvas 永远是**宽度受限**的：app.js 的 resize() 调
-       view.fit(#stage 宽 - 10, #stage 高 - 10)，390 宽时 380/2.8 ≈ 136 远小于
-       高度允许的 ≈ 258，所以 canvas 高度只由宽度决定（与 #stage 高度无关）。
+       view.fit(#stage 内容宽 - 10, #stage 内容高 - 10)（内容盒 = clientWidth /
+       clientHeight 减掉左右各 16px 的 padding），390 宽时 (390-32-10)/2.8 ≈ 124
+       远小于高度允许的 ≈ 190，所以 canvas 高度只由宽度决定（与 #stage 高度无关）。
        这里直接把这个高度算出来，比例取三种台里最宽的 pool8：
        (1.12 + 2×0.13) / (2.24 + 2×0.13) = 0.552（FRAME_MARGIN 见 render.js）。
        取上限是为了让最高的那种台也不被 overflow:hidden 裁掉，pool9 / 斯诺克

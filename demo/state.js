@@ -829,3 +829,40 @@ export function autoPauseHint(state) {
   }
   return null;
 }
+
+// ---------------------------------------------------------------- 存档要不要先问一句
+//
+// 两个标签页各开一局时，后点的那个会把先存的静默盖掉。原实现只比时间戳，
+// 而「这个页面还没见过任何存档」（stamp 为 null）时一律放行——新开的标签页
+// 正好是这个状态，所以第一次覆盖一定不会拦。
+//
+// 这里改成比「写入方」（哪个标签页写的，由 app.js 注入的一次性会话串）：
+// 同一个会话自己反复存不打扰，发现存档是别的会话写的就先问一句。
+// 判断写成纯函数放这里，是因为它最该被单测钉住——写错的表现是「安静地丢档」。
+
+/**
+ * 存档该不该先问一句再覆盖。
+ *
+ * @param {{stamp: number, session: string|null}|null} stored 存档里记的写入方与时间戳；没有存档传 null
+ * @param {{stamp: number|null, session: string|null, overwrite?: boolean}} own 本页记着的状态
+ * @returns {{write: boolean, reason: 'empty'|'same'|'other-tab'|'changed'|'confirmed'}}
+ *   empty     没有已有存档（含存档坏掉读不出写入方）——直接写
+ *   same      就是我自己写的那份——直接写
+ *   confirmed 已经问过一次、用户再点了存档——这次真覆盖
+ *   other-tab 存档是另一个会话（另一个标签页）写的——先问
+ *   changed   我见过这份存档，但它被改过了（时间戳对不上）——先问
+ */
+export function reduceSaveWrite(stored, own) {
+  const mine = own ?? {};
+  if (!stored) return { write: true, reason: 'empty' };
+  if (mine.overwrite) return { write: true, reason: 'confirmed' };
+  // 两边都有会话串才比：老存档（这个字段还不存在）不该被当成别人的档拦下来。
+  if (stored.session && mine.session && stored.session !== mine.session) {
+    return { write: false, reason: 'other-tab' };
+  }
+  // 时间戳这条要留着：同一页面里改过存档（导入、测试伪造）也算「不是我认识的那份了」。
+  if (mine.stamp !== null && mine.stamp !== undefined && stored.stamp !== mine.stamp) {
+    return { write: false, reason: 'changed' };
+  }
+  return { write: true, reason: 'same' };
+}

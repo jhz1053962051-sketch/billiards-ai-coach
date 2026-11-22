@@ -2368,6 +2368,305 @@ console.log('窄屏 390×844:', narrow);
 await send(ws, 'Emulation.clearDeviceMetricsOverride');
 await new Promise((r) => setTimeout(r, 400));
 
+// ------------------------------------------------------------ 画布几何：内部宽必须等于 CSS 宽
+//
+// 画布受 canvas{max-width:100%} 约束：fit() 拿到的可用宽只要比内容盒大一点，
+// CSS 就会把画布压回去，而内部坐标系没跟着缩——台面横向压扁，点选反算同比例偏。
+// toPx 与 toWorld 是互逆的，单测它俩往返永远是 0，验不出这个问题；这里量的是
+// 「这颗球画在屏幕上哪儿」与「点了那儿算出的世界点」之间的差：内部 px 先按
+// 挤压倍率 k = rect.width / (canvas.width/dpr) 映射成屏幕 px，再走 app 的反算链
+// （pointerPos 只做 clientX - rect.left，然后 view.toWorld）。
+
+async function measureCanvasGeom() {
+  return JSON.parse(
+    await evaluate(`(() => {
+      const app = window.__app;
+      const c = document.getElementById('table');
+      const v = app.view;
+      const t = app.table;
+      const r = c.getBoundingClientRect();
+      const dpr = window.devicePixelRatio;
+      const bufW = c.width / dpr;
+      const bufH = c.height / dpr;
+      const kx = r.width / bufW;
+      const ky = r.height / bufH;
+      const M = 0.13;
+      const wx = t.length * 0.9;
+      const wy = t.width * 0.2;
+      const ix = v.offset.x + wx * v.scale;
+      const iy = v.offset.y + (t.width - wy) * v.scale;
+      const got = v.toWorld(ix * kx, iy * ky);
+      return JSON.stringify({
+        dpr,
+        bufW,
+        bufH,
+        cssW: r.width,
+        cssH: r.height,
+        diffW: bufW - r.width,
+        diffH: bufH - r.height,
+        aspectCss: r.width / r.height,
+        aspectIdeal: (t.length + 2 * M) / (t.width + 2 * M),
+        errPx: Math.hypot((got.x - wx) * v.scale * kx, (got.y - wy) * v.scale * ky),
+      });
+    })()`)
+  );
+}
+
+function checkCanvasGeom(tag, r) {
+  check(
+    tag + '：canvas 内部宽与 CSS 宽一致（差 ≤1px，画布没被挤扁）',
+    Math.abs(r.diffW) <= 1,
+    `内部宽=${r.bufW.toFixed(2)} CSS 宽=${r.cssW.toFixed(2)} 差=${r.diffW.toFixed(2)}px`
+  );
+  check(
+    tag + '：canvas 内部高与 CSS 高一致（差 ≤1px）',
+    Math.abs(r.diffH) <= 1,
+    `内部高=${r.bufH.toFixed(2)} CSS 高=${r.cssH.toFixed(2)} 差=${r.diffH.toFixed(2)}px`
+  );
+  check(
+    tag + '：台面纵横比与画布一致（偏差 <0.2%）',
+    Math.abs(r.aspectCss / r.aspectIdeal - 1) < 0.002,
+    `CSS 比例=${r.aspectCss.toFixed(4)} 理想=${r.aspectIdeal.toFixed(4)}`
+  );
+  check(
+    tag + '：按球画在屏幕上的位置点选，反算误差 <1px 对应的距离',
+    r.errPx < 1,
+    `偏差 ${r.errPx.toFixed(2)}px`
+  );
+}
+
+const geomDesktop = await measureCanvasGeom();
+console.log('画布几何·桌面:', geomDesktop);
+checkCanvasGeom('桌面', geomDesktop);
+
+// 手机视口（390×844, dsf2）单独再量一遍：窄屏是 @media 改过 padding 的那段，
+// 桌面过了手机不一定过（padding 16 vs 24，可用宽算错的比例不一样）。
+await send(ws, 'Emulation.setDeviceMetricsOverride', {
+  width: 390,
+  height: 844,
+  deviceScaleFactor: 2,
+  mobile: true,
+});
+await new Promise((r) => setTimeout(r, 450));
+
+const geomMobile = await measureCanvasGeom();
+console.log('画布几何·手机 390×844:', geomMobile);
+checkCanvasGeom('手机 390×844', geomMobile);
+
+await send(ws, 'Emulation.clearDeviceMetricsOverride');
+await new Promise((r) => setTimeout(r, 400));
+
+// ------------------------------------------------------------ 换标签页之后第一次存档
+//
+// 新开的标签页从没见过任何存档（saveStamp 是 null），旧实现因此在它第一次点
+// 「存这一局」时直接覆盖——那边的一局就这么没了，还一句提示都没有。
+// 会话标识（sessionStorage 里的一次性 id）就是拿来分清「自己的档」和「别人的档」：
+// 同会话反复存不打扰，别人的档要先说明再覆盖。这里两件事都验。
+
+const crossSession = await evaluate(`(() => {
+  const app = window.__app;
+  const key = 'pool-ai-coach/game/v1';
+  const realSession = app.state.saveSession;
+  app.setMode('game');
+  app.newGame();
+  localStorage.removeItem(key);
+
+  // 装作「另一个标签页写的档」：存档里记的写入方是别的会话
+  app.state.saveSession = 'tab-other-0001';
+  app.state.saveStamp = null;
+  app.state.saveOverwrite = false;
+  app.saveGame();
+  const foreign = JSON.parse(localStorage.getItem(key));
+
+  // 再把自己当成刚从另一个标签页新开出来的窗口：没见过这份档，时间戳是 null
+  app.state.saveSession = 'tab-mine-0002';
+  app.state.saveStamp = null;
+  app.state.saveOverwrite = false;
+  app.state.game.shots = 3;
+  app.saveGame();
+  const firstReport = document.getElementById('report').textContent;
+  const afterFirst = JSON.parse(localStorage.getItem(key));
+  const kept = {
+    shots: afterFirst.shots === foreign.shots,
+    stamp: afterFirst.savedAt === foreign.savedAt,
+    session: afterFirst.session === foreign.session,
+  };
+
+  // 第二次点才覆盖
+  app.saveGame();
+  const secondReport = document.getElementById('report').textContent;
+  const afterSecond = JSON.parse(localStorage.getItem(key));
+
+  // 同一会话里连存两次：不许打扰
+  localStorage.removeItem(key);
+  app.state.saveStamp = null;
+  app.state.saveOverwrite = false;
+  app.saveGame();
+  const soloFirst = document.getElementById('report').textContent;
+  app.saveGame();
+  const soloSecond = document.getElementById('report').textContent;
+
+  app.state.saveSession = realSession;
+  localStorage.removeItem(key);
+  app.state.saveStamp = null;
+  app.state.saveOverwrite = false;
+
+  return JSON.stringify({
+    foreignShots: foreign.shots,
+    firstReport: firstReport.slice(0, 120),
+    secondReport: secondReport.slice(0, 60),
+    kept,
+    overwrote: afterSecond.session === 'tab-mine-0002' && afterSecond.shots === 3,
+    soloFirst: soloFirst.slice(0, 40),
+    soloSecond: soloSecond.slice(0, 40),
+  });
+})()`);
+console.log('存档·换标签页:', crossSession);
+{
+  const r = JSON.parse(crossSession);
+  check(
+    '新标签页第一次存档要拦下来，并说明这份档是另一个标签页写的',
+    /另一个标签页/.test(r.firstReport) && /另一个标签页写的/.test(r.firstReport),
+    r.firstReport
+  );
+  check(
+    '被拦时把对方存到第几杆说出来',
+    r.firstReport.includes(String(r.foreignShots)),
+    `对方第 ${r.foreignShots} 杆 → ${r.firstReport}`
+  );
+  check(
+    '被拦时一个字都没写进去（对方的杆数、时间戳、写入方都在）',
+    r.kept.shots === true && r.kept.stamp === true && r.kept.session === true,
+    JSON.stringify(r.kept)
+  );
+  check('再点一次才覆盖，存的是本页这一局', r.overwrote === true && /已存档/.test(r.secondReport), r.secondReport);
+  check(
+    '同一会话里反复存档不弹提示（正常流程不被打扰）',
+    /已存档/.test(r.soloFirst) &&
+      /已存档/.test(r.soloSecond) &&
+      !/另一个标签页/.test(r.soloFirst) &&
+      !/另一个标签页/.test(r.soloSecond),
+    JSON.stringify({ first: r.soloFirst, second: r.soloSecond })
+  );
+}
+
+// ------------------------------------------------------------ 回放中点撤销
+//
+// 回放还在往球数组里写帧，此刻撤销会被下一帧盖回去。旧实现直接 return，
+// 按钮还亮着、画面没变、也没有一句话——用户只会以为撤销坏了。
+
+const undoMidReplay = await evaluate(`(() => {
+  const app = window.__app;
+  app.setMode('game');
+  app.newGame();
+  app.state.autoOpponent = false;
+  const g = app.state.game;
+  g.turn = 0;
+  g.breakShot = false;
+  g.requiresRerack = false;
+  g.ballInHand = null;
+  app.gameSolve();
+  app.gameShoot();
+  const btn = document.getElementById('gUndo');
+  const snap = {
+    animating: app.state.animating,
+    disabled: btn.disabled,
+    title: btn.title,
+    shots0: app.state.game.shots,
+    hist0: app.state.history.length,
+  };
+  app.undoGame();
+  snap.report = document.getElementById('report').textContent;
+  snap.shots1 = app.state.game.shots;
+  snap.hist1 = app.state.history.length;
+  return JSON.stringify(snap);
+})()`);
+console.log('撤销·回放中:', undoMidReplay);
+{
+  const r = JSON.parse(undoMidReplay);
+  check('回放中撤销按钮是灰的（不是点得动却没反应）', r.animating === true && r.disabled === true, JSON.stringify(r));
+  check('回放中按钮的 title 说明了为什么不能撤', /回放/.test(r.title), r.title);
+  check(
+    '回放中点撤销会给出文字说明，不是静默吞掉',
+    /回放/.test(r.report) && /撤销/.test(r.report),
+    r.report
+  );
+  check('回放中点撤销不动局面', r.shots1 === r.shots0 && r.hist1 === r.hist0, JSON.stringify(r));
+}
+// 等这一杆演完，别让后面的检查读到半途的局面
+for (let i = 0; i < 60; i++) {
+  const a = await evaluate(`window.__app.state.animating`);
+  if (!a) break;
+  await sleep(200);
+}
+
+// ------------------------------------------------------------ 存档失败的两句文案
+//
+// 隐私模式（存储整块打不开）和配额满（写得进但满了）要分开说：前者换窗口才行，
+// 后者删旧档就有地方。合成一句「或者配额满了」等于什么都不告诉人。
+
+const saveFailure = await evaluate(`(() => {
+  const app = window.__app;
+  const proto = Object.getPrototypeOf(localStorage);
+  const desc = (name) => Object.getOwnPropertyDescriptor(proto, name);
+  const origSet = desc('setItem');
+  const origGet = desc('getItem');
+  const put = (name, value) => Object.defineProperty(proto, name, { value, configurable: true, writable: true });
+  const back = (name, d) => {
+    if (d) Object.defineProperty(proto, name, d);
+    else delete proto[name];
+  };
+  const out = {};
+  app.setMode('game');
+  app.newGame();
+  try {
+    // 配额满：读得到旧档，写的时候抛
+    put('setItem', function () {
+      throw new DOMException('quota', 'QuotaExceededError');
+    });
+    app.state.saveOverwrite = true;
+    app.saveGame();
+    out.quota = document.getElementById('report').textContent;
+  } finally {
+    back('setItem', origSet);
+  }
+  try {
+    // 隐私模式 / 存储被禁：读写都抛（真实的 localStorage 是访问就抛，不是只读抛）
+    const denied = function () {
+      throw new DOMException('denied', 'SecurityError');
+    };
+    put('getItem', denied);
+    put('setItem', denied);
+    app.state.saveOverwrite = true;
+    app.saveGame();
+    out.blocked = document.getElementById('report').textContent;
+  } finally {
+    back('setItem', origSet);
+    back('getItem', origGet);
+  }
+  // 恢复之后必须还能正常存（别把 localStorage 留在坏状态里）
+  app.state.saveOverwrite = true;
+  app.saveGame();
+  out.recovered = /已存档/.test(document.getElementById('report').textContent);
+  localStorage.removeItem('pool-ai-coach/game/v1');
+  return JSON.stringify(out);
+})()`);
+console.log('存档·失败文案:', saveFailure);
+{
+  const r = JSON.parse(saveFailure);
+  check(
+    '配额满的文案说清是配额、并提示删旧存档腾空间',
+    /配额/.test(r.quota) && /删除存档/.test(r.quota),
+    r.quota
+  );
+  check(
+    '隐私模式 / 存储被禁的文案是另一句（不是笼统一句）',
+    /隐私模式/.test(r.blocked) && r.blocked !== r.quota,
+    r.blocked
+  );
+  check('文案验完之后 localStorage 仍然可用', r.recovered === true, String(r.recovered));
+}
+
 // ------------------------------------------------------------ 姿态页窄屏（390×844）
 //
 // 姿态页原本是「左画面右面板」：aside 固定 390 px + main 是 flex，

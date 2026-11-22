@@ -286,11 +286,23 @@ function defaultStore() {
   return null;
 }
 
-/** 写存档。存储不可用（隐私模式 / 配额满）时返回 false，不抛。 */
-export function writeSave(game, store = defaultStore(), { now = Date.now(), history = [] } = {}) {
+/**
+ * 写存档。存储不可用（隐私模式 / 配额满）时返回 false，不抛。
+ *
+ * session 是写入方标识（哪个标签页写的）。它只加在这里、不加进 serialize：
+ * 导出的文件里不该带本机的一次性会话串，而存档里必须有它，否则另一个标签页
+ * 分不出「这份是我自己刚写的」还是「别人写的」。
+ */
+export function writeSave(
+  game,
+  store = defaultStore(),
+  { now = Date.now(), history = [], session = null } = {}
+) {
   if (!store) return false;
   try {
-    store.setItem(KEY, JSON.stringify(serialize(game, now, history)));
+    const payload = serialize(game, now, history);
+    if (typeof session === 'string' && session) payload.session = session;
+    store.setItem(KEY, JSON.stringify(payload));
     return true;
   } catch {
     return false;
@@ -298,11 +310,33 @@ export function writeSave(game, store = defaultStore(), { now = Date.now(), hist
 }
 
 /**
- * 存档的写入时间戳，给「另一个标签页是不是改过」用。没有存档返回 null。
- * 注意这里读的是原始 JSON 而不是 sanitize 之后的对象：存档坏掉时也要能把
- * 「它存在过」这件事说出来，哪怕内容已经不能用了。
+ * 写存档失败之后问一句「为什么」：存储根本打不开，还是打得开但写不进去。
+ *
+ * 这两件事给用户的下一步完全不同——前者要换普通窗口，后者删掉旧存档就有地方了。
+ * 只判读：getItem 抛错说明存储被禁（隐私模式），能读不能写说明是配额。
+ *
+ * @returns {'blocked'|'quota'}
  */
-export function readSaveStamp(store = defaultStore()) {
+export function saveFailureKind(store = defaultStore()) {
+  if (!store) return 'blocked';
+  try {
+    store.getItem(KEY);
+  } catch {
+    return 'blocked';
+  }
+  return 'quota';
+}
+
+/**
+ * 存档里记的「谁写的、什么时候写的」。没有存档（或存档坏到解析不出来）返回 null。
+ *
+ * 读原始 JSON 而不是 sanitize 之后的对象：写入方与时间戳都不是局面的一部分，
+ * sanitize 只留白名单字段，会把它们丢掉；而且存档坏掉时也要能把「它存在过」
+ * 这件事说出来。
+ *
+ * @returns {{stamp: number, session: string|null}|null}
+ */
+export function readSaveMeta(store = defaultStore()) {
   if (!store) return null;
   let text = null;
   try {
@@ -313,10 +347,24 @@ export function readSaveStamp(store = defaultStore()) {
   if (!text) return null;
   try {
     const raw = JSON.parse(text);
-    return typeof raw?.savedAt === 'number' && Number.isFinite(raw.savedAt) ? raw.savedAt : 0;
+    return {
+      stamp: typeof raw?.savedAt === 'number' && Number.isFinite(raw.savedAt) ? raw.savedAt : 0,
+      // 老存档没有这个字段（那时还不记写入方）：null = 不知道，别当成别人的档。
+      session: typeof raw?.session === 'string' && raw.session ? raw.session : null,
+    };
   } catch {
     return null;
   }
+}
+
+/**
+ * 存档的写入时间戳，给「另一个标签页是不是改过」用。没有存档返回 null。
+ * 注意这里读的是原始 JSON 而不是 sanitize 之后的对象：存档坏掉时也要能把
+ * 「它存在过」这件事说出来，哪怕内容已经不能用了。
+ */
+export function readSaveStamp(store = defaultStore()) {
+  const meta = readSaveMeta(store);
+  return meta ? meta.stamp : null;
 }
 
 /** 当前存档格式版本。v1 是「没有 log / history 两个键」的老格式。 */

@@ -45,7 +45,9 @@ import {
   writeSave,
   clearSave,
   describeSave,
+  readSaveMeta,
   readSaveStamp,
+  saveFailureKind,
   serialize,
   sanitize,
   SAVE_KEY,
@@ -65,6 +67,7 @@ import {
   practiceReady,
   pushHistoryEntry,
   reduceAutoPause,
+  reduceSaveWrite,
   restoreGameState,
   restorePositions,
   shouldAutoShoot,
@@ -113,6 +116,31 @@ let table = createTable('pool9');
 let R = table.ballRadius;
 const view = createRenderer({ canvas, table });
 
+/**
+ * 本标签页的一次性会话串，写进存档，用来分辨「这份档是我自己写的」还是
+ * 「另一个标签页写的」。
+ *
+ * 为什么不用时间戳就够了：新开的标签页还没见过任何存档，它记的 time 是 null，
+ * 而旧代码把 null 当放行——于是第二个标签页第一次点存档就静默盖掉别人的档。
+ *
+ * sessionStorage 按标签页隔离（刷新还在、新开一个是新的），正好是这个语义；
+ * 隐私模式下连 sessionStorage 都碰不得，退回内存里的随机串：本标签页内仍然
+ * 自洽，只是刷新之后会换一个（那时也确实该重新认一次存档）。
+ */
+function readTabSession() {
+  const made = `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  try {
+    const kept = sessionStorage.getItem(SESSION_KEY);
+    if (kept) return kept;
+    sessionStorage.setItem(SESSION_KEY, made);
+    return made;
+  } catch {
+    return made;
+  }
+}
+const SESSION_KEY = 'pool-ai-coach/tab/v1';
+const TAB_SESSION = readTabSession();
+
 const state = {
   mode: 'practice',
   // 练习模式
@@ -147,6 +175,9 @@ const state = {
   // 存档的写入时间戳。null = 这个页面还没读过也没存过，说什么都算新鲜。
   // 用来分辨「存档还是我见过的那份」和「另一个标签页已经改过了」。
   saveStamp: null,
+  // 本页认下的「这档是谁写的」。平时就是本标签页的会话串；读档之后改成存档里
+  // 那一个——用户是主动把别人的局面接过来接着打的，之后他再存不算覆盖别人的档。
+  saveSession: TAB_SESSION,
   // 已经被提示过一次「存档被别人改过」，再点一次存档就是真要覆盖。
   saveOverwrite: false,
   // 另一个标签页存的那份存档是第几杆；null = 没有待处理的对方存档。
@@ -171,8 +202,20 @@ const GROUP_LABEL = { solid: '全色', stripe: '花色', eight: '8 号', cue: '�
 // ---------------------------------------------------------------- 尺寸
 
 function resize() {
-  const rect = $('stage').getBoundingClientRect();
-  view.fit(rect.width - 10, rect.height - 10);
+  // 可用空间按**内容盒**算。#stage 有 padding（桌面 24、手机 16），
+  // getBoundingClientRect() 的 width/height 把 padding 也算进去了；拿它当可用宽，
+  // 算出来的画布比内容盒还宽，最后被 canvas{max-width:100%} 按 CSS 挤回去——
+  // 画布内部坐标系没跟着缩，整张台子横向压扁（桌面实测 4.0%、手机 5.8%），
+  // 点选反算用同一套 scale，于是触摸/拖动也跟着同比例偏。
+  // clientWidth/clientHeight 同样含 padding，所以显式减掉两边的 padding。
+  // 那 10px 是留给边框和内边距呼吸的余量，和手机端 #stage 高度公式里的 -10px 对应。
+  const stage = $('stage');
+  const cs = getComputedStyle(stage);
+  const padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+  const padY = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+  const availW = Math.max(1, stage.clientWidth - padX - 10);
+  const availH = Math.max(1, stage.clientHeight - padY - 10);
+  view.fit(availW, availH);
   render();
 }
 
@@ -1160,6 +1203,10 @@ function replay(frames, dt, onDone) {
   const targets = state.mode === 'practice' ? state.balls : state.game.balls;
   state.animating = true;
   updatePracticeFeedback();
+  // 回放期间撤销按钮要立刻灰掉：pushHistory 是在 replay 之前调用的，那时
+  // animating 还是 false，按钮被点亮了；不在这里补一手，整段回放里它都亮着，
+  // 点了又被 undoGame 的守卫吞掉——用户只会觉得撤销坏了（真机实测报的这条）。
+  updateUndoButton();
 
   // 中途作废时把球杆复位。不复位的话，停在 -0.012 的球杆会插在母球里，
   // 换到新局面上看着就像穿模。
@@ -1175,6 +1222,8 @@ function replay(frames, dt, onDone) {
       // 旧 tick 再写一次会把新回放刚设上的 true 踩掉，新回放就永远不动了。
       if (gen !== state.generation) {
         restoreStroke();
+        // 这一串帧作废了，但按钮的灰/亮得跟着当前状态重新算（新回放可能已经开始了）。
+        updateUndoButton();
         return;
       }
       const elapsed = (performance.now() - t0) / 1000;
@@ -1195,6 +1244,8 @@ function replay(frames, dt, onDone) {
       if (frameTime >= frames.length - 1) {
         state.animating = false;
         updatePracticeFeedback();
+        // 回放结束：撤销按钮该亮回来了，否则这一局从此撤不了。
+        updateUndoButton();
         // 复位球杆击球位移
         const tier = getPowerTier(state.manual.speed);
         state.manual.strokeOffset = tier.ratio * 0.12;
@@ -1568,10 +1619,18 @@ function updateUndoButton() {
   const n = state.history.length;
   btn.disabled = n === 0 || state.animating;
   btn.textContent = undoLabel(n);
+  // 灰掉的原因要说得出口：回放中（对手出杆也算）和「没得撤」是两回事，
+  // 只说「不能点」会让人以为撤销坏了。
+  btn.title = state.animating ? '这一杆还在回放，演完才能撤销' : '';
 }
 
 function undoGame() {
-  if (state.animating) return;
+  if (state.animating) {
+    // 不许静默：回放还在往球数组里写帧，此刻撤销会被下一帧盖回去，
+    // 用户看到的是「点了没反应」。说清楚什么时候能撤。
+    setReport('这一杆还在回放（对手出杆也算），演完才能撤销——现在撤，下一秒的球位又会盖回来。');
+    return;
+  }
   const prev = state.history.pop();
   if (!prev) {
     setReport('已经退到这一局的起点了，没有更早的局面可退。');
@@ -1999,21 +2058,31 @@ function saveGame() {
   // 两个标签页各开一局的时候，后点的那个会把先存的静默盖掉——谁存的、
   // 存的是哪一局，全都没有痕迹。所以先看一眼存档还是不是自己认识的那份：
   // 不是的话先不写，把对方的进度说出来，让人自己决定要不要覆盖。
-  const storedStamp = readSaveStamp();
-  const stale =
-    storedStamp !== null && state.saveStamp !== null && storedStamp !== state.saveStamp;
-  if (stale && !state.saveOverwrite) {
+  //
+  // 判定在 state.js 的 reduceSaveWrite（纯函数，单测钉着）：它比的是「写入方」
+  // 而不是只看时间戳——新开的标签页从没见过任何存档，时间戳是 null，
+  // 只比时间戳的话它第一次点存档就会被放行，正是线上丢档的那条路。
+  const stored = readSaveMeta();
+  const verdict = reduceSaveWrite(stored, {
+    stamp: state.saveStamp,
+    session: state.saveSession,
+    overwrite: state.saveOverwrite,
+  });
+  if (!verdict.write) {
     const theirs = describeSave();
     state.saveOverwrite = true;
     setReport(
-      `存档已经被另一个标签页改过了（那边存的是第 ${theirs?.shots ?? '?'} 杆），这一局没有覆盖它。` +
+      (verdict.reason === 'other-tab'
+        ? '这份存档是另一个标签页写的'
+        : '存档已经被另一个标签页改过了') +
+        `（那边存的是第 ${theirs?.shots ?? '?'} 杆），这一局没有覆盖它。` +
         '确认要覆盖的话，再点一次「存这一局」。'
     );
     refreshSaveInfo();
     return;
   }
   // 撤销栈一起存：不带它的话刷新页面之后「对局记录」和撤销按钮都是空的。
-  const ok = writeSave(g, undefined, { history: state.history });
+  const ok = writeSave(g, undefined, { history: state.history, session: state.saveSession });
   state.saveOverwrite = false;
   if (ok) {
     // 这份存档已经是「我见过的那个」了，按钮上没有待处理的东西。
@@ -2022,7 +2091,12 @@ function saveGame() {
     setReport(`已存档：第 ${g.shots} 杆，${g.balls.filter((b) => !b.pocketed && b.number !== 0).length} 颗目标球在台上。刷新页面后点「读取存档」能接着打。`);
     refreshSaveInfo();
   } else {
-    setReport('存不了——浏览器禁用了本地存储（隐私模式常见），或者配额满了。');
+    // 「存储打不开」和「写得进但满了」得分开说：前者换窗口才有用，后者删旧档就有地方。
+    setReport(
+      saveFailureKind() === 'quota'
+        ? '存不了——本地存储的配额满了，这一局没有写进去。点下面「删除存档」清掉旧的那份腾出空间，再存一次。'
+        : '存不了——浏览器禁用了本地存储（隐私模式、或站点被设成不保存数据）。换个普通窗口打开这一页再存。'
+    );
   }
 }
 
@@ -2053,6 +2127,9 @@ function loadGame() {
     return;
   }
   applyLoadedGame(saved);
+  // 这一档是用户亲手接过来接着打的：认下它的写入方。之后再点存档属于「存自己
+  // 手里这局」，不该因为「档是别的标签页写的」再问一遍。
+  state.saveSession = readSaveMeta()?.session ?? TAB_SESSION;
 }
 
 /**
@@ -2117,6 +2194,7 @@ function applyLoadedGame(saved) {
 function removeSave() {
   const ok = clearSave();
   state.saveStamp = null;
+  state.saveSession = TAB_SESSION;
   state.saveOverwrite = false;
   setReport(ok ? '存档已删除。' : '删不了——浏览器禁用了本地存储。');
   refreshSaveInfo();
@@ -2615,7 +2693,15 @@ function nudgeManual(kind, delta) {
 function onKeyDown(ev) {
   if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
   if (isTypingTarget(ev.target)) return;
-  if (state.animating) return;
+  // 回放中（对手出杆也算）不让别的键动手，但面对 Z 不能装没看见：按钮这时是灰的，
+  // 键盘是唯一还能「点」到撤销的路，静默返回等于让人以为撤销坏了。
+  if (state.animating) {
+    if ((ev.key === 'z' || ev.key === 'Z') && state.mode === 'game') {
+      ev.preventDefault();
+      undoGame();
+    }
+    return;
+  }
 
   const inGame = state.mode === 'game';
   switch (ev.key) {

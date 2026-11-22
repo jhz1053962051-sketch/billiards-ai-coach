@@ -33,6 +33,7 @@ import {
   practiceReady,
   pushHistoryEntry,
   reduceAutoPause,
+  reduceSaveWrite,
   restoreGameState,
   restorePositions,
   saveCoord,
@@ -45,7 +46,18 @@ import {
   utf8Bytes,
 } from '../demo/state.js';
 import { SEARCH_DT } from '../src/constants.js';
-import { loadSave, readSave, sanitize, serialize, writeSave, SAVE_KEY, SAVE_VERSION } from '../demo/save.js';
+import {
+  loadSave,
+  readSave,
+  readSaveMeta,
+  readSaveStamp,
+  sanitize,
+  saveFailureKind,
+  serialize,
+  writeSave,
+  SAVE_KEY,
+  SAVE_VERSION,
+} from '../demo/save.js';
 
 const table = createTable('pool9');
 
@@ -1297,4 +1309,99 @@ test('simulateFrames：场上没有母球时返回 null，让调用方早退而�
     simulateFrames([createBall('b1', 1.0, 0.5, { number: 1 })], table, straightShot, SEARCH_DT),
     null
   );
+});
+
+// ---------------------------------------------------------------- 存档要不要先问一句
+//
+// 真机实测丢档的那条路：A 标签页存档 → 新开 B → B 第一次点存档，没有任何提示就
+// 盖掉了 A。原因是旧判定只比时间戳，而新开的页面记的时间戳是 null，一律放行。
+// 下面这些断言钉的就是「null 不再等于放行」这件事。
+
+test('reduceSaveWrite：同一会话反复存档不打扰（E2E 与正常用法都是这条）', () => {
+  const stored = { stamp: 1700000000000, session: 'tab-a' };
+  const verdict = reduceSaveWrite(stored, { stamp: 1700000000000, session: 'tab-a', overwrite: false });
+  assert.deepEqual(verdict, { write: true, reason: 'same' });
+});
+
+test('reduceSaveWrite：存档是另一个会话写的就先问一句，不许直接盖', () => {
+  // B 标签页刚打开：它谁也没见过（stamp 是 null），但存档里写着别人的会话串
+  const stored = { stamp: 1700000000000, session: 'tab-a' };
+  const verdict = reduceSaveWrite(stored, { stamp: null, session: 'tab-b', overwrite: false });
+  assert.deepEqual(verdict, { write: false, reason: 'other-tab' });
+});
+
+test('reduceSaveWrite：没有已有存档时直接写（第一次存档不该问）', () => {
+  assert.deepEqual(reduceSaveWrite(null, { stamp: null, session: 'tab-b', overwrite: false }), {
+    write: true,
+    reason: 'empty',
+  });
+});
+
+test('reduceSaveWrite：存档坏到读不出写入方时不误拦', () => {
+  // 坏档在 readSaveMeta 眼里就是「没有存档」：内容已经不可用，覆盖它不算丢东西
+  const broken = memoryStore();
+  broken.setItem(SAVE_KEY, '{"v":2,"savedAt":17,'); // 截断的 JSON
+  assert.equal(readSaveMeta(broken), null);
+  assert.equal(readSaveStamp(broken), null, '时间戳接口的语义不能变');
+  assert.deepEqual(reduceSaveWrite(readSaveMeta(broken), { stamp: null, session: 'tab-b' }), {
+    write: true,
+    reason: 'empty',
+  });
+});
+
+test('reduceSaveWrite：确认过一次之后才真覆盖', () => {
+  const stored = { stamp: 1700000000001, session: 'tab-a' };
+  assert.deepEqual(reduceSaveWrite(stored, { stamp: null, session: 'tab-b', overwrite: true }), {
+    write: true,
+    reason: 'confirmed',
+  });
+});
+
+test('reduceSaveWrite：同一会话里存档被改过（时间戳对不上）也要先问', () => {
+  const stored = { stamp: 1700000900000, session: 'tab-a' };
+  assert.deepEqual(reduceSaveWrite(stored, { stamp: 1700000000000, session: 'tab-a', overwrite: false }), {
+    write: false,
+    reason: 'changed',
+  });
+});
+
+test('reduceSaveWrite：老存档没有会话串，不能因此被当成「别人的档」拦下来', () => {
+  const stored = { stamp: 1700000000000, session: null };
+  assert.deepEqual(reduceSaveWrite(stored, { stamp: 1700000000000, session: 'tab-b', overwrite: false }), {
+    write: true,
+    reason: 'same',
+  });
+});
+
+test('writeSave / readSaveMeta：写入方和内容一起进存档，导出的序列化里不带它', () => {
+  const store = memoryStore();
+  assert.equal(writeSave(makeGame(1), store, { now: 1700000000000, session: 'tab-a' }), true);
+  assert.deepEqual(readSaveMeta(store), { stamp: 1700000000000, session: 'tab-a' });
+  assert.equal(readSaveStamp(store), 1700000000000);
+  // 导出文件里不该出现本机的一次性会话串
+  assert.equal(serialize(makeGame(1), 1700000000000, []).session, undefined);
+});
+
+test('saveFailureKind：存储打不开（隐私模式）与配额满分开报，用户的下一步不一样', () => {
+  const blocked = {
+    getItem() {
+      throw new Error('SecurityError');
+    },
+    setItem() {
+      throw new Error('SecurityError');
+    },
+  };
+  assert.equal(saveFailureKind(blocked), 'blocked');
+  assert.equal(saveFailureKind(null), 'blocked', '连存储对象都没有也是「打不开」');
+
+  const full = {
+    getItem: () => null,
+    setItem() {
+      const err = new Error('The quota has been exceeded.');
+      err.name = 'QuotaExceededError';
+      throw err;
+    },
+    removeItem: () => {},
+  };
+  assert.equal(saveFailureKind(full), 'quota');
 });
