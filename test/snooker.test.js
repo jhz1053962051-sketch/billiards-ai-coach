@@ -262,6 +262,60 @@ test('斯诺克：清完最后一颗黑球时比分相同，黑球重摆继续�
   assert.equal(next.turn, 1, '重摆黑球之后换对手开球');
 });
 
+// 平分重摆这条路径上，球权、持球、pocketed 三件事要合起来看：单看一项都对，
+// 合起来会出现「摘要说继续打、turn 却已经换人」这种自相矛盾的局面。
+function tieBlackShot(scorerScores) {
+  const balls = [
+    createBall('cue', 0.6, 0.9, { number: 0 }),
+    createBall('b' + BLACK, 3.245, 0.889, { number: BLACK }),
+  ];
+  const g = createGame(table, balls, { kind: 'snooker' });
+  g.snooker.ballOn = BLACK;
+  g.snooker.scores = scorerScores;
+  return resolveShot(g, factsOf(g, { firstContact: BLACK, pocketed: ['b' + BLACK], rails: ['x'] }));
+}
+
+test('斯诺克：平分重摆黑球之后交轮，continuing 必须是 false、摘要不写「继续」', () => {
+  const { next, report } = tieBlackShot([33, 40]);
+  assert.equal(report.ended, false);
+  assert.deepEqual(next.snooker.scores, [40, 40], '打进的 7 分照记，不然根本不会平分');
+  assert.equal(next.turn, 1, '重摆之后换对手打');
+  assert.equal(report.continuing, false, '球权已经交出去了，不能同时说「继续」');
+  assert.equal(report.summary.includes('继续'), false, `摘要里不该出现「继续」：${report.summary}`);
+  assert.match(report.summary, /换 玩家 2/, '摘要要说换手，和 turn 保持一致');
+});
+
+test('斯诺克：平分重摆黑球之后从 D 区持球，不是从母球原位继续', () => {
+  const { next, report } = tieBlackShot([33, 40]);
+  assert.deepEqual(next.ballInHand, { zone: 'd' }, '重摆黑球后由对手从 D 内开球');
+  assert.deepEqual(report.ballInHand, { player: 1, zone: 'd' });
+  // 这个 zone 必须是规则层认得的值：D 内的点放得下，D 外只是台面内的点放不下。
+  assert.equal(placementAllowed(next, 0.6, 0.889), true, 'D 区内的点应当合法');
+  assert.equal(placementAllowed(next, 1.1, 0.889), false, 'D 区外的点不合法，说明确实按 D 区判');
+});
+
+test('斯诺克：重摆的黑球不算「这一杆进袋」，pocketed 里不留 21 号', () => {
+  const { next, report } = tieBlackShot([33, 40]);
+  assert.deepEqual(report.pocketed.map((p) => p.number), [], '重摆回台面的球不是这一杆的进袋');
+  assert.equal(report.spotted, BLACK, '照八球/九球的写法用 spotted 标出被重摆的球');
+  const black = next.balls.find((b) => b.number === BLACK);
+  assert.equal(black.pocketed, false, '黑球已经在台面上了');
+  // 从 pocketed 里剔除只是不播「进 21 号」，分数不能跟着少算。
+  assert.equal(report.snooker.gained, 7);
+  assert.deepEqual(next.snooker.scores, [40, 40]);
+});
+
+test('斯诺克：非平分时打进最后一颗黑球照旧结束，球权与持球都不变', () => {
+  const { next, report } = tieBlackShot([40, 20]);
+  assert.equal(report.ended, true, '47 : 20，这一局结束');
+  assert.equal(next.winner, 0);
+  assert.equal(next.phase, 'ended');
+  assert.equal(next.ballInHand, null, '结束的局不持球');
+  assert.equal(report.ballInHand, null);
+  assert.deepEqual(report.pocketed.map((p) => p.number), [BLACK], '正常结束的那颗黑球照旧算进袋');
+  assert.equal(report.spotted, null, '没有重摆，就不该有 spotted');
+});
+
 test('斯诺克：最后一颗红球之后打进彩球，这颗彩球仍然要回位（WPBSA 3.4）', () => {
   // 红球清空、刚打完最后一颗红球，这一杆是「自由彩球」。
   // 彩球阶段要等这颗自由彩球也打完才开始，所以它进袋必须回位——

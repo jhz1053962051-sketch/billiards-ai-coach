@@ -338,6 +338,10 @@ export function resolveSnooker(game, facts) {
   let winner = null;
   // 平分重摆黑球：这一杆本来是「继续」的，但重摆之后由对手先打。
   let respotTie = false;
+  // 被重摆回台面的球号（现在是黑球）。它虽然进过袋，但已经回到台面上了，
+  // 不能留在 report.pocketed 里——那份列表是「这一杆进了什么」，
+  // 上位拿它拼播报就会说「进 21 号」。八球/九球的 spotted 就是这个用法。
+  let spotted = null;
   // 黑球点被占时的让位播报，放进摘要（report.notes 只在日志里，界面看摘要）。
   let tieBlackNote = null;
   const onlyBlackBefore =
@@ -377,6 +381,11 @@ export function resolveSnooker(game, facts) {
       winner = null;
       ballOnNext = BLACK;
       respotTie = true;
+      spotted = BLACK;
+      // 重摆之后这一杆不「继续」，球权交给对手从 D 内开球。
+      // 必须在重摆判定里覆盖：只改下面的 next.turn 会留下「turn 已经换人、
+      // continuing 还是 true」的矛盾，摘要就会拼出「玩家 1 继续」。
+      continuing = false;
     } else {
       winner = st.scores[0] > st.scores[1] ? 0 : 1;
     }
@@ -385,7 +394,9 @@ export function resolveSnooker(game, facts) {
   // ---- 状态推进 ----
   if (!ended) {
     if (fouled || !continuing) next.turn = opp;
-    next.ballInHand = fouled && fouls.includes('scratch') ? { zone: 'd' } : null;
+    // 平分重摆黑球之后是从 D 区开球（不是从母球原位继续），所以就算没犯规
+    // 也要持球；zone 沿用本文件既有的 'd'（rules.js 的 placementAllowed 认这个值）。
+    next.ballInHand = respotTie || (fouled && fouls.includes('scratch')) ? { zone: 'd' } : null;
     next.phase = 'playing';
     next.winner = null;
   } else {
@@ -422,7 +433,10 @@ export function resolveSnooker(game, facts) {
     shooter: me,
     fouls: fouls.map((code) => ({ code, text: FOUL_TEXT[code] })),
     fouled,
-    pocketed: potted.filter((p) => !respotted.includes(p.number)),
+    // 回位过的彩球与被重摆的黑球都不算这一杆「进袋」：球已经在台面上了。
+    pocketed: potted.filter(
+      (p) => !respotted.includes(p.number) && !(spotted !== null && p.number === spotted)
+    ),
     cueScratched: facts.cueScratched,
     firstContact: facts.firstContact,
     railsAfterContact: facts.railsAfterContact,
@@ -430,7 +444,7 @@ export function resolveSnooker(game, facts) {
     continuing,
     ballInHand: next.ballInHand ? { player: next.turn, zone: next.ballInHand.zone } : null,
     requiresRerack: false,
-    spotted: null,
+    spotted,
     ended,
     winner,
     notes,
