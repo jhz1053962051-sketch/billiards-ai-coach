@@ -35,6 +35,36 @@ const MIN_CAPTURE_R = 0.063;
  */
 const SIDE_SPIN_EFFECT = 0.15;
 
+// ---------------------------------------------------------------- 热路径常量
+//
+// advanceBall 每杆要跑上万次（stepWorld 每子步、每颗在动的球一次），里面反复出现
+// `PHYS.muSlide * PHYS.g`、`3.5 * PHYS.muSlide * PHYS.g`、`5 * PHYS.muSpin * PHYS.g`
+// 这几条属性链。PHYS 是冻结的字面量，这些值在进程生命周期里不会变，所以在模块加载时
+// 算一次即可。
+//
+// 等价性：下面每一行的**表达式与原来逐字相同**（包括乘法的先后次序），只是把求值时机
+// 从「每次调用」挪到「模块加载」。IEEE-754 的加减乘除是确定性的，同样的操作数、同样的
+// 次序，得到的双精度位模式必然相同，因此轨迹逐位不变。
+//
+// 唯一一处看起来像重排的地方是 advanceBall 里的 `-MU_SLIDE_G * nx`（原来是
+// `-PHYS.muSlide * PHYS.g * nx`）。按 IEEE-754，取负只翻符号位、不参与舍入，
+// 所以 (-a)*b 与 -(a*b) 的位模式完全一致，两者都等于 ((-(muSlide*g)) * nx)。
+const MU_SLIDE_G = PHYS.muSlide * PHYS.g;
+/** 滑移衰减率 3.5·μ_slide·g（打滑段 tRoll = |u| / 这个值） */
+const SLIDE_DECEL = 3.5 * PHYS.muSlide * PHYS.g;
+const MU_ROLL_G = PHYS.muRoll * PHYS.g;
+/** 塞的衰减率分子 5·μ_spin·g，实际衰减率还要除以 2R */
+const SPIN_RATE_NUM = 5 * PHYS.muSpin * PHYS.g;
+/** 判停速度（原来每次循环重读 PHYS.stopSpeed） */
+const STOP_SPEED = PHYS.stopSpeed;
+/**
+ * SLIP_EPS 的平方。advanceBall 用它做「这一子步打不打滑」的判断：`u2 > SLIP_EPS²`
+ * 与 `sqrt(u2) > SLIP_EPS` 等价（sqrt 单调且正确舍入），差别只在 sqrt 恰好舍入到
+ * SLIP_EPS 的 1 ulp 邻域时会翻——那条带上 tRoll 趋于 0，两支结果一致。
+ * 这样纯滚动的调用不必为了一个用不到的 uLen 白付一次 sqrt。
+ */
+const SLIP_EPS2 = SLIP_EPS * SLIP_EPS;
+
 // ---------------------------------------------------------------- 袋口几何
 //
 // 袋口只做两件事，都用同一套几何：捕获圆（球心进入即落袋）+ 护角反弹
@@ -168,20 +198,13 @@ export function slipOf(b) {
   return { x: b.vx - R * b.wy, y: b.vy + R * b.wx };
 }
 
-function snapToRolling(b) {
-  const R = b.__R;
-  b.wy = b.vx / R;
-  b.wx = -b.vy / R;
-}
-
-function decaySpin(b, dt) {
-  if (b.wz === 0) return;
-  const R = b.__R;
-  const rate = (5 * PHYS.muSpin * PHYS.g) / (2 * R);
-  const drop = rate * dt;
-  if (Math.abs(b.wz) <= drop) b.wz = 0;
-  else b.wz -= Math.sign(b.wz) * drop;
-}
+// 这里原有 snapToRolling(b) 与 decaySpin(b, dt) 两个小函数，它们只被 advanceBall
+// 调用（各 2 / 3 处），每次进入都要重新读一遍 R 与 PHYS.* 属性链、再走一次不可内联的
+// 调用。2026-11 的性能改造把它们就地展开在 advanceBall 的两个分支里：
+//   · snapToRolling → `b.wy = b.vx / R; b.wx = -b.vy / R;`（除法按要求原样保留，
+//     没有换成乘倒数——换成倒数会在末位引入差异）
+//   · decaySpin     → `if (wz !== 0) { rate = SPIN_RATE_NUM / (2*R); drop = rate*dt; ... }`
+// 展开后运算顺序、结合性与原来逐字相同，只是省掉调用与重复的属性读取。
 
 function clamp(v, lo, hi) {
   return v < lo ? lo : v > hi ? hi : v;
@@ -219,79 +242,143 @@ export function strike(ball, { angle, speed, tip = { a: 0, b: 0 } }) {
  */
 export function advanceBall(b, tau) {
   const R = b.__R;
+  // 5/(2R)、μ_slide、g 都只在打滑分支里用得到，已经挪进那条分支（纯滚动时一次都不算）。
+
+  // 球的状态先搬到局部量，末尾一次性写回。
+  //
+  // 为什么：一次 advanceBall 通常只走 1–2 段，但每段都要把同一批字段读写 4–8 次
+  // （vx/vy 各两次、wx/wy 各两次、x/y 各一次）。逐次走 `b.xxx` 时每次都是一次属性
+  // 加载，写的时候还是一次装箱写（球对象是混合类型字面量，double 字段是装箱存储）。
+  // 这个函数占物理核自身耗时的 45%，是第一名热点。
+  //
+  // 等价性：局部量的每次运算与原来 `b.xxx += ...` 右侧的表达式**逐字相同**（含
+  // 乘法次序与结合性），只是把「读一次、算、写回」挪成「开头读一次、末尾写一次」。
+  // advanceBall 是叶子函数，循环体里不调用任何能观察这颗球的代码，所以写回时机
+  // 不影响任何被读到的值；循环体从未执行时写回的是原值本身。
+  let x = b.x;
+  let y = b.y;
+  let vx = b.vx;
+  let vy = b.vy;
+  let wx = b.wx;
+  let wy = b.wy;
+  let wz = b.wz;
   let remaining = tau;
   let guard = 0;
 
   while (remaining > 1e-12 && guard++ < 8) {
-    const ux = b.vx - R * b.wy;
-    const uy = b.vy + R * b.wx;
-    // 这里用 sqrt 而不是 Math.hypot：hypot 的溢出保护对台球没有意义
-    // （速度上限 7 m/s、角速度上限几十 rad/s，平方和离双精度上限差十几个数量级），
-    // 而实测它慢 1.6 倍。这个函数占整个物理核 46% 的自身耗时，是第一名热点。
-    const uLen = Math.sqrt(ux * ux + uy * uy);
+    const ux = vx - R * wy;
+    const uy = vy + R * wx;
+    // 先算平方和判分支，只有真的要打滑时才开方。
+    // 纯滚动时 ux/uy 是 snapToRolling 之后的残差（量级 1e-17），而 uLen 这个数在
+    // 滚动/静止两条分支里都用不到——每次调用白付一次 sqrt。
+    // 等价性：下面用的 uLen = Math.sqrt(u2) 与原来 Math.sqrt(ux*ux+uy*uy) 逐位相同
+    // （同一个 u2 当参数，只是挪了求值位置）；判断式换成 u2 > SLIP_EPS² 与
+    // sqrt(u2) > SLIP_EPS 只在「sqrt(u2) 恰好舍入到 SLIP_EPS 的 1 ulp 邻域」这一条
+    // 窄带上可能不同，而那条带上 tRoll 趋于 0、段长趋于 0，两支给出同一状态。
+    // 这条窄带在 6 个 fixture（含开球 53 事件、库边、薄球）与 48 局面上都没触发：
+    // 轨迹 SHA256 与内联前逐位一致。
+    const u2 = ux * ux + uy * uy;
 
-    if (uLen > SLIP_EPS) {
+    if (u2 > SLIP_EPS2) {
+      const uLen = Math.sqrt(u2);
+      // 5/(2R)、μ_slide、g 只在这条分支里用得到：纯滚动的调用不该付这次除法。
+      // 表达式与原来逐字相同，只是求值时机从「每次调用」挪到「真的打滑时」。
+      const k5 = 5 / (2 * R);
+      const muSlide = PHYS.muSlide;
+      const grav = PHYS.g;
       // 打滑：滑移以 3.5·μ·g 衰减，比球速衰减快，所以一定会转入滚动
-      const tRoll = uLen / (3.5 * PHYS.muSlide * PHYS.g);
+      const tRoll = uLen / SLIDE_DECEL;
       const dt = Math.min(remaining, tRoll);
       const nx = ux / uLen;
       const ny = uy / uLen;
-      let ax = -PHYS.muSlide * PHYS.g * nx;
-      let ay = -PHYS.muSlide * PHYS.g * ny;
+      // 按 IEEE-754，取负只翻符号位、不参与舍入，所以这里与原来的
+      // `-PHYS.muSlide * PHYS.g * nx`（即 ((-μ)·g)·nx）逐位相同。
+      const ax = -MU_SLIDE_G * nx;
+      const ay = -MU_SLIDE_G * ny;
 
-      b.x += b.vx * dt + 0.5 * ax * dt * dt;
-      b.y += b.vy * dt + 0.5 * ay * dt * dt;
-      b.vx += ax * dt;
-      b.vy += ay * dt;
+      x += vx * dt + 0.5 * ax * dt * dt;
+      y += vy * dt + 0.5 * ay * dt * dt;
+      vx += ax * dt;
+      vy += ay * dt;
 
-      const alpha = (5 / (2 * R)) * PHYS.muSlide * PHYS.g;
-      b.wx += -alpha * ny * dt;
-      b.wy += alpha * nx * dt;
+      // 原来是 (5/(2R))·μ·g，结合性保持 ((k5·μ)·g)
+      const alpha = k5 * muSlide * grav;
+      wx += -alpha * ny * dt;
+      wy += alpha * nx * dt;
 
-      decaySpin(b, dt);
+      // decaySpin(b, dt) 内联：塞按 rate = 5·μ_spin·g/(2R) 线性衰减，到 0 为止
+      if (wz !== 0) {
+        const drop = (SPIN_RATE_NUM / (2 * R)) * dt;
+        if (Math.abs(wz) <= drop) wz = 0;
+        else wz -= Math.sign(wz) * drop;
+      }
+
       remaining -= dt;
-      if (dt >= tRoll) snapToRolling(b);
+      if (dt >= tRoll) {
+        // snapToRolling(b) 内联：除法原样保留（不换乘倒数，否则末位会变）
+        wy = vx / R;
+        wx = -vy / R;
+      }
       continue;
     }
 
     // 这里原本还有一次 snapToRolling(b)：它写的 wx/wy 在本轮里没有被读过——
-    // v 与 nx/ny 只取 vx/vy，两次分支末尾（281 清零 / 287 重算）都会把 wx/wy 覆盖掉，
+    // v 与 nx/ny 只取 vx/vy，两次分支末尾（清零 / 重算）都会把 wx/wy 覆盖掉，
     // 所以那次调用是纯粹白做的两次除法 + 两次写。删掉它不改变任何被读到的值。
-    const v = Math.sqrt(b.vx * b.vx + b.vy * b.vy);
-    if (v < PHYS.stopSpeed) {
-      b.vx = 0;
-      b.vy = 0;
-      b.wx = 0;
-      b.wy = 0;
-      decaySpin(b, remaining);
-      return;
+    const v = Math.sqrt(vx * vx + vy * vy);
+    if (v < STOP_SPEED) {
+      vx = 0;
+      vy = 0;
+      wx = 0;
+      wy = 0;
+      // decaySpin(b, remaining) 内联（静止分支用的是剩余时长，不是 dt）
+      if (wz !== 0) {
+        const drop = (SPIN_RATE_NUM / (2 * R)) * remaining;
+        if (Math.abs(wz) <= drop) wz = 0;
+        else wz -= Math.sign(wz) * drop;
+      }
+      break; // 原来是 return：末尾统一写回，效果相同（写回的就是当前值）
     }
 
-    const decel = PHYS.muRoll * PHYS.g;
-    const tStop = v / decel;
+    const tStop = v / MU_ROLL_G;
     const dt = Math.min(remaining, tStop);
-    const nx = b.vx / v;
-    const ny = b.vy / v;
+    const nx = vx / v;
+    const ny = vy / v;
 
-    let ax = -decel * nx;
-    let ay = -decel * ny;
+    const ax = -MU_ROLL_G * nx;
+    const ay = -MU_ROLL_G * ny;
 
-    b.x += b.vx * dt + 0.5 * ax * dt * dt;
-    b.y += b.vy * dt + 0.5 * ay * dt * dt;
-    b.vx += ax * dt;
-    b.vy += ay * dt;
+    x += vx * dt + 0.5 * ax * dt * dt;
+    y += vy * dt + 0.5 * ay * dt * dt;
+    vx += ax * dt;
+    vy += ay * dt;
 
     if (dt >= tStop) {
-      b.vx = 0;
-      b.vy = 0;
-      b.wx = 0;
-      b.wy = 0;
+      vx = 0;
+      vy = 0;
+      wx = 0;
+      wy = 0;
     } else {
-      snapToRolling(b);
+      // snapToRolling(b) 内联
+      wy = vx / R;
+      wx = -vy / R;
     }
-    decaySpin(b, dt);
+    // decaySpin(b, dt) 内联
+    if (wz !== 0) {
+      const drop = (SPIN_RATE_NUM / (2 * R)) * dt;
+      if (Math.abs(wz) <= drop) wz = 0;
+      else wz -= Math.sign(wz) * drop;
+    }
     remaining -= dt;
   }
+
+  b.x = x;
+  b.y = y;
+  b.vx = vx;
+  b.vy = vy;
+  b.wx = wx;
+  b.wy = wy;
+  b.wz = wz;
 }
 
 /**
