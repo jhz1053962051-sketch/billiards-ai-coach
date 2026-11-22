@@ -435,11 +435,17 @@ test('袋角：撞在护角上会被弹回台面，不会被「夹」死在袋�
   // 旧实现把越过库面的球直接清掉法向速度——球一到袋角就停在原地，
   // 接下来常常被当成落袋（实测那版在 (2.4996, 0.0592) 判进右下袋）。
   // 新实现按护角橡皮的恢复系数弹回来，球要能跑回台面中间去。
+  //
+  // 局面从 (2.53, 0.12)/(1.2, -2.0) 改成 (2.52, 0.15)/(0.8, -0.6)：原局面在右下袋
+  // 捕获圆边界上只差 1 mm 就判进袋，库边恢复系数从 0.55→0.95 那点微小差别就能
+  // 让结果翻面（它本来该测的是「护角会不会把球弹回来」，不是「球擦着捕获圆边缘
+  // 时判进还是判不进」）。新局面的球同样从袋口缝隙挤出台面、撞在护角上，但弹回后
+  // 停在 (1.768, 0.281)，离最近的袋口还有 12 cm，判据不再压在小数点上。
   const play = () => {
-    const world = createWorld(table, [createBall('cue', 2.53, 0.12, { number: 0 })]);
+    const world = createWorld(table, [createBall('cue', 2.52, 0.15, { number: 0 })]);
     const b = world.balls[0];
-    b.vx = 1.2;
-    b.vy = -2.0;
+    b.vx = 0.8;
+    b.vy = -0.6;
     const events = [];
     let t = 0;
     while (t < 8 && !allStopped(world)) {
@@ -450,18 +456,22 @@ test('袋角：撞在护角上会被弹回台面，不会被「夹」死在袋�
   };
 
   const kept = PHYS.jawRestitution;
-  try {
-    const now = play();
-    assert.ok(now.jaws > 0, '这一杆必须真的撞到护角，否则这条测试什么也没证明');
-    assert.equal(now.b.pocketed, false, '撞在护角上不该被吞进袋');
-    assert.ok(now.b.x < table.length - 0.5, `球没弹回台面：停在 x=${now.b.x}`);
+  const keptMax = PHYS.cushionRestitutionMax;
+  const now = play();
+  assert.ok(now.jaws > 0, '这一杆必须真的撞到护角，否则这条测试什么也没证明');
+  assert.equal(now.b.pocketed, false, '撞在护角上不该被吞进袋');
+  assert.ok(now.b.x < table.length - 0.5, `球没弹回台面：停在 x=${now.b.x}`);
 
-    // 对照组：恢复系数为 0 就等于旧行为（法向速度清零），这球会被吞掉。
-    // 少了这一条，上面两条在「袋角根本没参与」的实现下也可能过。
-    PHYS.jawRestitution = 0;
+  // 对照组：恢复系数压到 0（护角与库边的上限一起清零，法向速度才会真的归零，
+  // 也就是旧实现的行为），这球会被夹在袋口吞掉。
+  // 少了这一条，上面两条在「袋角根本没参与」的实现下也可能过。
+  PHYS.jawRestitution = 0;
+  PHYS.cushionRestitutionMax = 0;
+  try {
     const old = play();
     assert.equal(old.b.pocketed, true, '法向清零的旧行为会把这球吞掉，对照失败说明差别不是这里来的');
   } finally {
     PHYS.jawRestitution = kept;
+    PHYS.cushionRestitutionMax = keptMax;
   }
 });

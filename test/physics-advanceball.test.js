@@ -17,6 +17,14 @@
 //      + 事件序列），覆盖开球 53 个事件、斯诺克安全球 63 个事件、库边、薄球、组合球。
 //
 // 两层都必须逐位一致；任何一位不同都说明有人改了浮点顺序，不是「误差范围内」。
+//
+// 2026-11 库边碰撞按能量守恒重记账（带塞出库不再凭空加速）之后，第二层的 6 条整杆
+// 轨迹基线重新钉过一次：库边恢复系数上限从 1.0 降到 0.95、切向冲量加了滑移归零上界、
+// 侧旋增益改用碰撞后的 wz，母球过库后的速度与滚动都变了，帧数与哈希必然跟着变。
+// 这次变化是有意的物理修正，不是浮点顺序被动过——重钉时逐条核对过：事件类型与
+// 顺序没变（f6 的 63 个事件、f5 的 53 个事件一条不差，f6 的哈希甚至一位没变），
+// 变的只是库边碰撞之后的速度数值。第一层的 12 个黄金矢量一个字都没动：
+// advanceBall 本身没有改。
 import crypto from 'node:crypto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -117,25 +125,25 @@ test('advanceBall 逐位等价：12 个固定状态与内联前完全一致', ()
 // 每帧把世界内所有球的 x/y/vx/vy/wx/wy/wz/pocketed 按双精度原字节串起来，
 // 连同事件序列一起哈希——任何一次浮点顺序变化都会让某个哈希变掉。
 const TRAJECTORIES = [
-  { id: 'f1-straight', table: 'pool9', frames: 649, events: 4,
+  { id: 'f1-straight', table: 'pool9', frames: 615, events: 4,
     balls: [[0, 0.635, 0.635], [1, 1.905, 0.635]],
     shot: { angle: 0, speed: 2.6, tip: { a: 0, b: 0.2 } },
-    hash: '4a9ca61cdb7281c34335e93ea5040d8ca3c129d69a78234d5eda00d7ad208363' },
-  { id: 'f2-thin', table: 'pool9', frames: 848, events: 5,
+    hash: 'e556568bfe617c3cdc80ce2a0bce242d52351ed4b6ea33605b0b6abd09a52e43' },
+  { id: 'f2-thin', table: 'pool9', frames: 821, events: 5,
     balls: [[0, 0.6, 0.7], [2, 1.35, 0.66]],
     shot: { angle: Math.atan2(-0.04, 0.75) + (1.7 * Math.PI) / 180, speed: 3.1, tip: { a: 0.15, b: 0.3 } },
-    hash: '26d8ffa924ba0fd8d4e403f14b13828494e06851c801462c9ef55763d404c007' },
-  { id: 'f3-cushion', table: 'pool9', frames: 716, events: 3,
+    hash: '70b04ad72779b37ddf1a7344a82e400b6909ad422c1667151ce9e0337bf03079' },
+  { id: 'f3-cushion', table: 'pool9', frames: 751, events: 3,
     balls: [[0, 0.4, 0.5], [7, 1.9, 0.3]],
     shot: { angle: (52 * Math.PI) / 180, speed: 3.4, tip: { a: 0.45, b: 0.15 } },
-    hash: 'ae68c760963af1427605612940472275ef828a968d2747a5f6169379811e1c58' },
-  { id: 'f4-combo', table: 'pool9', frames: 481, events: 4,
+    hash: '43ed1c040edcb29ccea176dda9d32afa0b7ad9daebeee99124423e8d74ec4ac3' },
+  { id: 'f4-combo', table: 'pool9', frames: 480, events: 4,
     balls: [[0, 0.45, 0.95], [3, 1.1, 0.62], [5, 1.75, 0.585]],
     shot: { angle: (-18 * Math.PI) / 180, speed: 3.8, tip: { a: -0.2, b: 0.1 } },
-    hash: 'fcc4d82250665c5d3b856e5af57c43f4cb24aa1f4de137c56b53c282bb0660f1' },
+    hash: 'eecc2998fc31fbb1343634708b255e739ab6ce1631cec435504a3ca4e7cd95a1' },
   { id: 'f5-break', table: 'pool9', frames: 746, events: 53, rack: 'standard',
     shot: { angle: 0, speed: 6.6, tip: { a: 0, b: -0.1 } },
-    hash: 'df4de363e1e680a46aa773c9dc818190c6aaba6bbc6ba63cc9dfbbc05a9a4e6f' },
+    hash: '7a2a0903bb51d60dfe0ac63f261d39a4e44add3dc880950166d7f6b0f2b886ea' },
   { id: 'f6-snooker-safety', table: 'snooker', frames: 618, events: 63, rack: 'snooker',
     shot: { angle: (2.5 * Math.PI) / 180, speed: 1.5, tip: { a: -0.35, b: -0.25 } },
     hash: '5b7c1c33fd1f0b6062d27913138ca82ec6766eb6269973524ed47bb03996bb37' },
@@ -189,7 +197,7 @@ test('整杆轨迹 SHA256 与内联前逐位一致（6 个典型局面）', () =
   // 合并哈希：6 个局面一起看，等价于验收里跑的那份 frames 基线
   assert.equal(
     crypto.createHash('sha256').update(overall.join('\n')).digest('hex'),
-    '3c47da1f0dd07f605ff7abdcc7c0597fe6d42bc0e4795697cd353e95ea1b4173',
+    '279dc7321d88bb9853f6dc69224b8bd42a6bc48bd5dc77e8d71bfcba0e1b91e9',
     '合并轨迹哈希变了',
   );
 });

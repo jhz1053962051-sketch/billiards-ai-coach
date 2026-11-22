@@ -591,19 +591,26 @@ function resolveCushion(b, cushion, events, opts = {}) {
 
   // 改进的库边恢复系数模型：
   // - 基础恢复系数 PHYS.cushionRestitution (0.85)，袋角用 PHYS.jawRestitution (0.55)
-  // - 速度越高，恢复系数越接近 1（库边更"硬"）
+  // - 速度越高，恢复系数越接近上限（库边更"硬"）
   // - 速度越低，恢复系数越低（库边更"软"，能量损失更多）
   //
-  // 公式：e = e_base + (1 - e_base) * min(1, |vn| / v_reference)
-  // v_reference = 4 m/s 是参考速度，大约是中高杆的力度
+  // 公式：e = e_base + (e_max - e_base) * min(1, |vn| / cushionSpeedRef)
+  // cushionSpeedRef = 4 m/s 是参考速度，大约是中高杆的力度
+  //
+  // e_max 必须严格小于 1（PHYS.cushionRestitutionMax = 0.95）。以前这里写的
+  // 是 e_base + (1 - e_base) * factor，|vn| >= 4 m/s 时 e 饱和到 1.0，也就是
+  // 大力撞库完全不损失法向能量。完全弹性库边在真台球上不存在，而且这一项
+  // 恰恰是下面切向那部分唯一可以合法动用的能量来源——e 一旦等于 1，
+  // 加塞项凭空多出来的切向速度就一分钱都不用付，原样带进出库速度。
   //
   // 效果：
-  // - 轻碰 (|vn| = 0.5 m/s): e ≈ 0.87
-  // - 中力 (|vn| = 2 m/s):   e ≈ 0.93
-  // - 暴冲 (|vn| = 6 m/s):   e ≈ 0.96
+  // - 轻碰 (|vn| = 0.5 m/s): e ≈ 0.863
+  // - 中力 (|vn| = 2 m/s):   e ≈ 0.90
+  // - 暴冲 (|vn| = 6 m/s):   e = 0.95（不再到 1.0）
   const baseE = opts.restitution ?? PHYS.cushionRestitution;
-  const speedFactor = Math.min(1, Math.abs(vn) / 4);
-  const e = baseE + (1 - baseE) * speedFactor;
+  const maxE = opts.maxRestitution ?? PHYS.cushionRestitutionMax;
+  const speedFactor = Math.min(1, Math.abs(vn) / PHYS.cushionSpeedRef);
+  const e = baseE + (maxE - baseE) * speedFactor;
   const vnAfter = -e * vn;
   const jn = vnAfter - vn;
 
@@ -611,29 +618,44 @@ function resolveCushion(b, cushion, events, opts = {}) {
   // 1. 库鼻接触点高于球心：沿库方向的运动大部分被滚动吸收
   // 2. 侧旋 (wz) 会改变出库角度：这是"加塞"影响反弹角的物理机制
   //
-  // 侧旋影响模型：
-  // - 侧旋角速度 wz 在接触点产生切向速度 R * wz
-  // - 这个速度通过摩擦转化为切向冲量
-  // - 最终改变球的出库角度
+  // 切向冲量 jt 与它引起的角冲量 -(5*jt)/(2R) 是一对力偶，配对结算后
+  //   ΔE = jt * (vt - R*wz) + (7/4) * jt²
+  // 只要 |jt| <= |vt - R*wz| / (7/2)，这一对就只减不增。
   //
+  // 以前滑移写成 u = vt * cushionRollSlip - R*wz，侧旋与切向速度反向时
+  // 把滑移夸大到 1.6 倍（实测 8.86 对真实接触点滑移 5.51 m/s），冲量
+  // 越过「把滑移归零」那个点之后，摩擦就开始对球做正功，单库给母球加 0.8 J。
+  // 修法不是改滑移（u 还是那个唯象的等效滑移，wz = 0 时与以前逐位相同），
+  // 而是给冲量加一条上界：不许超过「让真实接触点滑移归零」所需的冲量。
+  // 有了这条上界 |jt| <= |vt - R*wz| / (7/2)，上面那对力偶的 ΔE 恒 <= 0。
+  const ut = vt * PHYS.cushionRollSlip - R * b.wz;
+  const jtCap = Math.abs(vt - R * b.wz) * (2 / 7);
+  const jt = -Math.sign(ut) *
+    Math.min(PHYS.cushionFriction * jn, Math.abs(ut) * (2 / 7), jtCap);
+  const vtAfter = vt + jt;
+
+  // 侧旋在碰撞中会部分转化为球的旋转
+  // 简化模型：假设 30% 的侧旋在碰撞中损失，再叠加切向冲量的角冲量
+  b.wz = b.wz * 0.7 - (5 * jt) / (2 * R);
+
   // 侧旋对出库角的最大影响约 8-10°（实测值范围 7-12°，取决于库边硬度和击球力度）。
   // 袋角连带 opts.spinKick === false 关掉这一项：护角是粗糙的实心橡皮，
   // 侧旋在那里基本吃不住，再套库边的侧旋模型只会凭空造出角度。
-  const ut = vt * PHYS.cushionRollSlip - R * b.wz;
-  const jt = -Math.sign(ut) * Math.min(PHYS.cushionFriction * jn, Math.abs(ut) * (2 / 7));
-  const vtAfter = vt + jt;
-
+  //
+  // 这一项是唯象项（不是从冲量积分推出来的），所以它只能花「这次碰撞已经
+  // 放掉的能量」：法向损失 (1 - e²)vn² 是唯一预算，出库合速度不得超过入射
+  // 合速度。以前 kick 用碰撞前的 wz，代价只是「wz 乘 0.7」——两者量纲都不
+  // 成对（kick 直接改速度，0.7 只削自旋能量），而且那 0.7 早就被 jt 的角
+  // 冲量占用了一次。实测 a=+0.5 时每撞一次库净赚 1.07 J。现在 kick 用碰撞
+  // 之后的 wz，并把切向速度夹进上面那个预算里。
   const spinKick = opts.spinKick === false
     ? 0
     : SIDE_SPIN_EFFECT * b.wz * R * Math.min(1, Math.abs(vn) / 3);
+  const vtBudget = Math.sqrt(vt * vt + (1 - e * e) * vn * vn);
+  const vtOut = clamp(vtAfter + spinKick, -vtBudget, vtBudget);
 
-  b.vx = vnAfter * nx + (vtAfter + spinKick) * tx;
-  b.vy = vnAfter * ny + (vtAfter + spinKick) * ty;
-
-  // 侧旋在碰撞中会部分转化为球的旋转
-  // 简化模型：假设 30% 的侧旋在碰撞中损失
-  b.wz *= 0.7;
-  b.wz += -(5 * jt) / (2 * R);
+  b.vx = vnAfter * nx + vtOut * tx;
+  b.vy = vnAfter * ny + vtOut * ty;
 
   if (events && Math.abs(vn) > RAIL_EVENT_SPEED) {
     events.push({ type: 'cushion', ball: b.id, rail: cushion.id, speed: Math.abs(vn) });
@@ -764,7 +786,14 @@ function settlePockets(world, events) {
         b,
         { id: 'jaw', ...rail },
         null,
-        { restitution: PHYS.jawRestitution, spinKick: false }
+        // 护角同样是橡皮，恢复系数也不许饱和到 1.0；上限沿用库边那个 0.95。
+        // 0.55 → 0.95 的曲线在袋角常见入射速度（0.2-1.5 m/s）下与旧曲线差不到 2%，
+        // 只有暴冲级别的护角碰撞才从「完全弹性」降到 0.95。
+        {
+          restitution: PHYS.jawRestitution,
+          maxRestitution: PHYS.cushionRestitutionMax,
+          spinKick: false,
+        }
       );
       if (events && vn < 0 && speedBefore > RAIL_EVENT_SPEED) {
         events.push({ type: 'jaw', ball: b.id, speed: speedBefore });
