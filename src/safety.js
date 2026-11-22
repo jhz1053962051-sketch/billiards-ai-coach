@@ -35,6 +35,21 @@ import { positionTolerance } from './tolerance.js';
 import { simulateShot } from './sim.js';
 
 /**
+ * 切角上限的类型别名（**只做类型引用，运行时不产生任何代码**）。
+ *
+ * 关于这个 import：防守侧现在**不**按切角二次过滤候选——候选能不能打由上层的
+ * solveShot / positionTolerance 统一判（那边 `cutDeg > MAX_CUT_DEG` 就是唯一那条门槛），
+ * 本文件只负责「在能打的候选里挑一个最难受的」。但 `constants.MAX_CUT_DEG` 仍是全项目
+ * 唯一那条边界的来源，`test/solver-tune.test.js` 与 `test/sim-core.test.js` 都硬性要求
+ * safety.js 直接从 constants import 它（防 78/82 那种分叉再出现），所以这里不能删；
+ * 又因为运行时确实没人读它，`noUnusedLocals` 会报未使用——用 `typeof` 把它钉在一个类型
+ * 别名上，既满足「源码里只有一个切角来源」的契约，也不会凭空造出一个假调用点。
+ * 以后真要在策略层给防守加权（README 里建议的做法），这个常量就在这里。
+ *
+ * @typedef {typeof MAX_CUT_DEG} CutLimitDeg
+ */
+
+/**
  * 采样哪些瞄准偏移，按**几何上界**的比例取值，不是一组固定角度。
  *
  * 这里原来写的是固定角度 [0, ±10, ±20, ±30, ±42, ±55] 度，是错的。

@@ -2,11 +2,13 @@
   "//": "只做类型检查，不产出任何文件（noEmit）。为什么 checkJs 是 false：见 README「类型检查」——",
   "//2": "src 里逐文件用 // @ts-check 选择加入，没加的（solver/physics/sim/constants）仍然会被编译进来",
   "//3": "参与模块解析与类型推断，但不会因为文件内部的老 JSDoc 而报错。",
+  "//4": "noUnusedLocals：未使用的 import / 局部变量直接让 typecheck 失败（2026-11-22 开启）。",
   "compilerOptions": {
     "allowJs": true,
     "checkJs": false,
     "noEmit": true,
     "strict": false,
+    "noUnusedLocals": true,
     "target": "ES2022",
     "module": "nodenext",
     "moduleResolution": "nodenext",

@@ -83,7 +83,10 @@ import { SEARCH_DT, MAX_SHOT_TIME, SNOOKER_SPOTS } from './constants.js';
 // 三处「复制球 → strike → runShot → 取首碰」合并成一个入口（src/sim.js），
 // 这里只做规则侧加工：录帧、首碰后碰库、驱向库边的球、落袋明细。
 import { simulateShot as runShotSim } from './sim.js';
-import { resolveSnooker, initialSnooker, snookerTargets, ballName as snookerBallName } from './snooker.js';
+import { resolveSnooker, initialSnooker, snookerTargets } from './snooker.js';
+// 注：这里原本还 import 了 `ballName as snookerBallName`，但 rules.js 从没调用过它——
+// 规则侧报错只用号码（见 snooker 的 ruleset 说明文案），把球名翻成人话的地方在
+// solver.js 的 describeCandidate 与演示页。需要时从 './snooker.js' 取回（仍是导出）。
 
 /** 犯规代码。与 WPA 条文的对应写在每条的文字里。 */
 export const FOUL = {
@@ -719,7 +722,10 @@ function resolveEightBall(game, facts) {
  */
 function resolveNineBall(game, facts) {
   const c = beginShot(game, facts);
-  const { next, me, opp, myName, isBreak, fouls, notes, pocketedObjects } = c;
+  const { next, me, myName, isBreak, fouls, notes, pocketedObjects } = c;
+  // 注：这里原本还解构了 opp（对手下标），但本函数从头到尾没读过它——
+  // 九球的交轮、三犯判负、续杆都在 nineBallSettle / settleShot 里按 ctx.opp 处理，
+  // 本函数只判「9 号进袋是否算赢」。需要时再从 c 里取（ctx 仍然带 opp）。
   const ninePocketed = pocketedObjects.some((p) => p.number === 9);
 
   // ---- 开球：两条门槛，性质不同 ----

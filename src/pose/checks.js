@@ -22,11 +22,13 @@ import {
   DEG,
   angleAt,
   angleFromUp,
-  pointLineDistance,
-  straightnessError,
   minVisibility,
   frameInset,
 } from './landmarks.js';
+// 注：这里原本还 import 了 pointLineDistance 与 straightnessError，两个都没用上——
+// 七条姿态检查的点线关系全走 angleAt / angleFromUp（见 checkBridgeArmStraight 等），
+// 没有一处需要「点到直线距离」或「折线直度」。需要时从 './landmarks.js' 取回即可，
+// 两者仍是 landmarks 的导出。
 
 // ---------------------------------------------------------------- 阈值配置
 // 全部集中在这里，方便以后用真实录像重新标定。good 是「推荐区间」，
