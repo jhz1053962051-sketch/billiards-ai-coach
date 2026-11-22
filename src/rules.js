@@ -726,6 +726,9 @@ function resolveNineBall(game, facts) {
   // ---- 续杆 ----
   let continuing = false;
   if (!ended && !fouled) continuing = pocketedObjects.length > 0;
+  // Reg.16 的三球过线不达标不是犯规，但球权已经交出去了（下面是 pendingChoice
+  // 那条分支）：报告里不能还写「继续」，否则摘要会和 turn 自相矛盾。
+  if (threeBallFailed) continuing = false;
 
   // ---- 状态推进 ----
   let pendingChoice = null;

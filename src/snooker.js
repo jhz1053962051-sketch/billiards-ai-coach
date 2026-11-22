@@ -100,6 +100,58 @@ export function spotFor(table, number) {
   }
 }
 
+/**
+ * 平分重摆黑球时该把黑球放哪。
+ *
+ * 规则只说「黑球摆回自己的点位」；点位被占时按「尽量靠近自己的点位」处理
+ * （WPBSA 3.4 末段的平分重摆）。这里的做法：点位空着就摆回点位；被占就沿
+ * 中线（y = 台面中线）朝顶库方向（x 增大）逐个位置试，取第一个与所有球都
+ * 隔开 2R 以上的位置。
+ *
+ * 留 1e-4 m 余量是必须的：正好压在 2R 上会被浮点误差判成重叠，物理核下一步
+ * 就把两颗球弹开了——那样的起始局面在真台球上根本不会出现。
+ *
+ * 整条中线都占满时退到离黑球点最近的空位（kind = 'free'），把播报交给调用方。
+ *
+ * @param {object} table
+ * @param {object[]} balls 当前局面（含黑球自身）
+ * @param {object} black 要重摆的黑球
+ * @returns {{x:number, y:number, kind:'spot'|'line'|'free'|'blocked', offset:number}}
+ */
+function blackRespotPosition(table, balls, black) {
+  const spot = spotFor(table, BLACK);
+  const R = table.ballRadius;
+  const others = balls.filter((b) => b !== black && !b.pocketed);
+  const minDist = 2 * R + 1e-4;
+  const clear = (x, y) =>
+    x >= table.bounds.minX &&
+    x <= table.bounds.maxX &&
+    y >= table.bounds.minY &&
+    y <= table.bounds.maxY &&
+    others.every((o) => Math.hypot(o.x - x, o.y - y) >= minDist);
+
+  if (clear(spot.x, spot.y)) return { x: spot.x, y: spot.y, kind: 'spot', offset: 0 };
+
+  const step = R * 0.25;
+  for (let d = step; spot.x + d <= table.bounds.maxX; d += step) {
+    if (clear(spot.x + d, spot.y)) {
+      return { x: spot.x + d, y: spot.y, kind: 'line', offset: d };
+    }
+  }
+
+  const free = findFreeSpot(table, others, R, spot);
+  if (free) {
+    return {
+      x: free.x,
+      y: free.y,
+      kind: 'free',
+      offset: Math.hypot(free.x - spot.x, free.y - spot.y),
+    };
+  }
+  // 整台连一个空位都找不到（22 颗球塞满一张台，实际不会发生）：只能摆回点位。
+  return { x: spot.x, y: spot.y, kind: 'blocked', offset: 0 };
+}
+
 /** 建局时的斯诺克状态。 */
 export function initialSnooker(reds = 15) {
   return { scores: [0, 0], ballOn: 'red', reds };
@@ -233,12 +285,15 @@ export function resolveSnooker(game, facts) {
   }
 
   // ---- 彩球回位 ----
-  // 台上有红球时，彩球进袋一律回位；彩球阶段合法打进的不回位。
-  // 犯规打进的彩球，两个阶段都要回位。
+  // 台上有红球时，彩球进袋一律回位；刚打进红球之后那一杆的「自由彩球」也要回位，
+  // 包括最后一颗红球之后的那一次——WPBSA 3.4 里彩球阶段是「红球清空、并且最后一颗
+  // 自由彩球也打完之后」才开始的，所以红球数归零并不代表已经进入彩球阶段。
+  // 只有彩球阶段本身（ballOn 是具体号码）合法打进的彩球不回位；犯规打进的一律回位。
   const redsLeft = next.balls.filter((b) => isRed(b.number) && !b.pocketed).length;
+  const colorPhase = typeof ballOn === 'number';
   const respotted = [];
   for (const p of pottedColors) {
-    if (!(redsLeft > 0 || fouled)) continue;
+    if (colorPhase && !fouled) continue;
     const ball = next.balls.find((b) => b.id === p.id);
     if (!ball) continue;
     const spot = spotFor(next.table, ball.number);
@@ -283,6 +338,8 @@ export function resolveSnooker(game, facts) {
   let winner = null;
   // 平分重摆黑球：这一杆本来是「继续」的，但重摆之后由对手先打。
   let respotTie = false;
+  // 黑球点被占时的让位播报，放进摘要（report.notes 只在日志里，界面看摘要）。
+  let tieBlackNote = null;
   const onlyBlackBefore =
     facts.onTableBefore.every((n) => n === BLACK) && facts.onTableBefore.includes(BLACK);
   if (fouled && redsLeft === 0 && onlyBlackBefore) {
@@ -294,19 +351,32 @@ export function resolveSnooker(game, facts) {
     ended = true;
     if (st.scores[0] === st.scores[1]) {
       // 平分：黑球重摆，由对手从 D 内开球（规则原文是重摆黑球继续）。
+      notes.push('比分相同：黑球重摆，继续打。');
       const black = next.balls.find((b) => b.number === BLACK);
       if (black) {
-        const spot = spotFor(next.table, BLACK);
+        // 黑球点上可能停着母球或别的球，直接摆上去就是一颗球压另一颗——
+        // 物理上不可能出现的起始局面，必须按「尽量靠近黑球点」避让。
+        const placed = blackRespotPosition(next.table, next.balls, black);
         black.pocketed = false;
         black.pocket = undefined;
-        black.x = spot.x;
-        black.y = spot.y;
+        black.x = placed.x;
+        black.y = placed.y;
+        black.vx = black.vy = black.wx = black.wy = black.wz = 0;
+        if (placed.kind === 'line') {
+          notes.push(
+            `黑球点被占：黑球沿中线向顶库方向让到 ${(placed.offset * 100).toFixed(1)} cm 处。`
+          );
+        } else if (placed.kind === 'free') {
+          tieBlackNote = '黑球点与中线都被占，黑球摆在离黑球点最近的空位';
+          notes.push(`黑球点与整条中线都被占住：${tieBlackNote}。`);
+        } else if (placed.kind === 'blocked') {
+          notes.push('黑球点被占，台面上又找不到空位：黑球只能摆回黑球点。');
+        }
       }
       ended = false;
       winner = null;
       ballOnNext = BLACK;
       respotTie = true;
-      notes.push('比分相同：黑球重摆，继续打。');
     } else {
       winner = st.scores[0] > st.scores[1] ? 0 : 1;
     }
@@ -333,6 +403,7 @@ export function resolveSnooker(game, facts) {
   else if (gained > 0) parts.push(`得 ${gained} 分`);
   else parts.push('没有球进袋');
   if (respotted.length) parts.push(`回位：${respotted.map(ballName).join('、')}`);
+  if (tieBlackNote) parts.push(tieBlackNote);
   parts.push(`${st.scores[0]} : ${st.scores[1]}`);
   if (!ended) {
     parts.push(ballOnNext === 'red' ? '该打红球' : ballOnNext === 'color' ? '该打彩球' : `该打${ballName(ballOnNext)}`);

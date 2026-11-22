@@ -262,6 +262,96 @@ test('斯诺克：清完最后一颗黑球时比分相同，黑球重摆继续�
   assert.equal(next.turn, 1, '重摆黑球之后换对手开球');
 });
 
+test('斯诺克：最后一颗红球之后打进彩球，这颗彩球仍然要回位（WPBSA 3.4）', () => {
+  // 红球清空、刚打完最后一颗红球，这一杆是「自由彩球」。
+  // 彩球阶段要等这颗自由彩球也打完才开始，所以它进袋必须回位——
+  // 不回位的话清彩阶段少一颗球，少的是这 5 分，甚至可能提前结束。
+  const balls = [
+    createBall('cue', 0.6, 0.9, { number: 0 }),
+    createBall('b' + YELLOW, 0.737, 0.597, { number: YELLOW }),
+    createBall('b' + BLUE, 1.784, 0.889, { number: BLUE }),
+  ];
+  const g = createGame(table, balls, { kind: 'snooker' });
+  g.snooker.reds = 0;
+  g.snooker.ballOn = 'color';
+
+  const { next, report } = resolveShot(
+    g,
+    factsOf(g, { firstContact: BLUE, pocketed: ['b' + BLUE], rails: ['x'] })
+  );
+
+  assert.equal(report.fouled, false);
+  assert.equal(report.snooker.gained, 5, '自由彩球的分照记');
+  assert.deepEqual(report.snooker.respotted, [BLUE], '最后一红之后的彩球必须回位');
+  const blue = next.balls.find((b) => b.number === BLUE);
+  assert.equal(blue.pocketed, false, '蓝球回到台上');
+  const spot = snookerSpots(table).blue;
+  assert.ok(
+    Math.hypot(blue.x - spot.x, blue.y - spot.y) < 1e-9,
+    `蓝球回到蓝球点，实际在 (${blue.x.toFixed(3)}, ${blue.y.toFixed(3)})`
+  );
+  assert.equal(next.snooker.ballOn, YELLOW, '红球已清空，接下来按分值顺序打黄球');
+  assert.equal(next.snooker.ballOn, 16, '黄球的球号是 16');
+});
+
+test('斯诺克：平分重摆黑球时黑球点被占，黑球让位且不与任何球重叠', () => {
+  const balls = [
+    createBall('cue', 0.6, 0.9, { number: 0 }),
+    createBall('b' + BLACK, 3.245, 0.889, { number: BLACK }),
+  ];
+  const g = createGame(table, balls, { kind: 'snooker' });
+  const R = table.ballRadius;
+  const spot = snookerSpots(table).black;
+  const cue = g.balls.find((b) => b.number === 0);
+  // 母球打进黑球之后停在离黑球点 1.5R 的地方——直接摆回去就是一颗球压另一颗。
+  cue.x = spot.x - 1.5 * R;
+  cue.y = spot.y;
+  g.snooker.ballOn = BLACK;
+  g.snooker.scores = [33, 40];
+
+  const { next, report } = resolveShot(
+    g,
+    factsOf(g, { firstContact: BLACK, pocketed: ['b' + BLACK], rails: ['x'] })
+  );
+
+  assert.equal(report.ended, false, '33 + 7 = 40，平分，重摆黑球继续');
+  assert.deepEqual(next.snooker.scores, [40, 40]);
+  assert.equal(next.turn, 1, '重摆黑球之后由对手先打');
+
+  const black = next.balls.find((b) => b.number === BLACK);
+  const cueAfter = next.balls.find((b) => b.number === 0);
+  assert.equal(black.pocketed, false);
+  const gap = Math.hypot(black.x - cueAfter.x, black.y - cueAfter.y);
+  assert.ok(gap >= 2 * R, `黑球与母球至少隔 2R，实际 ${gap.toFixed(6)} < ${(2 * R).toFixed(6)}`);
+  assert.ok(black.x > spot.x, '沿中线朝顶库方向让位，不是往开球端退');
+  assert.ok(table.insideBounds(black.x, black.y), '让位之后球心仍要落在台面内');
+
+  const nearest = Math.min(
+    ...next.balls
+      .filter((b) => !b.pocketed && b.number !== BLACK)
+      .map((b) => Math.hypot(b.x - black.x, b.y - black.y))
+  );
+  assert.ok(nearest >= 2 * R, `与台上任何球都不许重叠，最近 ${nearest.toFixed(6)}`);
+  assert.match(report.notes.join('|'), /黑球点被占/, '让位要留下说明');
+});
+
+test('斯诺克：黑球点没被占时，平分重摆仍然摆回黑球点', () => {
+  const balls = [
+    createBall('cue', 0.6, 0.9, { number: 0 }),
+    createBall('b' + BLACK, 3.245, 0.889, { number: BLACK }),
+  ];
+  const g = createGame(table, balls, { kind: 'snooker' });
+  g.snooker.ballOn = BLACK;
+  g.snooker.scores = [33, 40];
+  const { next } = resolveShot(
+    g,
+    factsOf(g, { firstContact: BLACK, pocketed: ['b' + BLACK], rails: ['x'] })
+  );
+  const black = next.balls.find((b) => b.number === BLACK);
+  const spot = snookerSpots(table).black;
+  assert.ok(Math.hypot(black.x - spot.x, black.y - spot.y) < 1e-9, '点位空着就不许乱挪');
+});
+
 test('斯诺克：snookerTargets 能按「红球 / 任意彩球 / 指定彩球」三种状态给目标', () => {
   const g = simpleGame();
   assert.deepEqual(snookerTargets(g, [1, 16, 21]), [1]);
