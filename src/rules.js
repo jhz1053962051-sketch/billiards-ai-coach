@@ -1,3 +1,4 @@
+// @ts-check
 // 规则状态机：黑八（8-Ball）与九球（9-Ball）两个玩法。
 //
 // 条文依据（一手来源，均为 WPA 官方发布）：
@@ -126,7 +127,7 @@ export function footSpotX(table) {
  * 建一局。
  * @param {object} table
  * @param {object[]} balls 至少含一颗 number 0 的母球；可含 8 号球（黑八）或 9 号球（九球）
- * @param {{names?:string[], breaker?:0|1, kind?:'eightball'|'nineball'}} [opts]
+ * @param {{names?:string[], breaker?:0|1, kind?:'eightball'|'nineball'|'snooker'}} [opts]
  */
 export function createGame(table, balls, opts = {}) {
   const names = opts.names ?? ['玩家 1', '玩家 2'];
@@ -230,7 +231,7 @@ export function remainingOfGroup(onTable, group) {
  * @param {object} table
  * @param {object[]} balls
  * @param {{cueId?:string, angle:number, speed:number, tip?:{a:number,b:number}}} shot
- * @param {{dt?:number, maxTime?:number}} [opts]
+ * @param {{dt?:number, maxTime?:number, record?:boolean, frameEvery?:number}} [opts]
  * @returns {{
  *   firstContact: number|null, firstContactId: string|null,
  *   pocketed: Array<{id:string, number:number, pocket:string}>,
@@ -238,7 +239,8 @@ export function remainingOfGroup(onTable, group) {
  *   railsAfterContact: string[],
  *   objectBallsToRail: number[],
  *   onTableBefore: number[], onTableAfter: number[],
- *   settled: boolean, elapsed: number, events: object[]
+ *   settled: boolean, elapsed: number, events: object[],
+ *   frames: Array<object[]>|null, dt: number, ballsAfter: object[]
  * }}
  */
 export function simulateShot(table, balls, shot, opts = {}) {
@@ -249,8 +251,14 @@ export function simulateShot(table, balls, shot, opts = {}) {
   // 录帧是给演示页回放用的：规则结算只要最终状态，但界面要看到球怎么走的。
   // 默认不录（Node 测试和批量模拟都不需要），只有传了 record 才逐帧存快照。
   const frameEvery = Math.max(1, Math.round(opts.frameEvery ?? 1));
+  // copy / snapshot 在 onStart 回调里才被赋值，TS 的流分析看不到这条路径，
+  // 于是会把它们当成一直是 null。这里按「ok 之后必然已赋值」的既有前提标注类型，
+  // 运行期行为不变（初始值仍然是 null）。
+  /** @type {object[]} */
   let copy = null;
+  /** @type {() => object[]} */
   let snapshot = null;
+  /** @type {object[][]|null} */
   let frames = null;
   let step = 0;
   let onTableBefore = [];
@@ -291,9 +299,12 @@ export function simulateShot(table, balls, shot, opts = {}) {
   );
 
   if (!sim.ok) {
-    if (sim.reason === 'no_cue') throw new Error(`找不到母球: ${cueId}`);
-    if (sim.reason === 'cue_pocketed') throw new Error('母球已落袋，不能击球');
-    throw new Error(`无法击球: ${sim.reason}`);
+    // sim.simulateShot 没有 @returns，失败分支的 reason 在类型上推不出来（ok 被推成
+    // boolean，判别不窄）。失败分支必定带 reason —— 见 sim.js 的 4 个失败 return。
+    const failed = /** @type {{reason?:string}} */ (sim);
+    if (failed.reason === 'no_cue') throw new Error(`找不到母球: ${cueId}`);
+    if (failed.reason === 'cue_pocketed') throw new Error('母球已落袋，不能击球');
+    throw new Error(`无法击球: ${failed.reason}`);
   }
   if (frames && step % frameEvery !== 0) {
     frames.push(snapshot());

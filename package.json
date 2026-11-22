@@ -12,7 +12,11 @@
     "check:demo": "node tools/check-demo.mjs",
     "verify:demo": "node tools/verify-demo.mjs",
     "verify:pose": "node tools/verify-pose.mjs",
-    "verify": "node tools/verify-all.mjs"
+    "verify": "node tools/verify-all.mjs",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
   },
   "engines": {
     "node": ">=22"

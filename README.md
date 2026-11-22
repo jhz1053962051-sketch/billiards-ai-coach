@@ -932,7 +932,25 @@ POSE_STRICT=1 node tools/verify-pose.mjs   # 只对姿态页：缺素材即失�
 
 单元测试的统一入口是 `tools/test.mjs`（`npm test` 就是它）：它按当前 Node 版本挑进程隔离开关，并自己列出 `test/*.test.js`，所以新增测试文件不用改任何脚本。`check:demo` 现在有 387 项静态检查（导入符号存在、DOM id 都在 HTML 里、`file-guard.js` 排在所有 module 之前、物理步长没有写死、CSP 与实际用法匹配、`demo/state.js` 的零 DOM 契约……）。
 
-CI 在 `.github/workflows/verify.yml`：push 到 `main` / `master`、PR、手动触发都跑，node **22** 与 **24** 两档矩阵，步骤是 `npm test` → `npm run check:demo` → 起 `node tools/serve.mjs 4173` 后跑 `npm run verify:demo`（用 `DEMO_URL` 指过去）。**姿态页不在 CI 里**，原因很具体：它要的素材（照片、录像）在 `_research/`，那个目录是 gitignored 的，干净 clone 上必然走「跳过」分支；把 `POSE_STRICT=1` 放进 CI 就永远是红的，不放进 CI 又只是把「假绿」换个地方发生。所以姿态页留在本地门禁里，由 `verify-all.mjs` 的第四项覆盖，CI 只兜住不需要素材的那三段。
+CI 在 `.github/workflows/verify.yml`：push 到 `main` / `master`、PR、手动触发都跑，node **22** 与 **24** 两档矩阵，步骤是 `npm ci` → `npm run typecheck` → `npm test` → `npm run check:demo` → 起 `node tools/serve.mjs 4173` 后跑 `npm run verify:demo`（用 `DEMO_URL` 指过去）。**姿态页不在 CI 里**，原因很具体：它要的素材（照片、录像）在 `_research/`，那个目录是 gitignored 的，干净 clone 上必然走「跳过」分支；把 `POSE_STRICT=1` 放进 CI 就永远是红的，不放进 CI 又只是把「假绿」换个地方发生。所以姿态页留在本地门禁里，由 `verify-all.mjs` 的第四项覆盖，CI 只兜住不需要素材的那三段。
+
+## 类型检查
+
+`npm run typecheck` 就是 `tsc -p tsconfig.json`。`src/` 是手写 JSDoc 的纯 JS，没有 `.ts` 源文件，所以走的是 **`allowJs` + `checkJs` + `noEmit`**：tsc 只读不写，不产出任何构建物。
+
+**为什么是「逐文件开关」而不是全量开。** `tsconfig.json` 里写的是 `checkJs: false`，再由每个文件自己在第一行写 `// @ts-check` 开启。这样做的直接好处是：没开启的文件一行都不需要改，也能继续被开启的文件正常 import（它们的导出签名仍由 JSDoc 推断）。全量 `checkJs` 当时一共 69 条错误，其中 25 条压在 `src/solver.js`；而此刻另有一路改动正在动 `physics.js` / `sim.js` / `solver.js` / `constants.js` 的签名，硬开只会让两边互相把对方弄红。
+
+已开启的 12 个文件：`aim` `geometry` `opponent` `rack` `rules` `safety` `snooker` `table` `tolerance` 与 `pose/` 下的 `analyze` `checks` `landmarks`。**没开启**的四个是 `physics.js`、`sim.js`、`solver.js`、`constants.js`。
+
+`strict` 也先不开（`strict: false`）。打开它会用 `unknown` 把大量没标注的参数淹成几百条噪声，而现在这 12 个文件是 0 错误——先把「能红」的门立起来，再谈收紧。
+
+**没有一条 `@ts-expect-error`。** 首轮 37 条错误全部是 JSDoc 记录与实际用法漂移（漏字段、把 `snooker` 漏出联合类型、`simulateShot` 的 `reason` 只在失败分支存在但返回类型没写），改注释即可，不需要压。以后真要压，必须在同一行写清为什么。
+
+**这不是一道假门。** 在仓库的临时副本里往 `aim.js` 末尾加 `/** @param {number} n */ export const __probe = (n) => n.toUpperCase();`，`tsc` 会报 `error TS2339: Property 'toUpperCase' does not exist on type 'number'.` 并退 2；删掉后回到 0。注意探针必须**带类型标注**——参数不标注就是隐式 `any`，`x.noSuchField` 这种写法不会报错，拿它试门会得出「检查没生效」的错误结论。
+
+**已知盲区**（说清楚比假装没有好）：那四个未开启的文件本身不校验；已开启的文件会按它们的 JSDoc 推断类型，所以**别人改了 `solver` / `physics` / `sim` 的导出签名而没同步 JSDoc 时，红的是调用方**，报错位置看起来离改动很远。另外 `solver.js` 里有一条 `Property 'pocket' does not exist ... Did you mean 'pocketed'?`，看着像真 bug，但它在本轮保护区里，没动。
+
+**关于依赖**：`package.json` 新增了 `devDependencies: { "typescript": "5.9.3" }`，仓库因此多了一份 `package-lock.json`（`node_modules/` 早已 gitignore）。**运行时依旧零依赖**——`src/`、`demo/`、`vendor/` 没有任何一行 import typescript，它只在开发期与 CI 里跑 `tsc`；打包/部署那套不受影响。CI 里 `npm ci` 只为了装这一个包。
 
 ## 许可
 

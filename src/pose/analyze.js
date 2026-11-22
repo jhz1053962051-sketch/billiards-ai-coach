@@ -1,3 +1,4 @@
+// @ts-check
 // 动作分析：把单帧姿势或整段序列，变成一份可读的评估报告。
 //
 // 分工：
@@ -158,7 +159,8 @@ export function segmentStroke(run) {
  *
  * @param {Array<{t:number, pose:object}>} frames
  * @param {{handedness?:'auto'|'left'|'right', fps?:number}} [opts]
- * @returns {{checks:Array<object>, segmented:boolean, reason?:string}}
+ * @returns {{checks:Array<object>, segmented:boolean, reason?:string,
+ *            handedness?:object, iBackStart?:number, iContact?:number}}
  */
 export function evaluateStroke(frames, opts = {}) {
   const checks = [];
@@ -382,6 +384,7 @@ function shoulderWidthOf(w) {
  * @param {Array<object>} [params.stroke] evaluateStroke 的结果
  * @param {'image'|'video'} params.mode
  * @param {number} [params.frameCount]
+ * @param {number} [params.averagedFrames] 站姿用了多少帧平均（照片为 0），只影响报告里的说明字段
  */
 export function summarize({ setup, stroke = [], mode, frameCount = 1, averagedFrames = 0 }) {
   const all = [...setup, ...stroke];
@@ -508,7 +511,7 @@ export function averagePoses(poses) {
  * METRIC_NOISE）——单张照片下「差一点」和「测不准」是一回事。
  *
  * @param {object} poseResult MediaPipe 的 PoseLandmarkerResult（取第一个人）
- * @param {{handedness?:string, normalize?:Function}} opts
+ * @param {{handedness?:'auto'|'left'|'right', normalize?:Function}} opts
  */
 export function analyzeImage(poseResult, opts = {}) {
   const pose = (opts.normalize ?? normalizePose)(poseResult);
@@ -519,7 +522,7 @@ export function analyzeImage(poseResult, opts = {}) {
 /**
  * 视频序列：站姿（多帧平均）+ 出杆动态。
  * @param {Array<{t:number, poseResult:object}>} rawFrames
- * @param {{handedness?:string, normalize?:Function}} opts
+ * @param {{handedness?:'auto'|'left'|'right', normalize?:Function}} opts
  */
 export function analyzeSequence(rawFrames, opts = {}) {
   const norm = opts.normalize ?? normalizePose;

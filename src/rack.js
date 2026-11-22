@@ -1,3 +1,4 @@
+// @ts-check
 // 标准黑八球组与摆球。
 //
 // 球组依据 WPA《International 8-Ball Rules》v1a（2021-02）第 3 节原文：

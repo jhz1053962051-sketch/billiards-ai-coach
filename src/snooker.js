@@ -1,3 +1,4 @@
+// @ts-check
 // 斯诺克规则：计分、按序击球、彩球回位。
 //
 // 依据 WPBSA《Official Rules of the Games of Snooker and English Billiards》

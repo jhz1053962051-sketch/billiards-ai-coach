@@ -1,3 +1,4 @@
+// @ts-check
 // 防守（safety）：没有进攻机会时，不是随便撞一下合法球，而是把母球藏起来。
 //
 // 调研结论先说清楚（这也是这一段为什么长这样）：
@@ -113,7 +114,12 @@ function scoreSafety({ oppTol, baseTol, fouled, cueNearPocket, cueNearestBall, R
 
 /**
  * 跑一杆、回报对局面的影响。内部用，只为让主循环短一点。
- * @returns {{ok:boolean, fouled:boolean, cueSpot:object|null, balls:object[]|null, oppTol:number, hitNumber:number|null}}
+ *
+ * 失败分支（打不出去 / 没碰到球 / 母球摔袋）只给 `ok:false` 和一个可选的 reason，
+ * 其余字段不填——调用方都是先看 ok 再用，所以这里如实标成可选，而不是假装齐全。
+ *
+ * @returns {{ok:boolean, reason?:string, fouled?:boolean, cueSpot?:object|null,
+ *            balls?:object[]|null, oppTol?:number, hitNumber?:number|null, pocketedAny?:boolean}}
  */
 function shoot(table, balls, cueId, target, aimAngle, speed) {
   // 仿真本体（复制球 → strike → runShot → 取首碰）走 src/sim.js 那一个入口，
@@ -137,8 +143,11 @@ function shoot(table, balls, cueId, target, aimAngle, speed) {
   );
 
   if (!sim.ok) {
-    if (sim.reason === 'no_cue' || sim.reason === 'cue_pocketed') return { ok: false };
-    return { ok: false, reason: sim.reason };
+    // 同 rules.js：sim.simulateShot 没有 @returns，失败分支的 reason 推不出来，
+    // 但失败分支必定带 reason（见 sim.js 的 4 个失败 return）。
+    const failed = /** @type {{reason?:string}} */ (sim);
+    if (failed.reason === 'no_cue' || failed.reason === 'cue_pocketed') return { ok: false };
+    return { ok: false, reason: failed.reason };
   }
   const events = sim.events;
   // 必须真的先碰到球（没碰到就是直接犯规）

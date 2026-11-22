@@ -1,4 +1,5 @@
-﻿// 对手出杆：给「打一整局」一个真正的对手。
+// @ts-check
+// 对手出杆：给「打一整局」一个真正的对手。
 //
 // 设计上刻意不引入任何"作弊"路径——对手用的就是玩家点「求解」时跑的同一套
 // planShot / simulateShot / resolveShot，参数完全一致，只是把点击换成了自动触发。
@@ -45,6 +46,17 @@ const LOOKAHEAD_PENALTY_MISS = 30;
 const DEEP_POOL = 2;
 
 /**
+ * 一个候选在两层评估里的记录：scoreCandidate 的分数 + 三步层的可选补充。
+ *
+ * myEase / myTolerance 只有走完三步（deepScore 返回非 null）才有，
+ * 所以它们是可选的——`plies` 报 2 还是 3 就是看这两个字段在不在。
+ *
+ * @typedef {{candidate:object, index:number, score:number, base:number, potted:boolean,
+ *            fouled:boolean, humanTolerance:number, humanEase:number, ended:boolean,
+ *            next:object, myEase?:number, myTolerance?:number, replyTarget?:any}} Entry
+ */
+
+/**
  * 两步选杆：先让求解器按「这一杆的综合价值」排出前几个，再各自真打一遍，
  * 按「我这一杆的把握 + 打完之后对方有多难打」重排。
  *
@@ -57,6 +69,10 @@ const DEEP_POOL = 2;
  * 代价：每个候选多一次 simulateShot + 一次 positionTolerance。
  * 默认只看前 3 个候选，实测整杆多花几毫秒（见 README「对手会算两步」）。
  *
+ * @param {object} table
+ * @param {object} game rules.createGame 的返回值
+ * @param {{allow?:number[], safety?:boolean, extras?:object, dt?:number,
+ *          lookahead?:number, deepLookahead?:number, plies?:number}} [opts]
  * @returns {{plan:object|null, kind:string, alternatives:object[], scores:object[]}}
  */
 export function choosePlan(table, game, opts = {}) {
@@ -70,6 +86,7 @@ export function choosePlan(table, game, opts = {}) {
 
   const limit = opts.lookahead ?? 3;
   const pool = [base.plan, ...base.alternatives].slice(0, limit);
+  /** @type {Entry[]} */
   const scored = pool.map((candidate, index) => ({
     candidate,
     index,
@@ -160,6 +177,8 @@ function scoreCandidate(table, game, candidate, opts) {
  *
  * 对方那一杆用 plies: 2 递归求，避免层层展开把时间炸掉。
  * 已经分出胜负的局面没有下一步，直接不参与深度重排。
+ *
+ * @returns {{score:number, myEase:number, myTolerance:number, replyTarget:number|null}|null}
  */
 function deepScore(table, entry, opts) {
   if (entry.ended) return null;
@@ -249,8 +268,9 @@ export function pickCueSpot(game, opts = {}) {
  * @param {boolean} [opts.record=false] 是否逐帧记录（演示回放用；测试关掉省内存）
  * @param {number}  [opts.dt] 回放步长
  * @param {boolean} [opts.safety=false] 没有进攻机会时是否找防守（默认关，见文件头）
- * @returns {{ok:true, plan:object, kind:string, alternatives:object[], facts:object,
- *            next:object, report:object, cuePlaced:boolean}
+ * @param {number}  [opts.lookahead] 两步评估看前几个候选（透传给 choosePlan，默认 3）
+ * @returns {{ok:true, plan:object, kind:string, alternatives:object[], scores:object[],
+ *            facts:object, next:object, report:object, cuePlaced:boolean, cueSpot:object|null}
  *          |{ok:false, reason:string, plan:null, facts:null, next:object, report:null}}
  */
 export function takeTurn(table, game, opts = {}) {

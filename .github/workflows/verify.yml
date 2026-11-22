@@ -1,9 +1,11 @@
-# CI：单元测试 + 演示页静态检查 + 浏览器端到端（verify:demo）。
+# CI：单元测试 + 类型检查 + 演示页静态检查 + 浏览器端到端（verify:demo）。
 #
-# 为什么没有 npm ci、也没有 setup-node 的 cache：
-#   仓库零依赖（package.json 没有 dependencies/devDependencies），也没有
-#   package-lock.json。setup-node 的 cache: npm 在没有 lockfile 时会直接报
-#   "Dependencies lock file is not found"，所以这里只装 Node，不缓存。
+# 为什么会有一份 package-lock.json（原来没有）：
+#   运行时仍然是零依赖——package.json 里没有 dependencies。新增的 typescript 只在
+#   devDependencies 里，是开发期工具（`npm run typecheck` 用它跑 tsc），不会被任何
+#   src/ 或 demo/ 的代码 import，也不进 vendor/ 那套静态资源。有了 lockfile 之后
+#   setup-node 的 cache: npm 才可用（没有 lockfile 时它会报
+#   "Dependencies lock file is not found"），所以下面既 npm ci 也开了缓存。
 #
 # 为什么 CI 不跑姿态页（verify-pose）：
 #   tools/verify-pose.mjs:39-48 的照片/录像素材默认取自 _research/，而 _research/
@@ -55,7 +57,18 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node-version }}
-          # cache 故意不写：没有 package-lock.json，开了会报错（见文件头）。
+          # lockfile 现在有了（见过文件头），所以缓存可用；只在 lockfile 变化时失效。
+          cache: npm
+
+      - name: 安装开发期依赖
+        # typescript 是唯一的 devDependency（`npm run typecheck` 用它）；运行时零依赖，
+        # 所以 `npm ci --omit=dev` 在这里不合适——那会装不到 tsc。
+        run: npm ci --no-audit --no-fund
+
+      - name: 类型检查
+        # src/ 走「tsconfig 里 checkJs: false + 各文件自己写 // @ts-check」的选择性开启，
+        # 没写 @ts-check 的文件（physics/sim/solver/constants）本轮不校验，但仍参与类型推断。
+        run: npm run typecheck
 
       - name: 单元测试
         run: npm test

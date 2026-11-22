@@ -1,3 +1,4 @@
+// @ts-check
 // 人体姿态关键点：33 点定义、坐标约定、几何辅助。
 //
 // 坐标约定（已用真实照片实测，见 _research/calibrate-pose.json）：

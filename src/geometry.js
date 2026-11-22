@@ -1,3 +1,4 @@
+// @ts-check
 // 平面几何工具。台球是纯 2D 问题，不需要任何向量库。
 
 export const V = {
