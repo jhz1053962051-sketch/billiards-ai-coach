@@ -151,7 +151,14 @@ export function isMoving(b) {
 }
 
 export function allStopped(world) {
-  return !world.balls.some((b) => !b.pocketed && isMoving(b));
+  // 索引 for 而不是 some + 箭头函数：这个函数每杆要跑几百次（runShot 每步一次），
+  // 回调闭包在这里没有收益，只有每步一次的可内联机会。
+  const balls = world.balls;
+  for (let i = 0; i < balls.length; i++) {
+    const b = balls[i];
+    if (!b.pocketed && (b.vx !== 0 || b.vy !== 0)) return false;
+  }
+  return true;
 }
 
 /** 台呢接触点的滑移速度，摩擦作用在这个量上 */
@@ -246,7 +253,9 @@ export function advanceBall(b, tau) {
       continue;
     }
 
-    snapToRolling(b);
+    // 这里原本还有一次 snapToRolling(b)：它写的 wx/wy 在本轮里没有被读过——
+    // v 与 nx/ny 只取 vx/vy，两次分支末尾（281 清零 / 287 重算）都会把 wx/wy 覆盖掉，
+    // 所以那次调用是纯粹白做的两次除法 + 两次写。删掉它不改变任何被读到的值。
     const v = Math.sqrt(b.vx * b.vx + b.vy * b.vy);
     if (v < PHYS.stopSpeed) {
       b.vx = 0;
@@ -287,8 +296,12 @@ export function advanceBall(b, tau) {
 /**
  * 库边 TOI：球心沿法向抵达库面（相距一个半径）还要多久。
  * gap 为球心到库面的有向距离（沿库面内法向为正）；接触发生在 gap === R。
+ *
+ * 与下面的 ballTOI 一起导出，只为让 test/physics-event-buffer.test.js 能逐字复刻
+ * findFirstEvent 的旧实现做等价性比对（旧实现的骨架留在那个测试里）。物理核内部
+ * 只经 findFirstEvent 使用它们，不构成对外的稳定 API。
  */
-function cushionTOI(ball, cushion, horizon) {
+export function cushionTOI(ball, cushion, horizon) {
   const R = ball.__R;
   const { axis, pos, normal } = cushion;
   const p = axis === 'x' ? ball.x : ball.y;
@@ -306,7 +319,7 @@ function cushionTOI(ball, cushion, horizon) {
 }
 
 /** 球球 TOI：两球心距降到 2R 的时刻 */
-function ballTOI(a, b, horizon) {
+export function ballTOI(a, b, horizon) {
   const R = a.__R;
   const dx = b.x - a.x;
   const dy = b.y - a.y;
@@ -326,49 +339,114 @@ function ballTOI(a, b, horizon) {
 }
 
 /**
+ * findFirstEvent 的复用缓冲。
+ *
+ * 旧写法每子步 new 一个 moving 数组、命中时再 new 一个 best 对象；单杆 500+ 子步、
+ * 单次求解几十杆，一次求解就是两万次以上分配（profile 里 GC 稳定占 5% 上下）。
+ * 这里换成调用方复用的单一缓冲：所有字段在字面量里一次初始化，形状固定不再增删，
+ * 因此隐藏类唯一。注意这是**独立缓冲对象**，不是往球对象上加字段——
+ * 给球对象动态加字段会让隐藏类退化，advanceBall 里的属性访问会一起变慢。
+ *
+ * 无重入风险：findFirstEvent 只被 stepWorld 调用，返回值在同一个子步内就地消费完，
+ * 消费过程中不会再调一次 findFirstEvent；执行模型是单线程、那一段里没有回调。
+ */
+const EVENT_SCRATCH = { moving: [], t: 0, kind: '', ball: null, cushion: null, a: null, b: null };
+
+/**
  * 在给定时间内找最早接触事件。
  * 库边交点必须落在有效线段内：落在缺口上说明这里是袋口，球会穿过去而不是弹回来。
+ *
+ * 命中时把结果写进调用方传入的 buffer 并返回它（同一对象会被下一次子步覆盖，
+ * 只在同一个子步内有效）；没有事件返回 null。
+ *
+ * @param {object} world
+ * @param {number} horizon
+ * @param {{moving:Array, t:number, kind:string, ball:any, cushion:any, a:any, b:any}} [buffer]
  */
-function findFirstEvent(world, horizon) {
-  let best = null;
-  const { balls, table } = world;
+export function findFirstEvent(world, horizon, buffer = EVENT_SCRATCH) {
+  const balls = world.balls;
+  const cushions = world.table.cushions;
+  const moving = buffer.moving;
+  let count = 0;
 
-  // 每子步都要跑一遍，是全流程最热的地方（CPU profile 里占 30%）。
+  // 每子步都要跑一遍，是全流程最热的地方（CPU profile 里占 15%~20%）。
   // 旧写法对每一对球都算一次 TOI：15 颗球就是 105 对，而大多数时刻只有一颗在动。
   // 这里先挑出「在动」的那几颗，只让运动球去和别的球求交——静止球之间永远不会相撞。
   // 代价是一次 O(n) 的筛选，换掉 O(n²) 的求交。
-  const moving = [];
   for (let i = 0; i < balls.length; i++) {
     const b = balls[i];
-    if (!b.pocketed && isMoving(b)) moving.push(b);
+    if (!b.pocketed && (b.vx !== 0 || b.vy !== 0)) moving[count++] = b;
   }
-  if (!moving.length) return null;
+  if (count === 0) return null;
 
-  for (const b of moving) {
-    for (const c of table.cushions) {
+  let hasBest = false;
+  let bestT = 0;
+
+  // 库边剪枝上界：自由飞行段最大的加速度来自打滑摩擦（μg，滚动段只有 0.01g），所以
+  //   |Δx| ≤ |vx|·h + ½·μg·h²，|Δy| 同理。
+  // 台面四面壁承载了全部库边（角袋与中袋的护角也是壁上的线段），于是
+  // 「球面到最近一面壁的距离 > 该方向位移上界」时这一子步内不可能碰到任何库边，
+  // 那 6 次库边 TOI 可以整段跳过。这是纯上界剪枝：跳过的前提是「确实没有库边事件」，
+  // 而原实现在这种情况下本来也只是白扫一遍后不填 best，所以结果逐位相同。
+  // 1e-9 是防止浮点舍入把上界拉低到真实位移之下（只往安全方向放大）。
+  const accelBound = PHYS.muSlide * PHYS.g;
+  const slack = 0.5 * accelBound * horizon * horizon + 1e-9;
+  const tableLength = world.table.length;
+  const tableWidth = world.table.width;
+
+  // 库边先扫：同 t 时库边优先，与原实现的比较顺序（先库边、后球球）保持一致。
+  for (let mi = 0; mi < count; mi++) {
+    const b = moving[mi];
+    const R = b.__R;
+    const dxMax = Math.abs(b.vx) * horizon + slack;
+    const dyMax = Math.abs(b.vy) * horizon + slack;
+    if (
+      b.x - R > dxMax &&
+      tableLength - R - b.x > dxMax &&
+      b.y - R > dyMax &&
+      tableWidth - R - b.y > dyMax
+    ) {
+      continue; // 离四面壁都远过这一子步能走的距离
+    }
+    for (let ci = 0; ci < cushions.length; ci++) {
+      const c = cushions[ci];
       const t = cushionTOI(b, c, horizon);
       if (t < 0) continue;
-      if (best !== null && t >= best.t) continue;
+      if (hasBest && t >= bestT) continue;
 
       const along = c.axis === 'x' ? b.y + b.vy * t : b.x + b.vx * t;
       if (along < c.from - 1e-9 || along > c.to + 1e-9) continue; // 袋口缺口
-      best = { t, kind: 'cushion', ball: b, cushion: c };
+      hasBest = true;
+      bestT = t;
+      buffer.t = t;
+      buffer.kind = 'cushion';
+      buffer.ball = b;
+      buffer.cushion = c;
     }
   }
 
   // 两颗都在动时这一对会被看两遍（a→b 一次、b→a 一次），取最小值的结果不变；
   // 换来的是不必再为「谁是第几号」做一次查表。
-  for (const a of moving) {
+  for (let mi = 0; mi < count; mi++) {
+    const a = moving[mi];
     for (let j = 0; j < balls.length; j++) {
       const b = balls[j];
       if (b === a || b.pocketed) continue;
       const t = ballTOI(a, b, horizon);
-      if (t >= 0 && (best === null || t < best.t)) {
-        best = { t, kind: 'ball', a, b };
+      if (t >= 0 && (!hasBest || t < bestT)) {
+        hasBest = true;
+        bestT = t;
+        buffer.t = t;
+        buffer.kind = 'ball';
+        buffer.a = a;
+        buffer.b = b;
       }
     }
   }
-  return best;
+
+  // 清掉尾部残留的球引用，免得复用缓冲把上一局的球一直按在内存里。
+  if (moving.length > count) moving.length = count;
+  return hasBest ? buffer : null;
 }
 
 /**
@@ -533,7 +611,8 @@ function resolveBallBall(a, b, events) {
 function settlePockets(world, events) {
   const { table, balls } = world;
   const { minX, maxX, minY, maxY } = table.bounds;
-  for (const b of balls) {
+  for (let i = 0; i < balls.length; i++) {
+    const b = balls[i];
     if (b.pocketed) continue;
 
     // 静止且已经在台面内的球：既不可能刚滚进袋口，也不可能撞在护角上。
@@ -565,7 +644,8 @@ function settlePockets(world, events) {
     if (b.y < minY) rails.push({ axis: 'y', pos: 0, normal: { x: 0, y: 1 } });
     else if (b.y > maxY) rails.push({ axis: 'y', pos: table.width, normal: { x: 0, y: -1 } });
 
-    for (const rail of rails) {
+    for (let r = 0; r < rails.length; r++) {
+      const rail = rails[r];
       const vn = b.vx * rail.normal.x + b.vy * rail.normal.y;
       const speedBefore = Math.sqrt(b.vx * b.vx + b.vy * b.vy);
       resolveCushion(
@@ -601,7 +681,9 @@ export function stepWorld(world, dt, events) {
   // 起点记在球对象 __px/__py 上 → 10.78 ms，因为给球对象加字段会改 V8 隐藏类，
   // advanceBall 里所有属性访问一起退化）。热循环里一行都不加，代价才是零。
   let maxV = 0;
-  for (const b of world.balls) {
+  const balls = world.balls;
+  for (let i = 0; i < balls.length; i++) {
+    const b = balls[i];
     if (b.pocketed) continue;
     const s = b.vx * b.vx + b.vy * b.vy;
     if (s > maxV) maxV = s;
@@ -616,13 +698,14 @@ export function stepWorld(world, dt, events) {
   let remaining = dt;
 
   while (remaining > 1e-9 && guard++ < 128) {
-    const hit = findFirstEvent(world, remaining);
+    const hit = findFirstEvent(world, remaining, EVENT_SCRATCH);
     const tau = hit ? Math.max(0, Math.min(hit.t, remaining)) : remaining;
 
     if (tau > 0) {
-      for (const b of world.balls) {
+      for (let i = 0; i < balls.length; i++) {
+        const b = balls[i];
         if (b.pocketed) continue;
-        if (isMoving(b) || b.wz !== 0) advanceBall(b, tau);
+        if (b.vx !== 0 || b.vy !== 0 || b.wz !== 0) advanceBall(b, tau);
       }
       world.t += tau;
       remaining -= tau;

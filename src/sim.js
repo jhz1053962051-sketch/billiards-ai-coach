@@ -29,6 +29,26 @@ function snapshotBall(b) {
     : createBall(b.id, b.x, b.y, b);
 }
 
+/**
+ * 整杆仿真计数器：只统计**真正跑起来**的整杆仿真（strike 之后被 runShot 跑完的），
+ * no_cue / cue_pocketed / no_target 这些连仿真都没跑的早退不计。
+ *
+ * 用途是给「不许靠减少仿真次数换速度」这条约束装一个抓手：
+ * test/solver-budget.test.js 用固定局面钉住「一次求解最多跑多少次整杆仿真」，
+ * 谁要是无意把剪枝改回盲扫、或者反过来偷偷少跑几次，测试都会变红。
+ */
+let simRuns = 0;
+
+/** @returns {number} 自上次 resetSimRunCount 以来真正执行过的整杆仿真次数 */
+export function simRunCount() {
+  return simRuns;
+}
+
+/** 清零计数器（测试用） */
+export function resetSimRunCount() {
+  simRuns = 0;
+}
+
 const NO_SHOT = {
   ok: false,
   cue: null,
@@ -75,6 +95,7 @@ export function simulateShot(table, balls, shot, opts = {}) {
     return { ...NO_SHOT, cue, balls: copy, reason: 'no_target' };
   }
 
+  simRuns++;
   strike(cue, { angle: shot.angle, speed: shot.speed, tip: shot.tip ?? { a: 0, b: 0 } });
   // onStart 在 strike 之后、第一步之前触发：规则侧要在这里拿到副本、建滚动追踪、
   // 存第 0 帧快照（回放需要「击球前」那一帧）。放在 strike 之后是为了与原来的时序一致。
