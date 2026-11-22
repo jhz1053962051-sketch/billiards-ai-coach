@@ -23,6 +23,7 @@ import {
   autoPauseHint,
   captureBallFrame,
   clamp,
+  computeMatchStats,
   copyBallsForShot,
   currentAim,
   describeManualShot,
@@ -43,6 +44,7 @@ import {
   shouldAutoShoot,
   simulateFrames,
   snapshotPositions,
+  summarizeHistory,
   tableForKind,
   undoLabel,
   unpackHistory,
@@ -50,7 +52,10 @@ import {
 } from '../demo/state.js';
 import { SEARCH_DT } from '../src/constants.js';
 import {
+  appendMatch,
+  clearMatches,
   loadSave,
+  readMatches,
   readSave,
   readSaveMeta,
   readSaveStamp,
@@ -58,6 +63,8 @@ import {
   saveFailureKind,
   serialize,
   writeSave,
+  MATCH_KEY,
+  MATCH_LIMIT,
   SAVE_KEY,
   SAVE_VERSION,
 } from '../demo/save.js';
@@ -1613,4 +1620,311 @@ test('describeNextShot：空态与异常输入不抛，也不会拼出 undefined
     solveMs: 1,
   });
   assert.ok(weird.includes('｜下一步：没有直接的进球线'), weird);
+});
+
+// ---------------------------------------------------------------- 局内统计
+//
+// 下面每一条 summary 都是逐字抄 src/rules.js:838-851 与 src/snooker.js:418-431
+// 拼出来的真实文案。改文案的人不会来看这个文件，所以这里刻意不伪造格式：
+// 一旦规则引擎换了播报，这几条会立刻红——那正是想要的。
+
+/** 一条流水。形状与 src/rules.js:657 的 log.push 一致。 */
+function entry(shot, shooter, summary, fouls = []) {
+  return { shot, shooter, summary, fouls };
+}
+
+test('computeMatchStats：一局正常的黑八，杆数 / 进球 / 连击 / 犯规都对得上真实播报', () => {
+  // 顺序：开球一杆进两颗 → 续杆再进 → 空杆换手 → 对手进一颗 → 对手犯规 → 进 8 号收官
+  const log = [
+    entry(1, 0, '开球 · 进 1、2 号 · 你 继续'),
+    entry(2, 0, '进 3 号 · 你 继续'),
+    entry(3, 0, '没有球进袋 · 换 对手'),
+    entry(4, 1, '进 5 号 · 换 对手'),
+    entry(5, 1, '没有球进袋 · 犯规：母球落袋（WPA 3.1） · 换 你'),
+    entry(6, 0, '进 8 号 · 你 继续'),
+  ];
+  const stats = computeMatchStats({ log, kind: 'eightball', winner: 0, myself: 0 });
+  assert.equal(stats.shots, 6);
+  // 一杆进两颗算一次进球：按颗数算的话命中率会到 5/6，界面上写「命中率」却
+  // 把一杆多球重复计了。
+  assert.equal(stats.pots, 4);
+  assert.equal(stats.potRate, 4 / 6);
+  assert.equal(stats.longestRun, 2, '开球 + 续杆连进两杆');
+  assert.equal(stats.fouls, 1);
+  assert.equal(stats.result, 'win');
+});
+
+test('computeMatchStats：零杆局返回 0 与 null，不出现 NaN', () => {
+  const stats = computeMatchStats({ log: [], kind: 'eightball', winner: null, myself: 0 });
+  assert.equal(stats.shots, 0);
+  assert.equal(stats.pots, 0);
+  assert.equal(stats.potRate, null, '0 杆时没有命中率；返回 0 会被界面写成「0%」');
+  assert.equal(stats.longestRun, 0);
+  assert.equal(stats.fouls, 0);
+  assert.equal(stats.result, 'undecided');
+});
+
+test('computeMatchStats：整局全犯规，进球为 0 但犯规次数照实记', () => {
+  const log = [
+    entry(1, 0, '开球 · 没有球进袋 · 犯规：开球未过线（WPA 3.2） · 换 对手'),
+    entry(2, 1, '没有球进袋 · 犯规：空杆（WPA 6.1） · 换 你'),
+    entry(3, 0, '没有球进袋 · 犯规：母球落袋（WPA 3.1） · 换 对手'),
+  ];
+  const stats = computeMatchStats({ log, kind: 'eightball', winner: 1, myself: 0 });
+  assert.equal(stats.shots, 3);
+  assert.equal(stats.pots, 0);
+  assert.equal(stats.potRate, 0);
+  assert.equal(stats.longestRun, 0);
+  assert.equal(stats.fouls, 3);
+  assert.equal(stats.result, 'loss');
+});
+
+test('computeMatchStats：只有对手进球时进球与连击都记在对手身上，结果是我输', () => {
+  const log = [
+    entry(1, 0, '开球 · 没有球进袋 · 换 对手'),
+    entry(2, 1, '进 2 号 · 对手 继续'),
+    entry(3, 1, '进 4 号 · 对手 继续'),
+    entry(4, 1, '进 8 号 · 对手 继续'),
+  ];
+  const stats = computeMatchStats({ log, kind: 'eightball', winner: 1, myself: 0 });
+  assert.equal(stats.pots, 3);
+  assert.equal(stats.longestRun, 3, '对手连着三杆进球');
+  assert.equal(stats.result, 'loss');
+  // 换个视角：自己就是对手那一方
+  assert.equal(computeMatchStats({ log, kind: 'eightball', winner: 1, myself: 1 }).result, 'win');
+});
+
+test('computeMatchStats：撤销之后的 log（最后几条被裁掉）按剩下的杆号算，不从 1 补', () => {
+  // 打完 5 杆，连撤两步，log 只剩 1–3；杆号仍然是 1、2、3
+  const log = [
+    entry(1, 0, '开球 · 进 1 号 · 你 继续'),
+    entry(2, 0, '没有球进袋 · 换 对手'),
+    entry(3, 1, '进 2 号 · 换 对手'),
+  ];
+  const stats = computeMatchStats({ log, kind: 'eightball', winner: null, myself: 0 });
+  assert.equal(stats.shots, 3);
+  assert.equal(stats.pots, 2);
+  assert.equal(stats.longestRun, 1);
+});
+
+test('computeMatchStats：开球不达标后「交回」那条决定不重复计杆，也不当成一杆进球', () => {
+  // src/rules.js:829-834：handBackBreak 会往 log 里补一条，杆号与刚打完的那杆相同
+  const log = [
+    entry(1, 0, '开球 · 没有球进袋 · 开球不达标，接手方可以选择照打或交回 · 换 对手'),
+    entry(1, 1, '接手方选择把这一杆交回给原开球方再打一杆（WPA Regulation 16(4)）。'),
+    entry(2, 0, '进 3 号 · 你 继续'),
+  ];
+  const stats = computeMatchStats({ log, kind: 'eightball', winner: null, myself: 0 });
+  assert.equal(stats.shots, 2, '补的那条决定不算一杆');
+  assert.equal(stats.pots, 1);
+  assert.equal(stats.fouls, 0, '「开球不达标」不是犯规码，别把文案里的字当成犯规');
+});
+
+test('computeMatchStats：斯诺克按「得 N 分」判进球，没有球号也能算', () => {
+  const log = [
+    entry(1, 0, '得 8 分 · 8 : 0 · 该打红球 · 你 继续'),
+    entry(2, 0, '没有球进袋 · 犯规：空杆（WPA 6.1），罚 4 分 · 8 : 4 · 该打红球 · 换 对手'),
+    entry(3, 1, '得 1 分 · 8 : 5 · 该打彩球 · 换 对手'),
+  ];
+  const stats = computeMatchStats({ log, kind: 'snooker', winner: 0, myself: 0 });
+  assert.equal(stats.shots, 3);
+  assert.equal(stats.pots, 2);
+  assert.equal(stats.fouls, 1);
+  assert.equal(stats.result, 'win');
+});
+
+test('computeMatchStats：收官那一杆的播报被换成结束语，进的那颗球也要算上', () => {
+  // 真实播报（src/rules.js:838-851 的 ended 分支）：那一杆的 summary 只剩
+  // 「你 与 对手 的这一局结束：你 获胜。」，「进 8 号」整段被替换掉了。
+  // 击球者正是胜者、也没有犯规 → 这一杆就是把最后一颗打进的那一杆。
+  const log = [
+    entry(1, 0, '开球 · 进 1、2、3 号 · 你 继续'),
+    entry(2, 0, '没有球进袋 · 换 对手'),
+    entry(3, 1, '没有球进袋 · 换 你'),
+    entry(4, 0, '你 与 对手 的这一局结束：你 获胜。'),
+  ];
+  const stats = computeMatchStats({ log, kind: 'eightball', winner: 0, myself: 0 });
+  assert.equal(stats.shots, 4);
+  assert.equal(stats.pots, 2, '开球那一杆 1 次 + 收官这一杆 1 次');
+  assert.equal(stats.potRate, 0.5);
+  assert.equal(stats.fouls, 0);
+  assert.equal(stats.result, 'win');
+});
+
+test('computeMatchStats：犯规收场、或把 8 号打进却输局，结束那一杆都不算进球', () => {
+  // 斯诺克：只剩黑球时犯规，这一局直接结束、对手赢（src/snooker.js:349-353）
+  const foulEnd = [
+    entry(1, 0, '进 1 号 · 你 继续'),
+    entry(2, 1, '只剩黑球时犯规，这一局结束：你 获胜（47 : 41）。', ['wrong_ball_first']),
+  ];
+  const a = computeMatchStats({ log: foulEnd, kind: 'snooker', winner: 0, myself: 0 });
+  assert.equal(a.pots, 1, '犯规那一杆不算进球');
+  assert.equal(a.fouls, 1);
+
+  // 黑八：提前把 8 号打进就是输局，击球者不是胜者，那一杆也不能算成命中
+  const earlyEight = [
+    entry(1, 0, '进 1 号 · 你 继续'),
+    entry(2, 0, '你 与 对手 的这一局结束：对手 获胜。'),
+  ];
+  const b = computeMatchStats({ log: earlyEight, kind: 'eightball', winner: 1, myself: 0 });
+  assert.equal(b.pots, 1, '击球者是输家 → 那不是合规的收官进球');
+  assert.equal(b.result, 'loss');
+});
+
+test('computeMatchStats：异常输入一律退化，不抛也不出 NaN', () => {
+  const inputs = [
+    undefined,
+    null,
+    {},
+    { log: null },
+    { log: 'x' },
+    { log: [null, 5, 'x', {}, { shot: 'a', summary: 42, fouls: 'scratch' }] },
+    { log: [entry(1, 0, null, null)] },
+    { log: [entry(0, 7, undefined)] },
+  ];
+  for (const input of inputs) {
+    const stats = computeMatchStats(input);
+    for (const key of ['shots', 'pots', 'longestRun', 'fouls']) {
+      assert.equal(typeof stats[key], 'number', `${key} 必须是数字`);
+      assert.ok(Number.isFinite(stats[key]) && stats[key] >= 0, `${key}=${stats[key]}`);
+    }
+    assert.ok(stats.potRate === null || Number.isFinite(stats.potRate), 'potRate 只能是 null 或数字');
+    assert.ok(['win', 'loss', 'undecided'].includes(stats.result));
+  }
+});
+
+// ---------------------------------------------------------------- 跨局战绩汇总
+
+test('summarizeHistory：空历史不炸，各项归零、命中率 null、走势为空', () => {
+  for (const input of [undefined, null, [], 'x', [null, 5]]) {
+    const sum = summarizeHistory(input);
+    assert.equal(sum.matches, 0);
+    assert.equal(sum.wins, 0);
+    assert.equal(sum.losses, 0);
+    assert.equal(sum.shots, 0);
+    assert.equal(sum.potRate, null);
+    assert.equal(sum.longestRun, 0);
+    assert.deepEqual(sum.recent, []);
+  }
+});
+
+test('summarizeHistory：单场就是那一场', () => {
+  const sum = summarizeHistory([
+    { ts: 1, kind: 'nineball', result: 'win', shots: 8, potRate: 0.5, longestRun: 2, fouls: 1 },
+  ]);
+  assert.equal(sum.matches, 1);
+  assert.equal(sum.wins, 1);
+  assert.equal(sum.losses, 0);
+  assert.equal(sum.shots, 8);
+  assert.equal(sum.potRate, 0.5);
+  assert.equal(sum.longestRun, 2);
+  assert.deepEqual(sum.recent, ['win']);
+});
+
+test('summarizeHistory：多场混合胜负，总命中率按杆数加权而不是把百分比求平均', () => {
+  const sum = summarizeHistory([
+    { ts: 1, kind: 'eightball', result: 'win', shots: 10, potRate: 0.5, longestRun: 3, fouls: 0 },
+    { ts: 2, kind: 'snooker', result: 'loss', shots: 2, potRate: 1, longestRun: 1, fouls: 0 },
+    { ts: 3, kind: 'nineball', result: 'loss', shots: 8, potRate: 0.25, longestRun: 2, fouls: 4 },
+  ]);
+  assert.equal(sum.matches, 3);
+  assert.equal(sum.wins, 1);
+  assert.equal(sum.losses, 2);
+  assert.equal(sum.shots, 20);
+  // (10×0.5 + 2×1 + 8×0.25) / 20 = 0.45；直接平均是 0.583，那是错的
+  assert.ok(Math.abs(sum.potRate - 0.45) < 1e-9, String(sum.potRate));
+  assert.equal(sum.longestRun, 3);
+  assert.deepEqual(sum.recent, ['win', 'loss', 'loss'], '旧 → 新');
+});
+
+test('summarizeHistory：坏条目跳过，走势最多留 10 场', () => {
+  const entries = [];
+  for (let i = 0; i < 14; i += 1) {
+    entries.push({ ts: i, kind: 'eightball', result: i % 2 ? 'win' : 'loss', shots: 4, potRate: 0.5 });
+  }
+  const sum = summarizeHistory([null, ...entries, 'x', { result: 'win' }]);
+  assert.equal(sum.recent.length, 10);
+  assert.equal(sum.recent.at(-1), 'win', '最近一场是第 13 场（奇数 → win）');
+  assert.equal(sum.matches, 15, '最后那个只有 result 的算一场未分胜负以外的条目也能计');
+});
+
+// ---------------------------------------------------------------- 战绩存储
+//
+// 战绩是**独立**的一份：不进存档 v2 的 log / history，读坏了只丢这一份。
+
+test('appendMatch / readMatches：存进去能读回来，字段被裁剪成白名单', () => {
+  const store = memoryStore();
+  const out = appendMatch(
+    { kind: 'eightball', result: 'win', shots: 9, potRate: 0.4444, longestRun: 3, fouls: 1, junk: 'x' },
+    store,
+    { now: 1700000000000 }
+  );
+  assert.equal(out.ok, true);
+  assert.equal(out.matches.length, 1);
+  const raw = JSON.parse(store.getItem(MATCH_KEY));
+  assert.equal(raw.v, 1, '带版本号');
+  assert.equal(raw.items[0].ts, 1700000000000);
+  assert.equal(raw.items[0].junk, undefined, '白名单之外的字段不落盘');
+
+  const back = readMatches(store);
+  assert.equal(back.length, 1);
+  assert.equal(back[0].kind, 'eightball');
+  assert.equal(back[0].result, 'win');
+  assert.equal(back[0].shots, 9);
+});
+
+test('appendMatch：只留最近 MATCH_LIMIT 场，最旧的被挤掉', () => {
+  const store = memoryStore();
+  for (let i = 0; i < MATCH_LIMIT + 7; i += 1) {
+    appendMatch({ kind: 'nineball', result: 'win', shots: 3, potRate: 0.5 }, store, { now: i + 1 });
+  }
+  const back = readMatches(store);
+  assert.equal(back.length, MATCH_LIMIT);
+  assert.equal(back[0].ts, 8, '前 7 场被挤掉了');
+  assert.equal(back.at(-1).ts, MATCH_LIMIT + 7);
+});
+
+test('readMatches：整份读坏就丢掉重来，不把坏字符串留在存储里', () => {
+  const store = memoryStore();
+  store.setItem(MATCH_KEY, '{"v":1,"items":[');
+  assert.deepEqual(readMatches(store), []);
+  assert.equal(store.getItem(MATCH_KEY), null, '坏档真的被删了，不是只报个错');
+});
+
+test('readMatches：单条看不懂只跳过那一条，其余照读；命中率越界收敛到 0–1', () => {
+  const store = memoryStore();
+  store.setItem(
+    MATCH_KEY,
+    JSON.stringify({
+      v: 1,
+      items: [
+        { ts: 1, kind: 'eightball', result: 'win', shots: 5, potRate: 2 },
+        { ts: 2, kind: '不认识', result: 'win', shots: 5 },
+        { ts: 3, kind: 'snooker', result: '乱写', shots: -1, potRate: -0.5 },
+        null,
+      ],
+    })
+  );
+  const back = readMatches(store);
+  assert.equal(back.length, 2, '玩法不认识的那条被丢掉');
+  assert.equal(back[0].potRate, 1, '>1 的命中率收敛到 1');
+  assert.equal(back[1].potRate, 0, '<0 的收敛到 0');
+  assert.equal(back[1].result, 'undecided');
+  assert.equal(back[1].shots, 0, '负数杆数归零');
+});
+
+test('存储不可用时 appendMatch 返回 ok:false，但仍给出「本该存成什么样」', () => {
+  const out = appendMatch({ kind: 'eightball', result: 'loss', shots: 4 }, null, { now: 9 });
+  assert.equal(out.ok, false);
+  assert.equal(out.matches.length, 1);
+  assert.equal(out.matches[0].ts, 9);
+  assert.equal(readMatches(null).length, 0);
+});
+
+test('clearMatches：清空之后读回来是空的', () => {
+  const store = memoryStore();
+  appendMatch({ kind: 'eightball', result: 'win', shots: 2 }, store, { now: 1 });
+  assert.equal(readMatches(store).length, 1);
+  assert.equal(clearMatches(store), true);
+  assert.deepEqual(readMatches(store), []);
 });

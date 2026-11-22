@@ -2692,6 +2692,328 @@ console.log('存档·失败文案:', saveFailure);
   check('文案验完之后 localStorage 仍然可用', r.recovered === true, String(r.recovered));
 }
 
+// ------------------------------------------------------------ 赛后复盘与跨局战绩
+//
+// 「对局记录」只列文本，复盘面板要把它变成几个数——而数字对不对，不能靠面板
+// 自己说自己对。这里真的打完一局（走 shootManual → simulateShot → resolveShot
+// 那条真路，不伪造 phase），然后拿 g.log 重新算一遍，跟面板上的数逐个比对：
+// 杆数 / 进球 / 命中率 / 犯规 / 结果，任何一项对不上都说明面板读错了流水。
+//
+// 战绩还得跨刷新活下来，并且**不能**住在存档里：存档的语义是「一局」，读档、
+// 清档都会整份换掉，塞在一起必然互相覆盖。所以这里同时检查独立 key 和存档内容。
+//
+// 局面自己摆：母球→左下角袋的连线上放一颗要进的目标球（离袋口 0.30 m），
+// 其余球全判进袋。与「球局手打」那段同一套几何，1.20 m/s 直撞必进。
+const matchWinSetup = (kind, ball) => {
+  const lines = [
+    '(() => {',
+    '  const app = window.__app;',
+    '  app.setMode("game");',
+    '  const autoBox = document.getElementById("autoOpponent");',
+    '  if (autoBox && autoBox.checked) { autoBox.checked = false; autoBox.dispatchEvent(new Event("change", { bubbles: true })); }',
+    '  const kindSel = document.getElementById("gameKind");',
+    `  if (kindSel.value !== "${kind}") { kindSel.value = "${kind}"; kindSel.dispatchEvent(new Event("change", { bubbles: true })); }`,
+    '  const tableSel = document.getElementById("tablePreset");',
+    '  if (tableSel.value !== "pool9") { tableSel.value = "pool9"; tableSel.dispatchEvent(new Event("change", { bubbles: true })); }',
+    '  app.newGame();',
+    '  const t = app.table;',
+    '  const g = app.state.game;',
+    '  const pk = t.pockets.find((p) => p.id === "c-bl");',
+    '  const cue = g.balls.find((b) => b.number === 0);',
+    `  const target = g.balls.find((b) => b.number === ${ball});`,
+    '  const dx = pk.x - t.length * 0.5;',
+    '  const dy = pk.y - t.width * 0.5;',
+    '  const len = Math.hypot(dx, dy);',
+    '  const ux = dx / len;',
+    '  const uy = dy / len;',
+    '  cue.x = pk.x - ux * 1.42;',
+    '  cue.y = pk.y - uy * 1.42;',
+    '  cue.pocketed = false; cue.vx = 0; cue.vy = 0; cue.wx = 0; cue.wy = 0; cue.wz = 0;',
+    `  target.x = pk.x - ux * 0.30;`,
+    `  target.y = pk.y - uy * 0.30;`,
+    '  target.pocketed = false; target.vx = 0; target.vy = 0; target.wx = 0; target.wy = 0; target.wz = 0;',
+    '  for (const b of g.balls) {',
+    `    if (b.number === 0 || b.number === ${ball}) continue;`,
+    '    b.pocketed = true; b.vx = 0; b.vy = 0; b.wx = 0; b.wy = 0; b.wz = 0;',
+    '  }',
+    '  g.breakShot = false;',
+    '  g.turn = 0;',
+    '  g.phase = "playing";',
+    '  g.requiresRerack = false;',
+    '  g.ballInHand = null;',
+    '  g.pendingChoice = null;',
+    '  g.shots = 0;',
+    '  g.log = [];',
+    '  g.winner = null;',
+    '  app.state.history = [];',
+    '  app.state.gSolution = null;',
+  ];
+  if (kind === 'eightball') {
+    // 黑八：分组钉住、台面不再是 open，下面的 8 号才不是「先碰就犯规」。
+    lines.push('  g.open = false;');
+    lines.push('  g.players[0].group = "solid"; g.players[0].fouls = 0;');
+    lines.push('  g.players[1].group = "stripe"; g.players[1].fouls = 0;');
+  }
+  lines.push('  const aim = app.currentAim();');
+  lines.push(
+    '  return JSON.stringify({ kind: g.kind, target: aim ? aim.targetId : null, from: aim ? aim.from : null });'
+  );
+  lines.push('})()');
+  return lines.join('\n');
+};
+
+const MATCH_SNAP = `(() => {
+  const app = window.__app;
+  const g = app.state.game;
+  const panel = document.getElementById('matchStats');
+  const first = document.getElementById('log').firstElementChild;
+  return JSON.stringify({
+    animating: app.state.animating,
+    phase: g ? g.phase : null,
+    winner: g ? g.winner : null,
+    shots: g ? g.shots : null,
+    kind: g ? g.kind : null,
+    log: g ? g.log.map((e) => ({ shot: e.shot, shooter: e.shooter, summary: e.summary, fouls: e.fouls })) : [],
+    panel: panel ? panel.textContent.replace(/\\s+/g, ' ').trim() : null,
+    panelVisible: panel ? panel.offsetParent !== null : false,
+    panelRows: panel ? panel.querySelectorAll('.match-list li').length : 0,
+    grid: panel ? Array.from(panel.querySelectorAll('.match-grid div')).map((d) => d.textContent.replace(/\\s+/g, ' ').trim()) : [],
+    logFirst: first ? first.textContent.replace(/\\s+/g, ' ').trim() : null,
+    stored: localStorage.getItem('dsh-billiards-matches'),
+    save: localStorage.getItem('pool-ai-coach/game/v1'),
+  });
+})()`;
+
+/** 摆好局面、打出必胜的一杆，等它真的结算成 ended。 */
+async function matchWinShot(kind, ball) {
+  const setup = JSON.parse(await evaluate(matchWinSetup(kind, ball)));
+  await sleep(150);
+  await evaluate(`(() => {
+    document.getElementById('power').value = '1.20';
+    document.getElementById('aimOffset').value = '0';
+    document.getElementById('tipB').value = '0';
+    document.getElementById('tipA').value = '0';
+    document.getElementById('power').dispatchEvent(new Event('input', { bubbles: true }));
+    document.getElementById('shootManual').click();
+  })()`);
+  let last = null;
+  for (let i = 0; i < 80; i++) {
+    await sleep(200);
+    last = JSON.parse(await evaluate(MATCH_SNAP));
+    if (!last.animating && last.phase === 'ended') break;
+  }
+  return { setup, ...(last ?? {}), timeout: !last || last.phase !== 'ended' };
+}
+
+/** 用 g.log 独立重算一遍，别用被测的那套解析函数（那样只是自己证明自己）。 */
+function expectedFromLog(rows, winner) {
+  const shotNumbers = rows.map((e) => e.shot).filter((n) => Number.isFinite(n) && n > 0);
+  const shots = shotNumbers.length ? Math.max(...shotNumbers) : rows.length;
+  const foulOf = (e) => (Array.isArray(e.fouls) && e.fouls.length) || /犯规/.test(e.summary || '');
+  const potted = rows.filter((e) => {
+    if (foulOf(e)) return false;
+    // 收官那一杆的播报被整句换成「这一局结束：X 获胜」，进袋信息没了；
+    // 击球者就是胜者且没犯规，这一杆只能是打进最后一颗。
+    if (/这一局结束/.test(e.summary || '')) return e.shooter === winner;
+    return /进\s*\d+\s*号/.test(e.summary || '');
+  }).length;
+  const fouls = rows.filter(foulOf).length;
+  return { shots, pots: potted, fouls };
+}
+
+const matchEight = await matchWinShot('eightball', 8);
+console.log('赛后复盘·黑八收官:', JSON.stringify({
+  kind: matchEight.kind,
+  phase: matchEight.phase,
+  winner: matchEight.winner,
+  shots: matchEight.shots,
+  grid: matchEight.grid,
+  logFirst: matchEight.logFirst,
+  timeout: matchEight.timeout,
+}));
+const eightWant = expectedFromLog(matchEight.log || [], matchEight.winner);
+{
+  const r = matchEight;
+  check(
+    '真的打完一局黑八（进 8 号 → phase=ended、你获胜）',
+    r.timeout === false && r.phase === 'ended' && r.winner === 0,
+    `phase=${r.phase} winner=${r.winner} timeout=${r.timeout}`
+  );
+  check(
+    '对局记录末条写着这一局结束、谁获胜',
+    /这一局结束/.test(r.logFirst || '') && /获胜/.test(r.logFirst || ''),
+    r.logFirst || '（没有记录行）'
+  );
+  check(
+    '复盘面板出现，杆数 / 进球 / 命中率 都能从 g.log 重新算出来',
+    r.panelVisible === true &&
+      r.grid[0] === `杆数${eightWant.shots}` &&
+      r.grid[1] === `进球${eightWant.pots}` &&
+      r.grid[2] === `命中率${eightWant.shots ? Math.round((eightWant.pots / eightWant.shots) * 100) : 0}%`,
+    `面板=${JSON.stringify(r.grid)} log 重算=${JSON.stringify(eightWant)}`
+  );
+  check(
+    '复盘面板的犯规数与结果也自洽（1 杆 1 进 → 0 犯、胜）',
+    r.grid[4] === `犯规${eightWant.fouls}` && r.grid[5] === '本局结果胜',
+    JSON.stringify(r.grid)
+  );
+}
+
+{
+  const stored = JSON.parse(matchEight.stored || 'null');
+  check(
+    '一局结束自动写进独立 key dsh-billiards-matches（带版本号）',
+    Boolean(stored) && stored.v === 1 && Array.isArray(stored.items) && stored.items.length === 1,
+    matchEight.stored || '（没有这个 key）'
+  );
+  const one = stored?.items?.[0] ?? {};
+  check(
+    '这条战绩记的是：八球 / 胜 / 杆数 / 命中率 / 最长连击 / 犯规',
+    one.kind === 'eightball' &&
+      one.result === 'win' &&
+      one.shots === eightWant.shots &&
+      Number.isFinite(one.potRate) &&
+      Number.isFinite(one.longestRun) &&
+      Number.isFinite(one.fouls) &&
+      one.ts > 0,
+    JSON.stringify(one)
+  );
+}
+
+// 存档里不该有战绩：存一局，再看存档 JSON 的字段。
+await evaluate(`(() => {
+  const app = window.__app;
+  app.state.saveOverwrite = true;
+  app.saveGame();
+  return true;
+})()`);
+await sleep(200);
+{
+  const snap = JSON.parse(await evaluate(MATCH_SNAP));
+  const saved = JSON.parse(snap.save || 'null');
+  check(
+    '战绩没有被塞进存档 v2（存档 JSON 里没有战绩字段，只是那一局的局面）',
+    Boolean(saved) && saved.v === 2 && !('matches' in saved) && !('records' in saved),
+    snap.save ? Object.keys(saved).join(',') : '（没有存档）'
+  );
+}
+
+const matchNine = await matchWinShot('nineball', 9);
+console.log('赛后复盘·九球收官:', JSON.stringify({
+  kind: matchNine.kind,
+  phase: matchNine.phase,
+  winner: matchNine.winner,
+  grid: matchNine.grid,
+  timeout: matchNine.timeout,
+}));
+const nineWant = expectedFromLog(matchNine.log || [], matchNine.winner);
+{
+  const r = matchNine;
+  const stored = JSON.parse(r.stored || 'null');
+  check(
+    '九球同样自动记账：战绩变成 2 条，最新一条是九球',
+    r.timeout === false &&
+      r.phase === 'ended' &&
+      r.winner === 0 &&
+      stored?.items?.length === 2 &&
+      stored.items[1].kind === 'nineball' &&
+      stored.items[1].result === 'win',
+    JSON.stringify({ items: stored?.items?.length, last: stored?.items?.[1] })
+  );
+  check(
+    '九球那局的命中率也来自本局 log',
+    r.grid[2] === `命中率${nineWant.shots ? Math.round((nineWant.pots / nineWant.shots) * 100) : 0}%`,
+    `${JSON.stringify(r.grid)} log 重算=${JSON.stringify(nineWant)}`
+  );
+  check(
+    '汇总写的是 2 场 2 胜，最近 5 场列出 2 条',
+    /共 2 场/.test(r.panel || '') && /2 胜 0 负/.test(r.panel || '') && r.panelRows === 2,
+    `rows=${r.panelRows} panel=${(r.panel || '').slice(0, 120)}`
+  );
+}
+
+// 刷新：本局没了，战绩必须还在（否则「跨局战绩」根本没落地）。
+await send(ws, 'Page.navigate', { url: URL });
+await sleep(2500);
+// 刷新后落在练习页，而复盘面板和「对局记录」同在 #gamePanel 里——不切回「打一局」
+// 它整块是 display:none，读出来的字照样在（textContent 不看可见性），
+// 那样这条断言就只是在骗自己。所以先切回去，再连可见性一起断言。
+await evaluate(`(() => { window.__app.setMode('game'); return true; })()`);
+await sleep(400);
+const matchReload = JSON.parse(await evaluate(MATCH_SNAP));
+console.log('赛后复盘·刷新后:', JSON.stringify({
+  shots: matchReload.shots,
+  rows: matchReload.panelRows,
+  visible: matchReload.panelVisible,
+  panel: (matchReload.panel || '').slice(0, 160),
+}));
+{
+  const stored = JSON.parse(matchReload.stored || 'null');
+  check(
+    '刷新后本局是新的空白局，历史战绩仍在面板上（2 场 2 胜）',
+    matchReload.shots === 0 &&
+      matchReload.grid[0] === '杆数0' &&
+      matchReload.panelVisible === true &&
+      /共 2 场/.test(matchReload.panel || '') &&
+      /2 胜 0 负/.test(matchReload.panel || ''),
+    `shots=${matchReload.shots} visible=${matchReload.panelVisible} panel=${(matchReload.panel || '').slice(0, 160)}`
+  );
+  check(
+    '刷新后最近 5 场仍然列出 2 条（localStorage 真的持久化了）',
+    matchReload.panelRows === 2 && Array.isArray(stored?.items) && stored.items.length === 2,
+    `rows=${matchReload.panelRows} items=${stored?.items?.length}`
+  );
+}
+
+// 390 宽下这块新面板不许把侧栏顶出去，也不许盖到台面上。
+await send(ws, 'Emulation.setDeviceMetricsOverride', {
+  width: 390,
+  height: 844,
+  deviceScaleFactor: 2,
+  mobile: true,
+});
+await sleep(500);
+const matchNarrow = JSON.parse(await evaluate(`(() => {
+  const doc = document.documentElement;
+  const vw = doc.clientWidth;
+  const box = document.getElementById('matchStats');
+  const stage = document.getElementById('stage');
+  const wide = [];
+  for (const el of box.querySelectorAll('*')) {
+    const r = el.getBoundingClientRect();
+    if (r.width > 0 && (r.right > vw + 1 || r.left < -1)) {
+      wide.push(el.tagName.toLowerCase() + (el.className ? '.' + String(el.className).split(' ')[0] : '') + ':' + Math.round(r.right));
+    }
+  }
+  const b = box.getBoundingClientRect();
+  const s = stage ? stage.getBoundingClientRect() : null;
+  return JSON.stringify({
+    vw,
+    scrollW: doc.scrollWidth,
+    wide: wide.slice(0, 6),
+    panelW: Math.round(b.width),
+    panelH: Math.round(b.height),
+    panelTop: Math.round(b.top),
+    stageBottom: s ? Math.round(s.bottom) : null,
+  });
+})()`));
+console.log('赛后复盘·390 窄屏:', JSON.stringify(matchNarrow));
+check(
+  '390 宽下复盘面板不横向溢出（scrollWidth <= innerWidth）',
+  matchNarrow.scrollW <= matchNarrow.vw + 1 &&
+    matchNarrow.wide.length === 0 &&
+    matchNarrow.panelH > 0 &&
+    matchNarrow.panelW <= matchNarrow.vw,
+  `scrollWidth=${matchNarrow.scrollW} viewport=${matchNarrow.vw} 面板=${matchNarrow.panelW}×${matchNarrow.panelH} 越界=${matchNarrow.wide.join(', ')}`
+);
+check(
+  '390 宽下复盘面板排在台面下方，不遮挡球桌',
+  matchNarrow.stageBottom === null || matchNarrow.panelTop >= matchNarrow.stageBottom - 1,
+  `panelTop=${matchNarrow.panelTop} stageBottom=${matchNarrow.stageBottom}`
+);
+await send(ws, 'Emulation.clearDeviceMetricsOverride');
+await sleep(300);
+
 // ------------------------------------------------------------ 姿态页窄屏（390×844）
 //
 // 姿态页原本是「左画面右面板」：aside 固定 390 px + main 是 flex，

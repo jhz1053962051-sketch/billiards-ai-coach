@@ -456,3 +456,134 @@ export function describeSave(store = defaultStore()) {
 }
 
 export const SAVE_KEY = KEY;
+
+// ---------------------------------------------------------------- 跨局战绩
+//
+// 战绩**单独一个 key**，一个字都不进存档 v2 的 log / history。三条理由：
+//   1) 存档的语义是「一局」，读档、导入、清档都是整份换掉，战绩会被连带改掉；
+//   2) 存档有 256 KB 的体积预算（HISTORY_LIMIT / packHistory 在挤那个预算），
+//      战绩是只增不减的历史，不该去跟一局的撤销栈抢地方；
+//   3) 两个标签页各打各的，打完都该进同一份战绩——共用一个 key 才能做到。
+//
+// 和存档一样只做「读不懂就丢」：坏掉的一条跳过，整份读不出来就清掉重来，
+// 绝不让 localStorage 里的一个坏字符串把整页带崩。
+
+/** 战绩的存储键。故意不复用存档的 KEY。 */
+export const MATCH_KEY = 'dsh-billiards-matches';
+
+/** 战绩格式版本。字段只增不改时不必加，形状变了才加。 */
+export const MATCH_VERSION = 1;
+
+/** 只留最近这么多场。50 场足够看出趋势，也不会把 localStorage 撑大。 */
+export const MATCH_LIMIT = 50;
+
+/**
+ * 校验一条战绩。读不懂返回 null（只丢这一条，不丢整份）。
+ *
+ * @param {unknown} raw
+ * @returns {{ts:number, kind:string, result:'win'|'loss'|'undecided', shots:number, potRate:number|null, longestRun:number, fouls:number}|null}
+ */
+function sanitizeMatch(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const kind = typeof raw.kind === 'string' && GAME_KINDS[raw.kind] ? raw.kind : null;
+  if (!kind) return null;
+  const result =
+    raw.result === 'win' || raw.result === 'loss' || raw.result === 'undecided'
+      ? raw.result
+      : 'undecided';
+  const count = (v) => (isFiniteNumber(v) && v > 0 ? Math.min(1e6, Math.floor(v)) : 0);
+  return {
+    ts: isFiniteNumber(raw.ts) && raw.ts > 0 ? raw.ts : 0,
+    kind,
+    result,
+    shots: count(raw.shots),
+    // 命中率只存 0–1。存坏的（负数、字符串、越界）退回 null，界面上就是「—」。
+    potRate: isFiniteNumber(raw.potRate) ? Math.min(1, Math.max(0, raw.potRate)) : null,
+    longestRun: count(raw.longestRun),
+    fouls: count(raw.fouls),
+  };
+}
+
+/** 把整份战绩从存储里删掉。删不掉返回 false，不抛。 */
+function dropMatches(store) {
+  try {
+    store.removeItem(MATCH_KEY);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 读全部战绩（旧的在前）。没有、读不出、形状不对都返回 []。
+ *
+ * 坏数据分两种处理：解析不出 JSON，或整个对象不成形 → 删掉这份重来；
+ * 单条看不懂 → 只跳过那条。判据和存档一致，但比存档宽松——战绩丢了只是
+ * 少一段历史，不值得为它拦住整页。
+ *
+ * @returns {Array<{ts:number, kind:string, result:string, shots:number, potRate:number|null, longestRun:number, fouls:number}>}
+ */
+export function readMatches(store = defaultStore()) {
+  if (!store) return [];
+  let text = null;
+  try {
+    text = store.getItem(MATCH_KEY);
+  } catch {
+    return [];
+  }
+  if (!text) return [];
+  let raw = null;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    dropMatches(store);
+    return [];
+  }
+  const newer = raw && typeof raw === 'object' && !Array.isArray(raw) && isFiniteNumber(raw.v) && raw.v > MATCH_VERSION;
+  const items = Array.isArray(raw) ? raw : Array.isArray(raw?.items) ? raw.items : null;
+  if (!items) {
+    // 比自己新的版本：留着不动，换回新版还能读；其它情况就是坏数据，清掉。
+    if (!newer) dropMatches(store);
+    return [];
+  }
+  const out = [];
+  for (const one of items) {
+    const clean = sanitizeMatch(one);
+    if (clean) out.push(clean);
+  }
+  return out.slice(-MATCH_LIMIT);
+}
+
+/**
+ * 追加一场战绩，并把整份裁到 MATCH_LIMIT 场。
+ *
+ * @param {object} entry 至少要有 kind；ts 缺省用 now
+ * @param {object|null} [store]
+ * @param {{now?:number}} [opts]
+ * @returns {{ok:boolean, matches:Array<object>}} ok=false 表示没写进存储（隐私模式 / 配额满），
+ *   matches 仍然是「本该存进去的样子」，界面照常能画。
+ */
+export function appendMatch(entry, store = defaultStore(), { now = Date.now() } = {}) {
+  const src = entry && typeof entry === 'object' ? entry : {};
+  const clean = sanitizeMatch({
+    ...src,
+    ts: isFiniteNumber(src.ts) && src.ts > 0 ? src.ts : now,
+  });
+  const kept = readMatches(store);
+  if (!clean) return { ok: false, matches: kept };
+  kept.push(clean);
+  const trimmed = kept.slice(-MATCH_LIMIT);
+  if (!store) return { ok: false, matches: trimmed };
+  try {
+    store.setItem(MATCH_KEY, JSON.stringify({ v: MATCH_VERSION, items: trimmed }));
+    return { ok: true, matches: trimmed };
+  } catch {
+    return { ok: false, matches: trimmed };
+  }
+}
+
+/** 清空战绩（界面上的「清空战绩」按钮走这里）。 */
+export function clearMatches(store = defaultStore()) {
+  if (!store) return false;
+  return dropMatches(store);
+}

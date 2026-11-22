@@ -41,7 +41,9 @@ import {
 import { takeTurn } from '../src/opponent.js';
 import { ballName as snookerBallName } from '../src/snooker.js';
 import {
+  appendMatch,
   loadSave,
+  readMatches,
   writeSave,
   clearSave,
   describeSave,
@@ -57,6 +59,7 @@ import {
 import {
   autoPauseHint,
   clamp,
+  computeMatchStats,
   currentAim,
   describeManualShot,
   describeNextShot,
@@ -74,6 +77,7 @@ import {
   shouldAutoShoot,
   simulateFrames,
   snapshotPositions,
+  summarizeHistory,
   tableForKind,
   undoLabel,
   unpackHistory,
@@ -1409,6 +1413,9 @@ function updateScore() {
 
 function updateLog() {
   const g = state.game;
+  // 「对局记录」旁边那块赛后复盘跟着一起刷：它俩读的是同一份 g.log，
+  // 分成两处调用迟早会出现「流水变了、统计没变」。
+  updateMatchStats();
   const box = $('log');
   // 读档时杆史被体积预算裁过的话，这里留一句话——否则用户只会看到
   // 「对局记录」比记忆里少几杆，又以为读档丢了东西。样式走行内属性，
@@ -1436,6 +1443,117 @@ function updateLog() {
     box.appendChild(d);
   }
   box.scrollTop = 0;
+}
+
+// ---------------------------------------------------------------- 赛后复盘与跨局战绩
+//
+// 「对局记录」给的是流水，这里给的是读完流水之后的几个数：本局多少杆、进了几杆、
+// 最长连着进了几杆；下面是跨局战绩。计算全在 state.js 的纯函数里
+// （computeMatchStats / summarizeHistory，单测钉着），这里只负责贴到 DOM 上。
+//
+// 战绩存在 dsh-billiards-matches（demo/save.js），和存档 key 完全分开：读档、
+// 清档、导入存档都不该动到历史战绩。
+//
+// 注意这里是 demo/app.js，是允许碰 localStorage 的那一层（demo/state.js 不行）。
+
+/** 已经记过账的局号。一局只记一条——撤销退回去再打完、读档后重画都不会多记。 */
+let matchedGeneration = -1;
+
+const MATCH_RESULT_TEXT = { win: '胜', loss: '负', undecided: '未分胜负' };
+
+function formatRate(rate) {
+  return typeof rate === 'number' && Number.isFinite(rate) ? `${Math.round(rate * 100)}%` : '—';
+}
+
+function formatMatchWhen(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '—';
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/**
+ * 一局打完时把这场写进战绩。
+ *
+ * 只在「真的结束了 + 这个局号还没记过」时写：结束后点撤销、再打回来，或者读回
+ * 一份已经结束的存档，都不该多出一条。
+ */
+function recordFinishedMatch(g) {
+  if (!g || g.phase !== 'ended') return;
+  if (matchedGeneration === state.generation) return;
+  matchedGeneration = state.generation;
+  const stats = computeMatchStats({ log: g.log, kind: g.kind, winner: g.winner, myself: 0 });
+  appendMatch({
+    kind: g.kind,
+    result: stats.result,
+    shots: stats.shots,
+    potRate: stats.potRate,
+    longestRun: stats.longestRun,
+    fouls: stats.fouls,
+  });
+}
+
+/** 刷「赛后复盘」面板：本局统计 + 最近 5 场 + 汇总 + 走势。 */
+function updateMatchStats() {
+  const box = $('matchStats');
+  if (!box) return;
+  const g = state.game;
+  recordFinishedMatch(g);
+  const stats = computeMatchStats({
+    log: g ? g.log : [],
+    kind: g ? g.kind : '',
+    winner: g && g.phase === 'ended' ? g.winner : null,
+    myself: 0,
+  });
+  const history = readMatches();
+  const sum = summarizeHistory(history);
+
+  const parts = [];
+  if (g) {
+    parts.push(
+      '<div class="match-grid">' +
+        `<div>杆数<b>${stats.shots}</b></div>` +
+        `<div>进球<b>${stats.pots}</b></div>` +
+        `<div>命中率<b>${formatRate(stats.potRate)}</b></div>` +
+        `<div>最长连击<b>${stats.longestRun}</b></div>` +
+        `<div>犯规<b>${stats.fouls}</b></div>` +
+        `<div>本局结果<b>${MATCH_RESULT_TEXT[stats.result]}</b></div>` +
+        '</div>'
+    );
+  } else {
+    parts.push('<p class="hint">开一局球，打完在这里看复盘。</p>');
+  }
+
+  if (!history.length) {
+    parts.push('<p class="hint">还没有打完的对局——一局结束会自动记一条。</p>');
+  } else {
+    parts.push('<div class="match-title">最近 5 场</div><ul class="match-list">');
+    for (const m of history.slice(-5).reverse()) {
+      const kindLabel = GAME_KINDS[m.kind]?.label ?? m.kind;
+      const cls = m.result === 'win' ? 'warm' : m.result === 'loss' ? 'cold' : '';
+      parts.push(
+        `<li><span>${formatMatchWhen(m.ts)} · ${esc(kindLabel)}</span>` +
+          `<span class="${cls}">${MATCH_RESULT_TEXT[m.result]} · ${m.shots} 杆 · ${formatRate(m.potRate)}</span></li>`
+      );
+    }
+    parts.push('</ul>');
+    parts.push(
+      '<div class="match-title">汇总</div>' +
+        `<div class="match-sum">共 ${sum.matches} 场 · ${sum.wins} 胜 ${sum.losses} 负` +
+        `${sum.undecided ? ` ${sum.undecided} 未分胜负` : ''} · 总杆数 ${sum.shots} · ` +
+        `总体命中率 ${formatRate(sum.potRate)} · 最长连击 ${sum.longestRun}</div>` +
+        '<div class="match-form">' +
+        sum.recent
+          .map((r) => {
+            const cls = r === 'win' ? 'warm' : r === 'loss' ? 'cold' : '';
+            return `<i class="match-dot ${cls}" title="${MATCH_RESULT_TEXT[r]}"></i>`;
+          })
+          .join('') +
+        '</div>'
+    );
+  }
+  box.innerHTML = parts.join('');
 }
 
 /**
@@ -2195,6 +2313,9 @@ function applyLoadedGame(saved) {
 
   state.generation += 1;
   state.game = g;
+  // 读回来的是一份「已经结束」的存档时，这一局早就记过账了：把局号记成已记账，
+  // 免得下面 updateLog 又往战绩里补一条重复的。
+  matchedGeneration = state.generation;
   state.gSolution = null;
   state.animating = false;
   state.opponentThinking = false;
@@ -2807,6 +2928,9 @@ window.addEventListener('resize', resize);
 resetLayout();
 resize();
 updatePracticeLog();
+// 战绩是跨局的，刷新之后必须还在：这里先按存储里的内容画一遍，
+// 不等开球（否则用户会以为历史战绩随刷新丢了）。
+updateMatchStats();
 
 // 换台下拉按预设自动填，不写死在 HTML 里——预设表只有一份在 src/constants.js。
 for (const preset of Object.values(TABLE_PRESETS)) {

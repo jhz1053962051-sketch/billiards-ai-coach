@@ -806,6 +806,40 @@
   .log div:last-child { border-bottom: 0; }
   .log::-webkit-scrollbar { width: 4px; }
   .log::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.2); border-radius: 2px; }
+
+  /* 赛后复盘：本局统计 + 跨局战绩。
+     数值格沿用练习统计那套三列网格（.practice-buckets），不另造一套设计语言。
+     minmax(0, 1fr) + 单元格 min-width:0 是 390 宽下不溢出的关键：
+     默认的 minmax(auto, 1fr) 会被内容撑开，一行三个数字就能把侧栏顶出去。 */
+  .match-stats { font-size: 12px; color: var(--text-secondary); line-height: 1.55; }
+  .match-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .match-grid div {
+    min-width: 0; padding: 6px; text-align: center;
+    border: 1px solid var(--line); border-radius: 6px;
+    background: rgba(255, 255, 255, 0.03);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .match-grid b { display: block; color: var(--text); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .match-title { margin: 10px 0 2px; font-size: 11px; color: var(--muted); letter-spacing: .6px; }
+  .match-list { margin: 0; padding: 0; list-style: none; }
+  .match-list li {
+    display: flex; gap: 8px; justify-content: space-between; align-items: baseline;
+    padding: 3px 0; border-bottom: 1px dashed rgba(255, 255, 255, 0.08);
+    min-width: 0;
+  }
+  .match-list li:last-child { border-bottom: 0; }
+  .match-list li span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .match-list li span:last-child { flex: none; font-variant-numeric: tabular-nums; }
+  .match-list .warm { color: var(--accent-light); }
+  .match-list .cold { color: var(--danger); }
+  .match-sum { margin-top: 2px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .match-form { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+  .match-dot {
+    width: 12px; height: 12px; border-radius: 50%;
+    background: rgba(255, 255, 255, 0.18); flex: none;
+  }
+  .match-dot.warm { background: var(--accent); }
+  .match-dot.cold { background: #ef4444; }
   .practice-buckets {
     display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px;
     margin: 8px 0; color: var(--text-secondary); font-size: 11px;
@@ -1294,6 +1328,14 @@
       <div class="card">
         <h2>对局记录</h2>
         <div class="log" id="log">—</div>
+      </div>
+
+      <!-- 赛后复盘：本局统计 + 跨局战绩。战绩单独存在 dsh-billiards-matches
+           这个 key 里，不进存档——存档的语义是「一局」，读档 / 清档 / 导入都会
+           整份换掉，塞在一起会互相覆盖。 -->
+      <div class="card">
+        <h2>赛后复盘</h2>
+        <div class="match-stats" id="matchStats">—</div>
       </div>
     </div>
   </aside>

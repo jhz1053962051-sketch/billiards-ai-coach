@@ -1001,3 +1001,214 @@ export function reduceSaveWrite(stored, own) {
   }
   return { write: true, reason: 'same' };
 }
+
+// ---------------------------------------------------------------- 局内统计
+//
+// 一局打完要回答的无非是「打了多少杆、进了几个、最长连着进了几杆、犯了几次规」。
+// 这些数**只能从 g.log 里读**：log 的每一项是 { shot, shooter, summary, fouls }，
+// 而球桌那一刻的球位没人存过。所以解析的正确性完全取决于 summary 的真实文案，
+// 下面两条正则是对着 src/rules.js:838-851（黑八 / 九球）与 src/snooker.js:418-431
+// （斯诺克）逐句抄下来的，不是猜的：
+//
+//   `开球 · 进 1、2 号 · 你 继续`            ← 一杆进两颗
+//   `没有球进袋 · 犯规：母球落袋（WPA 3.1） · 换 对手`
+//   `得 8 分 · 32 : 41 · 该打红球 · 你 继续`  ← 斯诺克，没有球号，只有得分
+//
+// 两条硬约束：
+//   · 边界情况一律退化成 0 / null，**不许抛**——统计面板挂了不该把整页带走；
+//   · 「进球」按**杆**数，不按颗数：开球一杆进三颗算一次进球，否则 potRate 会
+//     出现 300%，界面上写着「命中率」却超过 100% 是明确的 bug。
+
+/** 一杆的播报里「进 1、2 号」这一段。斯诺克没有球号（红球同号），走另一条。 */
+const POTTED_NUMBERS = /进\s*(\d+(?:\s*[、,，]\s*\d+)*)\s*号/;
+
+/** 斯诺克的一杆有得分就说明至少进了一颗（红球 1 分起，彩球 2 分起）。 */
+const SNOOKER_POINTS = /得\s*(\d+)\s*分/;
+
+/** 犯规的兜底判据：log 里带 fouls 数组，早期手写记录只有文案。 */
+const FOUL_WORD = /犯规/;
+
+/**
+ * 一局结束那一杆的播报会被整句换成结束语，进袋信息就没了。
+ *
+ * 三种玩法都是这个写法（src/rules.js:838-851 的黑八 / 九球、src/snooker.js:430
+ * 的斯诺克）：`你 与 对手 的这一局结束：你 获胜。`。所以按键球算完再补一条规则，
+ * 见下面 computeMatchStats 里的收尾判定。
+ */
+const GAME_ENDED = /这一局结束/;
+
+/** 统计面板与跨局战绩都只看最近这么多场。 */
+export const MATCH_RECENT_LIMIT = 10;
+
+/**
+ * 把 log 里的一条读成「这一杆干了什么」。
+ *
+ * 只在内部用：形状不对的输入退化成空杆，不抛。
+ *
+ * @param {unknown} raw
+ * @param {string} kind 玩法 id（snooker 时用得分判定进球）
+ * @returns {{shot:number|null, shooter:number|null, foul:boolean, potted:boolean, balls:number}}
+ */
+function readLogEntry(raw, kind) {
+  const e = raw && typeof raw === 'object' ? raw : {};
+  const summary = typeof e.summary === 'string' ? e.summary : '';
+  const fouls = Array.isArray(e.fouls) ? e.fouls.filter((c) => typeof c === 'string' && c) : [];
+  const shotNumber = Number(e.shot);
+  const shooterNumber = Number(e.shooter);
+  let balls = 0;
+  const numbers = POTTED_NUMBERS.exec(summary);
+  if (numbers) {
+    balls = numbers[1].split(/[、,，]/).filter((n) => n.trim()).length;
+  } else if (kind === 'snooker') {
+    const points = SNOOKER_POINTS.exec(summary);
+    if (points && Number(points[1]) > 0) balls = 1;
+  }
+  const foul = fouls.length > 0 || FOUL_WORD.test(summary);
+  return {
+    shot: Number.isFinite(shotNumber) && shotNumber > 0 ? Math.floor(shotNumber) : null,
+    shooter: shooterNumber === 0 || shooterNumber === 1 ? shooterNumber : null,
+    foul,
+    // 犯规那一杆即使有球进袋也不算进球：进的是不该进的球，或者母球一起进了。
+    potted: balls > 0 && !foul,
+    balls,
+    // 这一条是不是「本局结束」那句总结。收官那一杆进没进球要看它，见 computeMatchStats。
+    end: GAME_ENDED.test(summary),
+  };
+}
+
+/**
+ * 本局统计。
+ *
+ * @param {{log?:unknown[], balls?:unknown[], kind?:string, winner?:number|null, myself?:number}} [input]
+ *   log    对局流水（src/rules.js 的 g.log）
+ *   balls  当前球位（这一版还没用到，留着让调用方按真实签名传，将来做「剩几颗」不必改调用点）
+ *   kind   玩法 id，斯诺克要靠它换一套解析
+ *   winner 胜者下标；没结束时传 null / undefined
+ *   myself 自己是哪一方，默认 0
+ * @returns {{shots:number, pots:number, potRate:number|null, longestRun:number, fouls:number, result:'win'|'loss'|'undecided'}}
+ */
+export function computeMatchStats(input) {
+  const src = input && typeof input === 'object' ? input : {};
+  const log = Array.isArray(src.log) ? src.log : [];
+  const kind = typeof src.kind === 'string' ? src.kind : '';
+
+  // 同一条杆号出现两次 = 那不是一杆。开球不达标、接手方选择交回时，规则引擎会
+  // 往 log 里补一条「决定」，杆号与刚打完的那一杆相同（src/rules.js:829-834），
+  // 它既不增加杆数也不该被当成一杆来算进球。
+  const entries = [];
+  const seen = new Set();
+  let highestShot = 0;
+  for (const raw of log) {
+    const entry = readLogEntry(raw, kind);
+    if (entry.shot !== null) {
+      if (seen.has(entry.shot)) continue;
+      seen.add(entry.shot);
+      if (entry.shot > highestShot) highestShot = entry.shot;
+    }
+    entries.push(entry);
+  }
+  // 杆号是 1..N 连续发的（src/rules.js 用 next.shots 当杆号），所以最大杆号就是
+  // 总杆数；整份 log 都没有杆号（手写记录）时退回数条目。
+  const shots = highestShot > 0 ? highestShot : entries.length;
+
+  // 胜者先定下来：收官那一杆算不算进球要看它（见下面的 potted 判定）。
+  const w = src.winner;
+  const winner = w === 0 || w === 1 ? w : w === '0' ? 0 : w === '1' ? 1 : null;
+  const me = Number(src.myself) === 1 ? 1 : 0;
+
+  let pots = 0;
+  let fouls = 0;
+  let run = 0;
+  let longestRun = 0;
+  let lastShooter = null;
+  for (const entry of entries) {
+    if (entry.foul) fouls += 1;
+    // 收官那一条的播报被整句换成了「这一局结束：X 获胜」，进袋信息丢了。
+    // 但它同时说明了一件事：这一杆的击球者就是胜者、而且没有犯规——能以一杆
+    // 结束本局的只有「打进最后的球」（黑八打进 8 号、九球打进 9 号、斯诺克清完
+    // 最后一颗）；反过来，犯规收场（只剩黑球时犯规）或提前把 8 号打进导致输局，
+    // 击球者都不是胜者，或者 fouls 非空，都不会被算成进球。
+    const potted =
+      entry.potted || (entry.end && !entry.foul && winner !== null && entry.shooter === winner);
+    if (potted) {
+      pots += 1;
+      // 连着进球：同一个人、中间没有空杆也没有犯规。换手后从 1 重新数。
+      run = lastShooter !== null && entry.shooter === lastShooter ? run + 1 : 1;
+      if (run > longestRun) longestRun = run;
+    } else {
+      run = 0;
+    }
+    if (entry.shooter !== null) lastShooter = entry.shooter;
+  }
+
+  return {
+    shots,
+    pots,
+    // 0 杆时没有「命中率」可言。返回 null 而不是 0，也不是 NaN：0 会被界面上
+    // 写成「0%」，那是「打了但一杆没进」，和「还没打」是两件事。
+    potRate: shots > 0 ? pots / shots : null,
+    longestRun,
+    fouls,
+    result: winner === null ? 'undecided' : winner === me ? 'win' : 'loss',
+  };
+}
+
+/**
+ * 跨局汇总。输入是存储里那一串「每场一条」的摘要，形状不对的条目跳过。
+ *
+ * 总体命中率按杆数加权，不是把每场的百分比求平均：一场 1 杆 100% 和一场
+ * 20 杆 50% 平均成 75% 是错的，真实命中率是 (1 + 10) / 21 ≈ 52%。
+ *
+ * @param {unknown[]} entries
+ * @returns {{matches:number, wins:number, losses:number, undecided:number, shots:number, potRate:number|null, longestRun:number, recent:Array<'win'|'loss'|'undecided'>}}
+ *   recent 是最近 MATCH_RECENT_LIMIT 场的走势，**旧 → 新**，界面上直接画成一排暖/冷点。
+ */
+export function summarizeHistory(entries) {
+  const list = Array.isArray(entries) ? entries : [];
+  let matches = 0;
+  let wins = 0;
+  let losses = 0;
+  let undecided = 0;
+  let shots = 0;
+  let longestRun = 0;
+  let weightedRate = 0;
+  let weightedShots = 0;
+  const results = [];
+  for (const raw of list) {
+    if (!raw || typeof raw !== 'object') continue;
+    const result = raw.result === 'win' || raw.result === 'loss' ? raw.result : 'undecided';
+    const oneShots =
+      typeof raw.shots === 'number' && Number.isFinite(raw.shots) && raw.shots > 0
+        ? Math.floor(raw.shots)
+        : 0;
+    const rate =
+      typeof raw.potRate === 'number' && Number.isFinite(raw.potRate)
+        ? clamp(raw.potRate, 0, 1)
+        : null;
+    const run =
+      typeof raw.longestRun === 'number' && Number.isFinite(raw.longestRun) && raw.longestRun > 0
+        ? Math.floor(raw.longestRun)
+        : 0;
+    matches += 1;
+    if (result === 'win') wins += 1;
+    else if (result === 'loss') losses += 1;
+    else undecided += 1;
+    shots += oneShots;
+    if (rate !== null && oneShots > 0) {
+      weightedRate += rate * oneShots;
+      weightedShots += oneShots;
+    }
+    if (run > longestRun) longestRun = run;
+    results.push(result);
+  }
+  return {
+    matches,
+    wins,
+    losses,
+    undecided,
+    shots,
+    potRate: weightedShots > 0 ? weightedRate / weightedShots : null,
+    longestRun,
+    recent: results.slice(-MATCH_RECENT_LIMIT),
+  };
+}
