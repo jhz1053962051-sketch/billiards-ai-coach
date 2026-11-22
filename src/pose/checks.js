@@ -331,16 +331,297 @@ function makeResult(id, label, category, opts) {
 // ---------------------------------------------------------------- 站姿检查
 
 /**
+ * 一次站姿评估的共享上下文：比例尺、左右手判定、两侧关键点。
+ *
+ * 七个 checkXxx 只读这份上下文，彼此之间没有共享的可变状态，所以能各自
+ * 独立成函数、独立测。这里的计算顺序与拆分前完全一致（尺度归一 → 左右手 →
+ * 两侧关键点），浮点运算的顺序因此没有变化。
+ *
+ * @param {{image:object, world:object, hasWorld:boolean}} pose normalizePose 的输出
+ * @param {{handedness?:'auto'|'left'|'right'}} [opts]
+ */
+function setupContext(pose, opts = {}) {
+  const p = pose.world;
+
+  const shoulderMid = vec.mid(p.left_shoulder, p.right_shoulder);
+  const hipMid = vec.mid(p.left_hip, p.right_hip);
+  const shoulderWidth = vec.dist(p.left_shoulder, p.right_shoulder);
+  const torsoLen = vec.dist(shoulderMid, hipMid);
+
+  // 尺度归一：肩宽、躯干长都必须有效，否则后面所有比值都无意义
+  const scaleOk = shoulderWidth > 1e-3 && torsoLen > 1e-3;
+
+  const handed =
+    opts.handedness === 'left' || opts.handedness === 'right'
+      ? { bridge: opts.handedness === 'right' ? 'left' : 'right', grip: opts.handedness, method: 'manual', margin: 0 }
+      : detectHandedness(p);
+
+  return {
+    p,
+    image: pose.image,
+    shoulderMid,
+    hipMid,
+    shoulderWidth,
+    torsoLen,
+    scaleOk,
+    handed,
+    grip: sideOf(p, handed.grip),
+    bridge: sideOf(p, handed.bridge),
+  };
+}
+
+/**
+ * 1. 站姿宽度：双脚间距 / 肩宽。
+ * @param {ReturnType<typeof setupContext>} ctx
+ */
+function checkStanceWidth(ctx) {
+  const { p, image, shoulderWidth, scaleOk } = ctx;
+  const footGap = vec.dist(p.left_foot_index, p.right_foot_index);
+  const value = scaleOk ? footGap / shoulderWidth : NaN;
+  const needs = ['left_foot_index', 'right_foot_index', 'left_shoulder', 'right_shoulder'];
+  const conf = minVisibility(p, needs);
+  const clipped = clippedByFrame(image, needs);
+  const score =
+    conf < VIS_FLOOR || clipped
+      ? null
+      : bandScore(value, THRESHOLDS.stance_width.good, THRESHOLDS.stance_width.warn);
+  return makeResult('stance_width', '站姿宽度', 'setup', {
+    value, score, unit: THRESHOLDS.stance_width.unit,
+    confidence: conf,
+    needs: ['left_foot_index', 'right_foot_index'],
+    detail: !Number.isFinite(value)
+      ? '量不到双脚位置，站姿宽度无法判定。'
+      : clipped
+        ? CLIPPED_HINT
+        : score === null
+          ? '双脚关键点被遮挡，这次测量不可信。'
+          : value < THRESHOLDS.stance_width.good[0]
+            ? `双脚间距只有肩宽的 ${value.toFixed(2)} 倍，站位偏窄，侧向稳定性不足。把前脚再往外开一点。`
+            : value > THRESHOLDS.stance_width.good[1]
+              ? `双脚间距是肩宽的 ${value.toFixed(2)} 倍，站得太开，重心转换会变慢。收一点。`
+              : `双脚间距是肩宽的 ${value.toFixed(2)} 倍，站姿宽度合适。`,
+  });
+}
+
+/**
+ * 2. 后手前臂垂直度：肘→腕 与竖直向下的夹角。
+ * @param {ReturnType<typeof setupContext>} ctx
+ */
+function checkForearmVertical(ctx) {
+  const { p, image, handed, grip } = ctx;
+  const value = angleFromUp(vec.sub(grip.wrist, grip.elbow));
+  // angleFromUp 给的是与「上」的夹角，竖直向下时是 180，所以取补角
+  const tilt = Number.isFinite(value) ? Math.abs(180 - value) : NaN;
+  const needs = [`${handed.grip}_elbow`, `${handed.grip}_wrist`];
+  const conf = minVisibility(p, needs);
+  const clipped = clippedByFrame(image, [...needs, `${handed.grip}_shoulder`]);
+
+  // 钟摆出杆的解剖前提：肩在上、肘居中、腕在下（世界坐标 y 朝下，
+  // 所以要求 shoulder.y <= elbow.y <= wrist.y）。这条不成立时，
+  // 「前臂偏离竖直多少度」量到的其实是单目深度误差，不是动作问题。
+  // 实测 6 张真实照片里有 4 张不满足，其中 2 张是球员站立持杆、
+  // 2 张是俯身角度下模型把肘判到了肩上方。这两种情况都必须判 unknown，
+  // 否则会把「模型看不清」说成「你的前臂歪了 87°」。
+  const ARM_CHAIN_TOL = 0.02; // 2 cm，给关键点噪声留余量
+  const chainOk =
+    Number.isFinite(grip.shoulder?.y) &&
+    grip.shoulder.y <= grip.elbow.y + ARM_CHAIN_TOL &&
+    grip.elbow.y <= grip.wrist.y + ARM_CHAIN_TOL;
+
+  const score =
+    conf < VIS_FLOOR || !chainOk || clipped
+      ? null
+      : bandScore(tilt, THRESHOLDS.forearm_vertical.good, THRESHOLDS.forearm_vertical.warn);
+  return makeResult('forearm_vertical', '后手前臂垂直', 'setup', {
+    value: chainOk && !clipped ? tilt : NaN, score, unit: THRESHOLDS.forearm_vertical.unit,
+    confidence: conf,
+    needs: [`${handed.grip}_shoulder`, `${handed.grip}_elbow`, `${handed.grip}_wrist`],
+    detail: !Number.isFinite(tilt)
+      ? '量不到握杆手的小臂，无法判定前臂是否垂直。'
+      : clipped
+        ? CLIPPED_HINT
+        : !chainOk
+          ? '握杆手的肩—肘—腕不在一条自上而下的链上（常见于单目深度误差，或人根本没俯身击球）。这一项这次不判。'
+          : score === null
+            ? '握杆手被遮挡，这次测量不可信。'
+            : tilt > THRESHOLDS.forearm_vertical.good[1]
+              ? `前臂偏离竖直 ${tilt.toFixed(0)}°。击球瞬间前臂应接近垂直，否则出杆会画弧、杆头不直。调整握杆手的前后位置。`
+              : `前臂偏离竖直 ${tilt.toFixed(0)}°，符合钟摆出杆的要求。`,
+  });
+}
+
+/**
+ * 3. 架桥臂伸直度：肩-肘-腕夹角。
+ * @param {ReturnType<typeof setupContext>} ctx
+ */
+function checkBridgeArmStraight(ctx) {
+  const { p, image, handed, bridge } = ctx;
+  const value = angleAt(bridge.shoulder, bridge.elbow, bridge.wrist);
+  const needs = [`${handed.bridge}_shoulder`, `${handed.bridge}_elbow`, `${handed.bridge}_wrist`];
+  const conf = minVisibility(p, needs);
+  const clipped = clippedByFrame(image, needs);
+  const score =
+    conf < VIS_FLOOR || clipped
+      ? null
+      : bandScore(value, THRESHOLDS.bridge_arm_straight.good, THRESHOLDS.bridge_arm_straight.warn);
+  return makeResult('bridge_arm_straight', '架桥臂伸展', 'setup', {
+    value, score, unit: THRESHOLDS.bridge_arm_straight.unit,
+    confidence: conf,
+    needs,
+    detail: !Number.isFinite(value)
+      ? '量不到架桥手的手臂，无法判定伸展度。'
+      : clipped
+        ? CLIPPED_HINT
+        : score === null
+          ? '架桥手被遮挡，这次测量不可信。'
+          : value < THRESHOLDS.bridge_arm_straight.good[0]
+            ? `架桥臂肘角只有 ${value.toFixed(0)}°，明显弯着。前臂要尽量伸直，架桥才稳、才够长。`
+            : `架桥臂肘角 ${value.toFixed(0)}°，伸展充分。`,
+  });
+}
+
+/**
+ * 4. 头部高度：鼻相对肩线的垂直落差 / 躯干长。
+ * @param {ReturnType<typeof setupContext>} ctx
+ */
+function checkHeadLow(ctx) {
+  const { p, image, shoulderMid, torsoLen, scaleOk } = ctx;
+  const drop = (p.nose.y - shoulderMid.y) / torsoLen;
+  const needs = ['nose', 'left_shoulder', 'right_shoulder'];
+  const conf = minVisibility(p, needs);
+  const clipped = clippedByFrame(image, needs);
+  const score =
+    scaleOk && conf >= VIS_FLOOR && !clipped
+      ? bandScore(drop, THRESHOLDS.head_low.good, THRESHOLDS.head_low.warn)
+      : null;
+  return makeResult('head_low', '头部高度', 'setup', {
+    value: drop, score, unit: THRESHOLDS.head_low.unit,
+    confidence: conf,
+    needs,
+    detail: !Number.isFinite(drop)
+      ? '量不到头部与肩的相对位置。'
+      : clipped
+        ? CLIPPED_HINT
+        : score === null
+          ? '头部或肩部被遮挡，这次测量不可信。'
+          : drop < THRESHOLDS.head_low.good[0]
+            ? `头还在肩线上方 ${Math.abs(drop).toFixed(2)} 个躯干长，说明上身没压下去。视线越低越容易看准，试着弯腰或屈膝把下巴降到接近球杆。`
+            : `头部比肩线低 ${drop.toFixed(2)} 个躯干长，视线高度到位。`,
+  });
+}
+
+/**
+ * 5. 躯干前倾：髋中点→肩中点 与竖直的夹角。
+ * @param {ReturnType<typeof setupContext>} ctx
+ */
+function checkTorsoLean(ctx) {
+  const { p, image, shoulderMid, hipMid, scaleOk } = ctx;
+  const value = angleFromUp(vec.sub(shoulderMid, hipMid));
+  const needs = ['left_shoulder', 'right_shoulder', 'left_hip', 'right_hip'];
+  const conf = minVisibility(p, needs);
+  const clipped = clippedByFrame(image, needs);
+  const score =
+    scaleOk && conf >= VIS_FLOOR && !clipped
+      ? bandScore(value, THRESHOLDS.torso_lean.good, THRESHOLDS.torso_lean.warn)
+      : null;
+  return makeResult('torso_lean', '躯干前倾', 'setup', {
+    value, score, unit: THRESHOLDS.torso_lean.unit,
+    confidence: conf,
+    needs,
+    detail: !Number.isFinite(value)
+      ? '量不到躯干轴线，无法判定前倾角。'
+      : clipped
+        ? CLIPPED_HINT
+        : score === null
+          ? '肩或髋被遮挡，这次测量不可信。'
+          : value < THRESHOLDS.torso_lean.good[0]
+            ? `躯干只前倾 ${value.toFixed(0)}°，站得太直，眼睛离球太远。上身再压下去一些。`
+            : value > THRESHOLDS.torso_lean.good[1]
+              ? `躯干前倾 ${value.toFixed(0)}°，压得过低，腰背和脖子会吃力，出杆空间也变小。`
+              : `躯干前倾 ${value.toFixed(0)}°，重心和视线高度平衡得不错。`,
+  });
+}
+
+/**
+ * 6. 屈膝：左右膝角的均值。
+ * @param {ReturnType<typeof setupContext>} ctx
+ */
+function checkKneeBend(ctx) {
+  const { p, image } = ctx;
+  const kneeL = angleAt(p.left_hip, p.left_knee, p.left_ankle);
+  const kneeR = angleAt(p.right_hip, p.right_knee, p.right_ankle);
+  const value = Number.isFinite(kneeL) && Number.isFinite(kneeR)
+    ? (kneeL + kneeR) / 2
+    : Number.isFinite(kneeL) ? kneeL : kneeR;
+  const needs = ['left_hip', 'left_knee', 'left_ankle', 'right_hip', 'right_knee', 'right_ankle'];
+  const conf = minVisibility(p, needs);
+  const clipped = clippedByFrame(image, needs);
+  const score =
+    conf < VIS_FLOOR || clipped
+      ? null
+      : bandScore(value, THRESHOLDS.knee_bend.good, THRESHOLDS.knee_bend.warn);
+  return makeResult('knee_bend', '屈膝程度', 'setup', {
+    value, score, unit: THRESHOLDS.knee_bend.unit,
+    confidence: conf,
+    needs: ['left_knee', 'right_knee', 'left_ankle', 'right_ankle'],
+    detail: !Number.isFinite(value)
+      ? '量不到膝关节，无法判定屈膝。'
+      : clipped
+        ? CLIPPED_HINT
+        : score === null
+          ? '下肢关键点被遮挡（常见于只拍到上半身的照片），这次测量不可信。'
+          : value > THRESHOLDS.knee_bend.good[1]
+            ? `膝关节接近伸直（${value.toFixed(0)}°），腿部没有缓冲，重心偏高。轻微屈膝让身体更稳。`
+            : value < THRESHOLDS.knee_bend.good[0]
+              ? `膝关节只有 ${value.toFixed(0)}°，蹲得太深，重心低但不容易保持稳定。`
+              : `膝关节 ${value.toFixed(0)}°，屈膝程度合适。`,
+  });
+}
+
+/**
+ * 7. 头在球杆上方：鼻到「架桥手—握杆手」连线的水平距离 / 肩宽。
+ * @param {ReturnType<typeof setupContext>} ctx
+ */
+function checkHeadOverCue(ctx) {
+  const { p, image, handed, bridge, grip, shoulderWidth, scaleOk } = ctx;
+  const value = scaleOk
+    ? horizontalDistanceToLine(p.nose, bridge.wrist, grip.wrist) / shoulderWidth
+    : NaN;
+  const needs = ['nose', `${handed.bridge}_wrist`, `${handed.grip}_wrist`, 'left_shoulder', 'right_shoulder'];
+  const conf = minVisibility(p, needs);
+  const clipped = clippedByFrame(image, needs);
+  const score =
+    conf < VIS_FLOOR || clipped
+      ? null
+      : bandScore(value, THRESHOLDS.head_over_cue.good, THRESHOLDS.head_over_cue.warn);
+  return makeResult('head_over_cue', '头在球杆上方', 'setup', {
+    value, score, unit: THRESHOLDS.head_over_cue.unit,
+    confidence: conf,
+    needs: ['nose', `${handed.bridge}_wrist`, `${handed.grip}_wrist`],
+    detail: !Number.isFinite(value)
+      ? '量不到双手位置，无法判定头是否在球杆上方。'
+      : clipped
+        ? CLIPPED_HINT
+        : score === null
+          ? '手部或头部被遮挡，这次测量不可信。'
+          : value > THRESHOLDS.head_over_cue.good[1]
+            ? `头部偏离球杆 ${value.toFixed(2)} 个肩宽，视线不在杆的正上方，容易看偏。把下巴对到球杆上。`
+            : `头部偏离球杆 ${value.toFixed(2)} 个肩宽，视线基本压在杆上。`,
+  });
+}
+
+/**
  * 对单个姿势做站姿规范性检查。
+ *
+ * 主函数只做三件事：准备共享上下文 → 按固定顺序调七条检查 → 聚合结果。
+ * 调用顺序就是 report.checks 的排列（单测和界面都按这个顺序取），不要调整。
  *
  * @param {{image:object, world:object, hasWorld:boolean}} pose normalizePose 的输出
  * @param {{handedness?:'auto'|'left'|'right'}} [opts]
  * @returns {Array<object>} 每条检查的结果
  */
 export function evaluateSetup(pose, opts = {}) {
-  const p = pose.world;
-  const hasWorld = pose.hasWorld && Object.keys(p).length > 0;
-  const out = [];
+  const hasWorld = pose.hasWorld && Object.keys(pose.world).length > 0;
 
   // 世界坐标缺失时全部判 unknown——用 image 坐标算角度会因为透视完全失真
   if (!hasWorld) {
@@ -356,248 +637,16 @@ export function evaluateSetup(pose, opts = {}) {
     ];
   }
 
-  const shoulderMid = vec.mid(p.left_shoulder, p.right_shoulder);
-  const hipMid = vec.mid(p.left_hip, p.right_hip);
-  const shoulderWidth = vec.dist(p.left_shoulder, p.right_shoulder);
-  const torsoLen = vec.dist(shoulderMid, hipMid);
-
-  // 尺度归一：肩宽、躯干长都必须有效，否则后面所有比值都无意义
-  const scaleOk = shoulderWidth > 1e-3 && torsoLen > 1e-3;
-
-  const handed =
-    opts.handedness === 'left' || opts.handedness === 'right'
-      ? { bridge: opts.handedness === 'right' ? 'left' : 'right', grip: opts.handedness, method: 'manual', margin: 0 }
-      : detectHandedness(p);
-  const grip = sideOf(p, handed.grip);
-  const bridge = sideOf(p, handed.bridge);
-
-  // ---- 1. 站姿宽度：双脚间距 / 肩宽
-  {
-    const footGap = vec.dist(p.left_foot_index, p.right_foot_index);
-    const value = scaleOk ? footGap / shoulderWidth : NaN;
-    const needs = ['left_foot_index', 'right_foot_index', 'left_shoulder', 'right_shoulder'];
-    const conf = minVisibility(p, needs);
-    const clipped = clippedByFrame(pose.image, needs);
-    const score =
-      conf < VIS_FLOOR || clipped
-        ? null
-        : bandScore(value, THRESHOLDS.stance_width.good, THRESHOLDS.stance_width.warn);
-    out.push(
-      makeResult('stance_width', '站姿宽度', 'setup', {
-        value, score, unit: THRESHOLDS.stance_width.unit,
-        confidence: conf,
-        needs: ['left_foot_index', 'right_foot_index'],
-        detail: !Number.isFinite(value)
-          ? '量不到双脚位置，站姿宽度无法判定。'
-          : clipped
-            ? CLIPPED_HINT
-            : score === null
-              ? '双脚关键点被遮挡，这次测量不可信。'
-              : value < THRESHOLDS.stance_width.good[0]
-                ? `双脚间距只有肩宽的 ${value.toFixed(2)} 倍，站位偏窄，侧向稳定性不足。把前脚再往外开一点。`
-                : value > THRESHOLDS.stance_width.good[1]
-                  ? `双脚间距是肩宽的 ${value.toFixed(2)} 倍，站得太开，重心转换会变慢。收一点。`
-                  : `双脚间距是肩宽的 ${value.toFixed(2)} 倍，站姿宽度合适。`,
-      })
-    );
-  }
-
-  // ---- 2. 后手前臂垂直度：肘→腕 与竖直向下的夹角
-  {
-    const value = angleFromUp(vec.sub(grip.wrist, grip.elbow));
-    // angleFromUp 给的是与「上」的夹角，竖直向下时是 180，所以取补角
-    const tilt = Number.isFinite(value) ? Math.abs(180 - value) : NaN;
-    const needs = [`${handed.grip}_elbow`, `${handed.grip}_wrist`];
-    const conf = minVisibility(p, needs);
-    const clipped = clippedByFrame(pose.image, [...needs, `${handed.grip}_shoulder`]);
-
-    // 钟摆出杆的解剖前提：肩在上、肘居中、腕在下（世界坐标 y 朝下，
-    // 所以要求 shoulder.y <= elbow.y <= wrist.y）。这条不成立时，
-    // 「前臂偏离竖直多少度」量到的其实是单目深度误差，不是动作问题。
-    // 实测 6 张真实照片里有 4 张不满足，其中 2 张是球员站立持杆、
-    // 2 张是俯身角度下模型把肘判到了肩上方。这两种情况都必须判 unknown，
-    // 否则会把「模型看不清」说成「你的前臂歪了 87°」。
-    const ARM_CHAIN_TOL = 0.02; // 2 cm，给关键点噪声留余量
-    const chainOk =
-      Number.isFinite(grip.shoulder?.y) &&
-      grip.shoulder.y <= grip.elbow.y + ARM_CHAIN_TOL &&
-      grip.elbow.y <= grip.wrist.y + ARM_CHAIN_TOL;
-
-    const score =
-      conf < VIS_FLOOR || !chainOk || clipped
-        ? null
-        : bandScore(tilt, THRESHOLDS.forearm_vertical.good, THRESHOLDS.forearm_vertical.warn);
-    out.push(
-      makeResult('forearm_vertical', '后手前臂垂直', 'setup', {
-        value: chainOk && !clipped ? tilt : NaN, score, unit: THRESHOLDS.forearm_vertical.unit,
-        confidence: conf,
-        needs: [`${handed.grip}_shoulder`, `${handed.grip}_elbow`, `${handed.grip}_wrist`],
-        detail: !Number.isFinite(tilt)
-          ? '量不到握杆手的小臂，无法判定前臂是否垂直。'
-          : clipped
-            ? CLIPPED_HINT
-            : !chainOk
-              ? '握杆手的肩—肘—腕不在一条自上而下的链上（常见于单目深度误差，或人根本没俯身击球）。这一项这次不判。'
-              : score === null
-                ? '握杆手被遮挡，这次测量不可信。'
-                : tilt > THRESHOLDS.forearm_vertical.good[1]
-                  ? `前臂偏离竖直 ${tilt.toFixed(0)}°。击球瞬间前臂应接近垂直，否则出杆会画弧、杆头不直。调整握杆手的前后位置。`
-                  : `前臂偏离竖直 ${tilt.toFixed(0)}°，符合钟摆出杆的要求。`,
-      })
-    );
-  }
-
-  // ---- 3. 架桥臂伸直度：肩-肘-腕夹角
-  {
-    const value = angleAt(bridge.shoulder, bridge.elbow, bridge.wrist);
-    const needs = [`${handed.bridge}_shoulder`, `${handed.bridge}_elbow`, `${handed.bridge}_wrist`];
-    const conf = minVisibility(p, needs);
-    const clipped = clippedByFrame(pose.image, needs);
-    const score =
-      conf < VIS_FLOOR || clipped
-        ? null
-        : bandScore(value, THRESHOLDS.bridge_arm_straight.good, THRESHOLDS.bridge_arm_straight.warn);
-    out.push(
-      makeResult('bridge_arm_straight', '架桥臂伸展', 'setup', {
-        value, score, unit: THRESHOLDS.bridge_arm_straight.unit,
-        confidence: conf,
-        needs,
-        detail: !Number.isFinite(value)
-          ? '量不到架桥手的手臂，无法判定伸展度。'
-          : clipped
-            ? CLIPPED_HINT
-            : score === null
-              ? '架桥手被遮挡，这次测量不可信。'
-              : value < THRESHOLDS.bridge_arm_straight.good[0]
-                ? `架桥臂肘角只有 ${value.toFixed(0)}°，明显弯着。前臂要尽量伸直，架桥才稳、才够长。`
-                : `架桥臂肘角 ${value.toFixed(0)}°，伸展充分。`,
-      })
-    );
-  }
-
-  // ---- 4. 头部高度：鼻相对肩线的垂直落差 / 躯干长
-  {
-    const drop = (p.nose.y - shoulderMid.y) / torsoLen;
-    const needs = ['nose', 'left_shoulder', 'right_shoulder'];
-    const conf = minVisibility(p, needs);
-    const clipped = clippedByFrame(pose.image, needs);
-    const score =
-      scaleOk && conf >= VIS_FLOOR && !clipped
-        ? bandScore(drop, THRESHOLDS.head_low.good, THRESHOLDS.head_low.warn)
-        : null;
-    out.push(
-      makeResult('head_low', '头部高度', 'setup', {
-        value: drop, score, unit: THRESHOLDS.head_low.unit,
-        confidence: conf,
-        needs,
-        detail: !Number.isFinite(drop)
-          ? '量不到头部与肩的相对位置。'
-          : clipped
-            ? CLIPPED_HINT
-            : score === null
-              ? '头部或肩部被遮挡，这次测量不可信。'
-              : drop < THRESHOLDS.head_low.good[0]
-                ? `头还在肩线上方 ${Math.abs(drop).toFixed(2)} 个躯干长，说明上身没压下去。视线越低越容易看准，试着弯腰或屈膝把下巴降到接近球杆。`
-                : `头部比肩线低 ${drop.toFixed(2)} 个躯干长，视线高度到位。`,
-      })
-    );
-  }
-
-  // ---- 5. 躯干前倾：髋中点→肩中点 与竖直的夹角
-  {
-    const value = angleFromUp(vec.sub(shoulderMid, hipMid));
-    const needs = ['left_shoulder', 'right_shoulder', 'left_hip', 'right_hip'];
-    const conf = minVisibility(p, needs);
-    const clipped = clippedByFrame(pose.image, needs);
-    const score =
-      scaleOk && conf >= VIS_FLOOR && !clipped
-        ? bandScore(value, THRESHOLDS.torso_lean.good, THRESHOLDS.torso_lean.warn)
-        : null;
-    out.push(
-      makeResult('torso_lean', '躯干前倾', 'setup', {
-        value, score, unit: THRESHOLDS.torso_lean.unit,
-        confidence: conf,
-        needs,
-        detail: !Number.isFinite(value)
-          ? '量不到躯干轴线，无法判定前倾角。'
-          : clipped
-            ? CLIPPED_HINT
-            : score === null
-              ? '肩或髋被遮挡，这次测量不可信。'
-              : value < THRESHOLDS.torso_lean.good[0]
-                ? `躯干只前倾 ${value.toFixed(0)}°，站得太直，眼睛离球太远。上身再压下去一些。`
-                : value > THRESHOLDS.torso_lean.good[1]
-                  ? `躯干前倾 ${value.toFixed(0)}°，压得过低，腰背和脖子会吃力，出杆空间也变小。`
-                  : `躯干前倾 ${value.toFixed(0)}°，重心和视线高度平衡得不错。`,
-      })
-    );
-  }
-
-  // ---- 6. 屈膝：左右膝角的均值
-  {
-    const kneeL = angleAt(p.left_hip, p.left_knee, p.left_ankle);
-    const kneeR = angleAt(p.right_hip, p.right_knee, p.right_ankle);
-    const value = Number.isFinite(kneeL) && Number.isFinite(kneeR)
-      ? (kneeL + kneeR) / 2
-      : Number.isFinite(kneeL) ? kneeL : kneeR;
-    const needs = ['left_hip', 'left_knee', 'left_ankle', 'right_hip', 'right_knee', 'right_ankle'];
-    const conf = minVisibility(p, needs);
-    const clipped = clippedByFrame(pose.image, needs);
-    const score =
-      conf < VIS_FLOOR || clipped
-        ? null
-        : bandScore(value, THRESHOLDS.knee_bend.good, THRESHOLDS.knee_bend.warn);
-    out.push(
-      makeResult('knee_bend', '屈膝程度', 'setup', {
-        value, score, unit: THRESHOLDS.knee_bend.unit,
-        confidence: conf,
-        needs: ['left_knee', 'right_knee', 'left_ankle', 'right_ankle'],
-        detail: !Number.isFinite(value)
-          ? '量不到膝关节，无法判定屈膝。'
-          : clipped
-            ? CLIPPED_HINT
-            : score === null
-              ? '下肢关键点被遮挡（常见于只拍到上半身的照片），这次测量不可信。'
-              : value > THRESHOLDS.knee_bend.good[1]
-                ? `膝关节接近伸直（${value.toFixed(0)}°），腿部没有缓冲，重心偏高。轻微屈膝让身体更稳。`
-                : value < THRESHOLDS.knee_bend.good[0]
-                  ? `膝关节只有 ${value.toFixed(0)}°，蹲得太深，重心低但不容易保持稳定。`
-                  : `膝关节 ${value.toFixed(0)}°，屈膝程度合适。`,
-      })
-    );
-  }
-
-  // ---- 7. 头在球杆上方：鼻到「架桥手—握杆手」连线的水平距离 / 肩宽
-  {
-    const value = scaleOk
-      ? horizontalDistanceToLine(p.nose, bridge.wrist, grip.wrist) / shoulderWidth
-      : NaN;
-    const needs = ['nose', `${handed.bridge}_wrist`, `${handed.grip}_wrist`, 'left_shoulder', 'right_shoulder'];
-    const conf = minVisibility(p, needs);
-    const clipped = clippedByFrame(pose.image, needs);
-    const score =
-      conf < VIS_FLOOR || clipped
-        ? null
-        : bandScore(value, THRESHOLDS.head_over_cue.good, THRESHOLDS.head_over_cue.warn);
-    out.push(
-      makeResult('head_over_cue', '头在球杆上方', 'setup', {
-        value, score, unit: THRESHOLDS.head_over_cue.unit,
-        confidence: conf,
-        needs: ['nose', `${handed.bridge}_wrist`, `${handed.grip}_wrist`],
-        detail: !Number.isFinite(value)
-          ? '量不到双手位置，无法判定头是否在球杆上方。'
-          : clipped
-            ? CLIPPED_HINT
-            : score === null
-              ? '手部或头部被遮挡，这次测量不可信。'
-              : value > THRESHOLDS.head_over_cue.good[1]
-                ? `头部偏离球杆 ${value.toFixed(2)} 个肩宽，视线不在杆的正上方，容易看偏。把下巴对到球杆上。`
-                : `头部偏离球杆 ${value.toFixed(2)} 个肩宽，视线基本压在杆上。`,
-      })
-    );
-  }
-
-  return out;
+  const ctx = setupContext(pose, opts);
+  return [
+    checkStanceWidth(ctx),
+    checkForearmVertical(ctx),
+    checkBridgeArmStraight(ctx),
+    checkHeadLow(ctx),
+    checkTorsoLean(ctx),
+    checkKneeBend(ctx),
+    checkHeadOverCue(ctx),
+  ];
 }
 
 // ---------------------------------------------------------------- 出杆检查
