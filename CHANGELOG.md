@@ -4,6 +4,7 @@
 
 ## 2026-11-23
 
+- feat(pose): 指标对照参考区间（含偏差方向与建议），report 新增 `comparison` 字段，姿态页验证 27 → 80 项（`516ac6f`，2026-11-23）
 - perf(physics): `findFirstEvent` 加保守粗筛与外提不变量，A/B ≈ −5%，事件序列与球位逐位一致（`30529b8`，2026-11-23）
 - feat(demo): 分享局面图（全台俯视 + 局面要点），与「分享这一杆」共用出图管线（`97e36f2`，2026-11-23）
 - chore(types): `physics`/`sim`/`solver`/`constants` 加 `@ts-check`，类型覆盖补全（`c0ed94b`，2026-11-23）
