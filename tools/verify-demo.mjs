@@ -3201,6 +3201,227 @@ check(
 
 await send(ws, 'Emulation.clearDeviceMetricsOverride');
 
+// ------------------------------------------------------------ 分享局面（第二种导出）
+//
+// 第二种导出的要害不在「能不能出图」，而在**图上说的和页面上说的是不是一回事**：
+// 文案由 buildTableSummary 出，记分牌由 updateScore 出，两者读同一份 game。
+// 所以这里不另造数据，直接拿页面上那局 game 的返回值去和 #score 的 DOM 对——
+// 对不上就是有一边在骗人。换玩法也走真实入口（下拉 change），不直接改 state。
+
+const boardShare = JSON.parse(await evaluate(`(async () => {
+  const app = window.__app;
+  app.setMode('game');
+  // 走真实入口换玩法：change 会同步 state.gameKind、换台、再开新的一局
+  const sel = document.getElementById('gameKind');
+  sel.value = 'snooker';
+  sel.dispatchEvent(new Event('change'));
+  const game = app.state.game;
+  const out = document.getElementById('shareOut');
+  out.classList.add('hidden');
+  const result = await app.shareTable();
+  const img = document.getElementById('shareImage');
+  const dl = document.getElementById('shareDownload');
+  const summary = app.buildTableSummary({
+    game,
+    balls: game.balls,
+    table: app.table,
+    shot: app.state.gSolution,
+  });
+  const line = (label) => {
+    const hit = summary.lines.find((l) => l.label === label);
+    return hit ? hit.value : '';
+  };
+  return JSON.stringify({
+    kind: game.kind,
+    ok: Boolean(result && result.ok),
+    bytes: (result && result.bytes) || 0,
+    naturalW: img.naturalWidth,
+    naturalH: img.naturalHeight,
+    imgSrc: img.getAttribute('src') || '',
+    imgAlt: img.getAttribute('alt') || '',
+    dlHref: dl.getAttribute('href') || '',
+    dlName: dl.getAttribute('download') || '',
+    hidden: out.classList.contains('hidden'),
+    lines: summary.lines.map((l) => l.label + '=' + l.value),
+    mark: summary.mark,
+    scoreText: document.getElementById('score').textContent.replace(/\\s+/g, ' ').trim(),
+    scores: game.snooker.scores.slice(),
+    reds: game.balls.filter((b) => !b.pocketed && b.number >= 1 && b.number <= 15).length,
+    scoreLine: line('比分'),
+    frameLine: line('球局'),
+  });
+})()`));
+console.log('分享局面（斯诺克）:', JSON.stringify(boardShare));
+
+check(
+  '分享局面：点一下就能出图，是另一张 1080 宽的图（不是复用上一杆那张）',
+  boardShare.ok === true && boardShare.kind === 'snooker' && boardShare.naturalW === 1080 && boardShare.naturalH > 800,
+  `ok=${boardShare.ok} kind=${boardShare.kind} 尺寸=${boardShare.naturalW}×${boardShare.naturalH}`,
+);
+check(
+  '分享局面：图片是真的解码过的 PNG（blob: 且字节数合理）',
+  boardShare.imgSrc.startsWith('blob:') && boardShare.bytes > 20000,
+  `src=${boardShare.imgSrc.slice(0, 12)}… bytes=${boardShare.bytes}`,
+);
+check(
+  '分享局面：预览区展开，下载链接指向同一个 blob，文件名带 billiards-table',
+  boardShare.hidden === false &&
+    boardShare.dlHref.startsWith('blob:') &&
+    /^billiards-table-\d{8}-\d{4}\.png$/.test(boardShare.dlName),
+  `hidden=${boardShare.hidden} href=${boardShare.dlHref.slice(0, 12)}… name=${boardShare.dlName}`,
+);
+check(
+  '分享局面：替代文本换成「局面：…」，不再冒充「这一杆」',
+  /^局面：.+/.test(boardShare.imgAlt) && !/^这一杆：/.test(boardShare.imgAlt),
+  `alt=${boardShare.imgAlt}`,
+);
+check(
+  '分享局面：图上的比分与记分牌上的分数一致',
+  boardShare.scoreLine === `你 ${boardShare.scores[0]} : ${boardShare.scores[1]} 对手` &&
+    boardShare.scoreText.includes(`${boardShare.scores[0]} 分`),
+  `图=${boardShare.scoreLine} 牌=${boardShare.scoreText} scores=${JSON.stringify(boardShare.scores)}`,
+);
+check(
+  '分享局面：图上的红球数与该打的球，和页面上的「该打」一致',
+  boardShare.frameLine === `红球剩 ${boardShare.reds} 颗 · 该打 红球` &&
+    boardShare.scoreText.includes('该打：红球'),
+  `图=${boardShare.frameLine} 红球=${boardShare.reds} 牌=${boardShare.scoreText}`,
+);
+check(
+  '分享局面：图上圈的正是当前该打的球，且都在台面上',
+  boardShare.mark.numbers.length === boardShare.reds &&
+    boardShare.mark.numbers.every((n) => n >= 1 && n <= 15),
+  `mark=${JSON.stringify(boardShare.mark)} 红球=${boardShare.reds}`,
+);
+
+const eightShare = JSON.parse(await evaluate(`(async () => {
+  const app = window.__app;
+  const sel = document.getElementById('gameKind');
+  sel.value = 'eightball';
+  sel.dispatchEvent(new Event('change'));
+  const game = app.state.game;
+  const out = document.getElementById('shareOut');
+  out.classList.add('hidden');
+  const result = await app.shareTable();
+  const img = document.getElementById('shareImage');
+  const summary = app.buildTableSummary({ game, balls: game.balls, table: app.table, shot: app.state.gSolution });
+  const line = (label) => {
+    const hit = summary.lines.find((l) => l.label === label);
+    return hit ? hit.value : '';
+  };
+  const who = document.querySelector('#score .who.turn .nm');
+  return JSON.stringify({
+    ok: Boolean(result && result.ok),
+    kind: game.kind,
+    naturalW: img.naturalWidth,
+    bytes: (result && result.bytes) || 0,
+    turnName: who ? who.textContent.trim() : '',
+    turnLine: line('轮到'),
+    scoreLine: line('比分'),
+    groupLine: line('球组'),
+    scoreText: document.getElementById('score').textContent.replace(/\\s+/g, ' ').trim(),
+  });
+})()`));
+console.log('分享局面（八球）:', JSON.stringify(eightShare));
+
+check(
+  '分享局面（八球）：文案里的「轮到谁」和记分牌上高亮的那个人是同一个人',
+  eightShare.kind === 'eightball' &&
+    eightShare.turnName.length > 0 &&
+    eightShare.turnLine.startsWith(eightShare.turnName) &&
+    eightShare.naturalW === 1080,
+  `牌=${eightShare.turnName} 图=${eightShare.turnLine}`,
+);
+check(
+  '分享局面（八球）：还没分球时图里不编比分，和记分牌一样只说「未分组」',
+  eightShare.scoreLine === '未分球 · 台面剩 15 颗' &&
+    (eightShare.scoreText.match(/未分组/g) || []).length === 2,
+  `图=${eightShare.scoreLine} 牌=${eightShare.scoreText}`,
+);
+
+// 390×844：两个按钮必须在同一行里排得下、互不重叠、都能点到，且都不压台面。
+await send(ws, 'Emulation.setDeviceMetricsOverride', {
+  width: 390,
+  height: 844,
+  deviceScaleFactor: 2,
+  mobile: true,
+});
+await sleep(400);
+const twoButtons = JSON.parse(await evaluate(`(async () => {
+  const vw = document.documentElement.clientWidth;
+  const stage = document.getElementById('stage');
+  const out = document.getElementById('shareOut');
+  const pick = (el) => {
+    const r = el.getBoundingClientRect();
+    return {
+      left: Math.round(r.left),
+      right: Math.round(r.right),
+      top: Math.round(r.top),
+      bottom: Math.round(r.bottom),
+      w: Math.round(r.width),
+    };
+  };
+  const shot = pick(document.getElementById('shareShot'));
+  const tableBtn = pick(document.getElementById('shareTable'));
+  const stageBottom = stage ? Math.round(stage.getBoundingClientRect().bottom) : 0;
+  out.classList.add('hidden');
+  document.getElementById('shareTable').click();
+  const t0 = Date.now();
+  let w = 0;
+  let h = 0;
+  while (Date.now() - t0 < 12000) {
+    const img = document.getElementById('shareImage');
+    if (!out.classList.contains('hidden') && img.naturalWidth > 0) {
+      w = img.naturalWidth;
+      h = img.naturalHeight;
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return JSON.stringify({
+    vw,
+    shot,
+    tableBtn,
+    stageBottom,
+    w,
+    h,
+    scrollW: document.documentElement.scrollWidth,
+    overlap: !(
+      shot.right <= tableBtn.left ||
+      tableBtn.right <= shot.left ||
+      shot.bottom <= tableBtn.top ||
+      tableBtn.bottom <= shot.top
+    ),
+  });
+})()`));
+console.log('分享局面·390 窄屏:', JSON.stringify(twoButtons));
+
+check(
+  '390 宽下「分享这一杆」「分享局面」两个按钮都在视口内、互不重叠、也不压台面',
+  twoButtons.shot.left >= -1 &&
+    twoButtons.shot.right <= twoButtons.vw + 1 &&
+    twoButtons.tableBtn.left >= -1 &&
+    twoButtons.tableBtn.right <= twoButtons.vw + 1 &&
+    twoButtons.shot.w > 60 &&
+    twoButtons.tableBtn.w > 60 &&
+    twoButtons.overlap === false &&
+    twoButtons.shot.top >= twoButtons.stageBottom - 1 &&
+    twoButtons.tableBtn.top >= twoButtons.stageBottom - 1,
+  JSON.stringify({ shot: twoButtons.shot, table: twoButtons.tableBtn, stageBottom: twoButtons.stageBottom }),
+);
+check(
+  '390 宽下真点「分享局面」也能出图（1080 宽，不是等来的假图）',
+  twoButtons.w === 1080 && twoButtons.h > 800,
+  `${twoButtons.w}×${twoButtons.h}`,
+);
+check(
+  '390 宽下两个按钮排得下，整页没有横向滚动',
+  twoButtons.scrollW <= twoButtons.vw + 1,
+  `scrollWidth=${twoButtons.scrollW} viewport=${twoButtons.vw}`,
+);
+
+await send(ws, 'Emulation.clearDeviceMetricsOverride');
+
 // ------------------------------------------------------------ 收尾
 
 // 有些崩溃发生在某段断言之后（比如回放的 tick 要等帧放完才走到回调），

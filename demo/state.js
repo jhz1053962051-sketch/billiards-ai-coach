@@ -13,7 +13,12 @@
 // 更不要在这里 import 任何会碰 window 的模块——tools/check-demo.mjs 会用
 // `await import()` 真的加载这个文件来核对导出，一碰 window 就是整条门禁红。
 
-import { cloneGame, legalTargetNumbers, numbersOnTable } from '../src/rules.js';
+import {
+  cloneGame,
+  legalTargetNumbers,
+  numbersOnTable,
+  remainingOfGroup,
+} from '../src/rules.js';
 import { SEARCH_DT } from '../src/constants.js';
 import { createWorld, strike, stepWorld, allStopped, createRollTracker } from '../src/physics.js';
 import { ballLabel, cueRestText, pocketName, toleranceText } from '../src/solver.js';
@@ -1345,4 +1350,235 @@ function cueBallOf(balls) {
     if (b.number === 0 || b.id === 'cue') return b;
   }
   return null;
+}
+
+// ---------------------------------------------------------------- 分享图（导出局面）
+//
+// 第二种导出：整张台面的俯视图，下半是「这局现在什么情况」。
+//
+// 和「这一杆」那一份共用同一套出图管线（`buildShareSheet`），所以这里同样只负责
+// **说什么**：标题、行序、每行的措辞。区别在于它看的是**局面**而不是某一杆，
+// 因此入参是 game + balls，`shot` 只用来回答「下一步怎么打」这一行。
+//
+// 多给一个 `mark`：图上的圈要圈哪几颗球。它是「当前该打哪一组」的唯一出处——
+// 文案里说「你 全色 剩 6」和图上圈住的那六颗必须是同一批号码，所以两者都在这里算，
+// 不让绘图层自己再推一遍（推两遍就会有一天对不上）。
+
+/** 组别的中文说法。app.js 的 GROUP_LABEL 多带了 cue/eight，是记分牌在用的，别并过来。 */
+const TABLE_GROUP_NAME = { solid: '全色', stripe: '花色' };
+const TABLE_KIND_LABEL = { eightball: '八球', nineball: '九球', snooker: '斯诺克' };
+
+/**
+ * 局面要点：一个标题 + 若干「字段 / 值」行 + 圈球用的 mark。
+ *
+ * 与 buildShareSummary 一样刻意宽容：game 缺字段、balls 不是数组、shot 是半截对象
+ * 都不抛——**能导出一张「还没开局」的图，比在按钮上炸掉有用**。
+ *
+ * @param {{game?:object|null, balls?:unknown[], table?:object, shot?:unknown}} [input]
+ *   game   createGame() 出来的对局；传空就是练习摆球（没有比分可印）
+ *   balls  台面上的球；不传就退回 game.balls
+ *   table  球台。目前不参与文案（球台名由出图那层的 meta 印），保留这个入参是为了
+ *          和 buildShareSummary 的调用形状一致，将来要算落点也不用改调用方
+ *   shot   求解结果（coach 卡）：有就给一句「下一步怎么打」，没有就写「还没求解」
+ * @returns {{title:string, lines:Array<{label:string, value:string}>,
+ *   mark:{numbers:number[], label:string}}}
+ *   lines 顺序固定：玩法/轮到 → 比分 → 球组（斯诺克是球局）→ 下一步
+ */
+export function buildTableSummary(input = {}) {
+  const opts = input && typeof input === 'object' ? input : {};
+  const g = opts.game && typeof opts.game === 'object' ? opts.game : null;
+  const list = tableBallsOf(opts.balls, g);
+  const onTable = numbersOnTable(list);
+  const cue = cueBallOf(list);
+  const next = tableNextShotText(opts.shot);
+  if (!g) return practiceTableSummary(onTable, cue, next);
+  return matchTableSummary(g, onTable, next);
+}
+
+/** 台面上的球：优先用调用方给的，其次用对局里的；非对象一律剔掉。 */
+function tableBallsOf(balls, g) {
+  const source = Array.isArray(balls)
+    ? balls
+    : Array.isArray(g && g.balls)
+      ? g.balls
+      : [];
+  return source.filter((b) => b && typeof b === 'object');
+}
+
+/** 练习摆球：没有对局，只有「台面还剩几颗」。 */
+function practiceTableSummary(onTable, cue, next) {
+  const n = onTable.length;
+  const title = n ? `练习台面 · 还剩 ${n} 颗球` : '练习台面 · 已经清台';
+  return {
+    title,
+    lines: [
+      { label: '玩法', value: '练习摆球（还没开局）' },
+      {
+        label: '台面',
+        value: `${n} 颗目标球 · ${cue ? '母球在台上' : '母球不在台上'}`,
+      },
+      { label: '下一步', value: next },
+    ],
+    // 练习模式没有分组，一颗都不圈：圈了反而像在暗示「打这几颗」
+    mark: { numbers: [], label: '练习摆球' },
+  };
+}
+
+/** 正式对局：玩法 / 轮到谁 → 比分 → 球组或红球 → 下一步。 */
+function matchTableSummary(g, onTable, next) {
+  const kind = typeof g.kind === 'string' ? g.kind : '';
+  const kindLabel = TABLE_KIND_LABEL[kind] || '对局';
+  const players = Array.isArray(g.players) ? g.players : [];
+  const nameOf = (i) => {
+    const p = players[i];
+    const name = p && typeof p.name === 'string' ? p.name.trim() : '';
+    return name || `玩家 ${i + 1}`;
+  };
+  const groupOfPlayer = (i) => {
+    const p = players[i];
+    return p && (p.group === 'solid' || p.group === 'stripe') ? p.group : null;
+  };
+  const p0 = nameOf(0);
+  const p1 = nameOf(1);
+  const g0 = groupOfPlayer(0);
+  const g1 = groupOfPlayer(1);
+  const left0 = g0 ? remainingOfGroup(onTable, g0) : 0;
+  const left1 = g1 ? remainingOfGroup(onTable, g1) : 0;
+  const ended = g.phase === 'ended';
+  const winnerName =
+    ended && typeof g.winner === 'number' && players[g.winner] ? nameOf(g.winner) : '';
+  const shots = Number.isFinite(g.shots) ? g.shots : 0;
+  const turn = g.turn === 1 ? 1 : 0;
+  const turnGroup = turn === 0 ? g0 : g1;
+
+  const title = ended
+    ? `${kindLabel} · ${winnerName ? `${winnerName} 获胜` : '本局结束'}`
+    : `${kindLabel} · ${shots > 0 ? `第 ${shots} 杆` : '开球'}`;
+
+  const lines = [];
+  if (ended) {
+    lines.push({ label: '状态', value: winnerName ? `本局结束 · ${winnerName} 获胜` : '本局结束' });
+  } else {
+    // 八球的「轮到谁」得带上他打哪一组，否则光看名字不知道他该打什么
+    const who = nameOf(turn);
+    lines.push({
+      label: '轮到',
+      value: kind === 'eightball' ? `${who}（${turnGroup ? TABLE_GROUP_NAME[turnGroup] : '未分组'}）` : who,
+    });
+  }
+
+  if (kind === 'snooker') {
+    const scores = g.snooker && Array.isArray(g.snooker.scores) ? g.snooker.scores : [];
+    const s0 = Number.isFinite(scores[0]) ? scores[0] : 0;
+    const s1 = Number.isFinite(scores[1]) ? scores[1] : 0;
+    lines.push({ label: '比分', value: `${p0} ${s0} : ${s1} ${p1}` });
+  } else if (kind === 'nineball') {
+    // 九球不记「谁进了几颗」，能对上的只有「台面还剩几颗」与已落袋数；
+    // 一颗都不剩（或根本没给 balls）时别倒推出「已进 9 颗」那种假数字
+    lines.push({
+      label: '比分',
+      value: onTable.length
+        ? `已进 ${Math.max(0, 9 - onTable.length)} 颗 · 台面剩 ${onTable.length} 颗`
+        : '台面已清空',
+    });
+  } else if (!g0 && !g1) {
+    lines.push({ label: '比分', value: `未分球 · 台面剩 ${onTable.length} 颗` });
+  } else {
+    const potted0 = g0 ? 7 - left0 : 0;
+    const potted1 = g1 ? 7 - left1 : 0;
+    lines.push({ label: '比分', value: `${p0} ${potted0} : ${potted1} ${p1}` });
+  }
+
+  if (kind === 'snooker') {
+    lines.push({ label: '球局', value: snookerTableText(g, onTable) });
+  } else if (kind === 'nineball') {
+    const target = onTable.length ? Math.min(...onTable) : null;
+    lines.push({
+      label: '球组',
+      value: target ? `无分组 · 目标 ${target} 号球 · 台面剩 ${onTable.length} 颗` : '无分组 · 台面已清空',
+    });
+  } else if (!g0 && !g1) {
+    lines.push({ label: '球组', value: `未分球 · 台面剩 ${onTable.length} 颗` });
+  } else {
+    const left = [
+      `${p0} ${g0 ? TABLE_GROUP_NAME[g0] : '未分组'} 剩 ${g0 ? left0 : 0}`,
+      `${p1} ${g1 ? TABLE_GROUP_NAME[g1] : '未分组'} 剩 ${g1 ? left1 : 0}`,
+    ].join(' · ');
+    // 两组都清完只剩黑八，是八球最后那段最需要说清楚的状态
+    const onlyEight = onTable.length === 1 && onTable[0] === 8;
+    lines.push({ label: '球组', value: onlyEight ? `${left} · 只剩黑八` : left });
+  }
+
+  lines.push({ label: '下一步', value: next });
+
+  const targets = safeLegalTargets(g, onTable);
+  return {
+    title,
+    lines,
+    mark: { numbers: targets, label: tableMarkLabel(kind, turnGroup, targets) },
+  };
+}
+
+/** 图例文案：图上圈住的这批球在叫什么。 */
+function tableMarkLabel(kind, turnGroup, targets) {
+  if (kind === 'eightball') return turnGroup ? TABLE_GROUP_NAME[turnGroup] : '未分组';
+  if (kind === 'nineball') return targets.length ? `目标 ${targets[0]} 号球` : '台面已清空';
+  if (kind === 'snooker') return '当前该打';
+  return '台面';
+}
+
+/** 斯诺克那一行：红球还剩几颗 + 这一杆该打什么。 */
+function snookerTableText(g, onTable) {
+  const redsOnTable = onTable.filter((n) => n >= 1 && n <= 15).length;
+  const fromGame = g.snooker && Number.isFinite(g.snooker.reds) ? g.snooker.reds : null;
+  // 台面数得到就用台面的；一颗红球都没有时才信对局里记的那个数（比如刚清完红球）
+  const reds = redsOnTable || (fromGame === null ? 0 : fromGame);
+  const ballOn = g.snooker ? g.snooker.ballOn : 'red';
+  return `红球剩 ${reds} 颗 · 该打 ${snookerBallOnText(ballOn)}`;
+}
+
+function snookerBallOnText(ballOn) {
+  if (ballOn === 'red') return '红球';
+  if (ballOn === 'color') return '任意彩球';
+  if (typeof ballOn === 'number' && Number.isFinite(ballOn) && ballOn > 0) return ballLabel(ballOn);
+  return '红球';
+}
+
+/**
+ * 这一杆允许先碰的球号。规则函数在局面畸形时会抛（比如 players 缺失、turn 越界），
+ * 而导图不该因为一份坏存档炸掉——圈不出来就不圈。
+ */
+function safeLegalTargets(g, onTable) {
+  try {
+    const list = legalTargetNumbers(g, onTable);
+    return Array.isArray(list)
+      ? list.filter((n) => typeof n === 'number' && Number.isFinite(n))
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 「下一步怎么打」一句话。有解就照 coach 卡说人话（球 → 袋口，杆法 · 力度）；
+ * 没解时说清楚是「还没求解」还是「求解过但没球可打」——这两件事对用户完全不同。
+ */
+function tableNextShotText(shot) {
+  const card = shot && typeof shot === 'object' ? shot : null;
+  if (!card) return '还没求解';
+  const best = card.best && typeof card.best === 'object' ? card.best : null;
+  const cand = best || (looksLikeCandidate(card) ? card : null);
+  if (!cand) {
+    const message = typeof card.message === 'string' ? card.message.trim() : '';
+    if (message) return message;
+    if (card.found === false) return '求解过：没有可直接进攻的球，先防守或解一杆。';
+    return '还没求解';
+  }
+  const ball = shareBallText(cand.targetNumber);
+  const pocket = typeof cand.pocketId === 'string' && cand.pocketId ? pocketName(cand.pocketId) : '';
+  const tip = cand.tip && typeof cand.tip.name === 'string' ? cand.tip.name.trim() : '';
+  const power = cand.power && typeof cand.power.name === 'string' ? cand.power.name.trim() : '';
+  const how = [tip, power ? `${power}力` : ''].filter(Boolean).join(' · ');
+  const main = pocket ? `${ball} → ${pocket}` : `${ball}（不指定袋口）`;
+  return how ? `${main}，${how}` : main;
 }

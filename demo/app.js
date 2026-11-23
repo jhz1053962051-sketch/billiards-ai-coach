@@ -59,6 +59,7 @@ import {
 import {
   autoPauseHint,
   buildShareSummary,
+  buildTableSummary,
   clamp,
   computeMatchStats,
   currentAim,
@@ -2445,10 +2446,14 @@ const SHARE_MUTED = '#93a4b5';
 /** 已经生成过的那张图：blob URL 得自己撤销，否则连点几次会一直占着内存。 */
 const shareState = { url: '', filename: '' };
 
-function shareFileName() {
+/**
+ * 分享图的文件名：`billiards-shot-…` / `billiards-table-…`。
+ * 两种导出各用一个前缀，下载到同一个文件夹里不会互相盖掉。
+ */
+function shareFileName(prefix = 'shot') {
   const d = new Date();
   const pad = (n) => String(n).padStart(2, '0');
-  return `billiards-shot-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.png`;
+  return `billiards-${prefix}-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.png`;
 }
 
 /** 这一杆换了（重新求解 / 重置），旧图就不再代表当前局面，收起来别再骗人。 */
@@ -2489,10 +2494,20 @@ function wrapShareText(ctx, text, maxWidth) {
 }
 
 /**
- * 合成成品图。高度由文案行数决定——先量后画，两遍用的是同一套字体常量，
+ * 合成成品图：标题 + 小字 + 台面图 + 若干「字段 / 值」行 + 页脚。
+ *
+ * 「分享这一杆」和「分享局面」**只共用这一份排版**：两者只有 summary 的来源不同，
+ * 图的宽度、字号、行距、贴图位置必须一模一样，否则同一批图发出去像两个产品。
+ * 高度由文案行数决定——先量后画，两遍用的是同一套字体常量，
  * 所以量出来的结论和画出来的位置一致。
+ *
+ * @param {{scene:object|null, summary:{title:string, lines:Array<{label:string, value:string}>}, meta:string}} input
+ *   scene    createShareScene() 的结果；null 就只出文案（不留白）
+ *   summary  文案：标题 + 若干行（行数、长短都不限）
+ *   meta     标题下面那行小字：球台 + 时间
+ * @returns {HTMLCanvasElement} 1080 宽、高度自适应的成品 canvas
  */
-function composeShareImage(summary, scene, meta) {
+function buildShareSheet({ scene, summary, meta }) {
   const measure = document.createElement('canvas').getContext('2d');
   const bodyWidth = SHARE_WIDTH - SHARE_PAD * 2 - SHARE_LABEL_COL;
   const rows = summary.lines.map((row) => {
@@ -2567,77 +2582,172 @@ function composeShareImage(summary, scene, meta) {
   return out;
 }
 
-/** 生成 blob：离屏画布 → toBlob。返回 null 表示这张图没出来。 */
-async function buildShareBlob() {
+/** 图里那行小字：球台 + 生成时间。两种导出共用。 */
+function shareMetaText() {
+  const board = TABLE_PRESETS[table.preset]?.label ?? '台面';
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${board} · ${d.getMonth() + 1} 月 ${d.getDate()} 日 ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** 「分享这一杆」那张图：台面带这一杆的辅助线，下面是这一杆怎么打。 */
+function buildShotSheet() {
   const card = state.solution;
+  if (!card) return null;
   const summary = buildShareSummary({ shot: card, table, balls: state.balls });
   const scene = createShareScene({
     table,
     balls: state.balls,
-    shot: card && card.found ? card.best : null,
+    shot: card.found ? card.best : null,
     maxWidth: SHARE_WIDTH - SHARE_PAD * 2,
   });
-  const board = TABLE_PRESETS[table.preset]?.label ?? '台面';
-  const d = new Date();
-  const meta = `${board} · ${d.getMonth() + 1} 月 ${d.getDate()} 日 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-  const canvas = composeShareImage(summary, scene, meta);
-  const blob = await new Promise((resolve) => {
-    canvas.toBlob((b) => resolve(b), 'image/png');
-  });
-  return { blob, summary, width: canvas.width, height: canvas.height };
+  return {
+    canvas: buildShareSheet({ scene, summary, meta: shareMetaText() }),
+    title: summary.title,
+    alt: `这一杆：${summary.title}`,
+    prefix: 'shot',
+  };
 }
 
 /**
- * 「分享这一杆」按钮的全部行为：出图 → 预览 → 挂下载链接。
+ * 「分享局面」那张图：整台俯视图（所有球 + 球号 + 母球标记 + 当前该打的球圈起来），
+ * 下面是玩法 / 轮到谁 / 比分 / 各组剩几颗 / 下一步怎么打。
+ *
+ * 局面来自哪里只看当前模式：对局模式印比分，练习模式印「练习台面剩几颗」。
+ * 两者走的是同一个 buildTableSummary，所以图上和界面上不会各说各话。
+ */
+function buildTableSheet() {
+  const game = state.mode === 'game' ? state.game : null;
+  const balls = game ? game.balls : state.balls;
+  const list = Array.isArray(balls) ? balls.filter((b) => b && typeof b === 'object') : [];
+  if (!list.length) return null;
+  const summary = buildTableSummary({
+    game,
+    balls: list,
+    table,
+    shot: game ? state.gSolution : state.solution,
+  });
+  // 局面图不画某一杆的辅助线（那是「这一杆」的活），只圈出当前该打的那一组
+  const scene = createShareScene({
+    table,
+    balls: list,
+    mark: summary.mark,
+    maxWidth: SHARE_WIDTH - SHARE_PAD * 2,
+  });
+  return {
+    canvas: buildShareSheet({ scene, summary, meta: shareMetaText() }),
+    title: summary.title,
+    alt: `局面：${summary.title}`,
+    prefix: 'table',
+  };
+}
+
+/**
+ * 两种导出共用的收尾：canvas → blob → 预览图 / 下载链接 / 新标签打开。
+ *
+ * 预览只留一份（#shareOut），所以生成新图前必须先撤掉上一张的 blob URL：
+ * 不撤就连点几次一直占着内存，而且旧 URL 还挂在下载链接上。
+ *
+ * @returns {Promise<{url:string, filename:string, bytes:number, width:number, height:number}|null>}
+ *   null 表示浏览器没能把 canvas 转成 PNG
+ */
+async function publishShare({ canvas, alt, prefix }) {
+  const blob = await new Promise((resolve) => {
+    canvas.toBlob((b) => resolve(b), 'image/png');
+  });
+  if (!blob) return null;
+  if (shareState.url) URL.revokeObjectURL(shareState.url);
+  const url = URL.createObjectURL(blob);
+  const filename = shareFileName(prefix);
+  shareState.url = url;
+  shareState.filename = filename;
+
+  const img = $('shareImage');
+  img.alt = alt;
+  img.src = url;
+  $('sharePreview').href = url;
+  $('shareOpen').href = url;
+  const download = $('shareDownload');
+  download.href = url;
+  download.download = filename;
+  $('shareOut').classList.remove('hidden');
+
+  // 等解码完再返回：调用方（和 E2E）拿到结果时 naturalWidth 已经是真值
+  try {
+    await img.decode();
+  } catch {
+    // 解码失败就让 <img> 自己显示破图，提示照常给
+  }
+  return { url, filename, bytes: blob.size, width: canvas.width, height: canvas.height };
+}
+
+/**
+ * 两个分享按钮共用的外壳：出图 → 收尾 → 回报结果。
  *
  * 返回结构化结果而不是只改 DOM，是为了让 E2E 能直接问「图有多大、多少字节」，
  * 不必去猜界面上的文案。任何一步失败都只写提示，不抛——按钮上炸掉比没有图更糟。
+ *
+ * @param {{buttonId:string, blockedReason:string, blockedHint:string,
+ *          build:()=>{canvas:HTMLCanvasElement, title:string, alt:string, prefix:string}|null}} opts
+ *   build 返回 null 表示「现在没东西可导」，此时只改提示、不碰预览区
  */
-async function shareShot() {
-  const button = $('shareShot');
+async function exportShare({ buttonId, blockedReason, blockedHint, build }) {
+  const button = $(buttonId);
   const hint = $('shareHint');
-  if (!state.solution) {
-    hint.textContent = '先点「求解最佳方案」，再把这一杆分享出去。';
-    return { ok: false, reason: 'no-solution' };
-  }
-  button.disabled = true;
-  hint.textContent = '正在生成…';
+  let job = null;
   try {
-    const { blob, summary, width, height } = await buildShareBlob();
-    if (!blob) {
-      hint.textContent = '这张图没生成出来，换个浏览器或重试一次。';
+    job = build();
+  } catch {
+    job = null;
+  }
+  if (!job) {
+    if (hint) hint.textContent = blockedHint;
+    return { ok: false, reason: blockedReason };
+  }
+  if (button) button.disabled = true;
+  if (hint) hint.textContent = '正在生成…';
+  try {
+    const out = await publishShare(job);
+    if (!out) {
+      if (hint) hint.textContent = '这张图没生成出来，换个浏览器或重试一次。';
       return { ok: false, reason: 'no-blob' };
     }
-    if (shareState.url) URL.revokeObjectURL(shareState.url);
-    const url = URL.createObjectURL(blob);
-    const filename = shareFileName();
-    shareState.url = url;
-    shareState.filename = filename;
-
-    const img = $('shareImage');
-    img.alt = `这一杆：${summary.title}`;
-    img.src = url;
-    $('sharePreview').href = url;
-    $('shareOpen').href = url;
-    const download = $('shareDownload');
-    download.href = url;
-    download.download = filename;
-    $('shareOut').classList.remove('hidden');
-    hint.textContent = `${width}×${height} PNG · ${Math.round(blob.size / 1024)} KB`;
-
-    // 等解码完再返回：调用方（和 E2E）拿到结果时 naturalWidth 已经是真值
-    try {
-      await img.decode();
-    } catch {
-      // 解码失败就让 <img> 自己显示破图，提示照常给
-    }
-    return { ok: true, width, height, bytes: blob.size, url, filename, title: summary.title };
+    if (hint) hint.textContent = `${out.width}×${out.height} PNG · ${Math.round(out.bytes / 1024)} KB`;
+    return {
+      ok: true,
+      width: out.width,
+      height: out.height,
+      bytes: out.bytes,
+      url: out.url,
+      filename: out.filename,
+      title: job.title,
+    };
   } catch (err) {
-    hint.textContent = '生成失败：这个浏览器画不出导出图。';
+    if (hint) hint.textContent = '生成失败：这个浏览器画不出导出图。';
     return { ok: false, reason: err instanceof Error ? err.message : String(err) };
   } finally {
-    button.disabled = false;
+    if (button) button.disabled = false;
   }
+}
+
+/** 「分享这一杆」：先有解，再出图。没有解就只提示，别让人对着空图猜。 */
+async function shareShot() {
+  return exportShare({
+    buttonId: 'shareShot',
+    blockedReason: 'no-solution',
+    blockedHint: '先点「求解最佳方案」，再把这一杆分享出去。',
+    build: buildShotSheet,
+  });
+}
+
+/** 「分享局面」：不需要求解也能导——局面本身就有内容可看。 */
+async function shareTable() {
+  return exportShare({
+    buttonId: 'shareTable',
+    blockedReason: 'no-table',
+    blockedHint: '台面上还没有球，先摆球或开一局。',
+    build: buildTableSheet,
+  });
 }
 
 function exportGameSave() {
@@ -2832,6 +2942,7 @@ $('shoot').addEventListener('click', () => { if (!state.animating) shootPractice
 $('reset').addEventListener('click', resetLayout);
 // 出图要等解码，所以这里不 await：按钮自己会在 finally 里解禁
 $('shareShot').addEventListener('click', () => { if (!state.animating) shareShot(); });
+$('shareTable').addEventListener('click', () => { if (!state.animating) shareTable(); });
 $('addBall').addEventListener('click', addBall);
 $('rackUp').addEventListener('click', rackUp);
 $('newGame').addEventListener('click', newGame);
@@ -3293,6 +3404,10 @@ window.__app = {
   importGameText,
   // 分享这一杆：端到端脚本要能拿到图真的多大、多少字节，而不是只看到按钮
   shareShot,
+  // 分享局面：同上，另外要能拿它的返回值跟页面上的比分/剩余球数对一遍
+  shareTable,
+  // 端到端脚本要用同一份文案去核「图上说的」和「记分牌上说的」是不是一回事
+  buildTableSummary,
   refreshSaveInfo,
   onKeyDown,
   toggleView,

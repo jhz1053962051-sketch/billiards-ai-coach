@@ -1282,19 +1282,26 @@ const SHARE_REST_FILL = 'rgba(56, 189, 248, 0.22)';
 const SHARE_REST_STROKE = '#38bdf8';
 /** 母球会摔袋时，把这条路径标红——这是「别照着打」的那一半信息。 */
 const SHARE_SCRATCH_STROKE = 'rgba(248, 113, 113, 0.95)';
+/** 局面图：圈「当前该打的那一组」，圈在球外面，不挡号码。 */
+const SHARE_MARK_STROKE = 'rgba(125, 211, 252, 0.95)';
+/** 局面图：母球那一圈 + 「母球」二字——白球在深色台面上也会和别的球混在一起。 */
+const SHARE_CUE_MARK = 'rgba(255, 255, 255, 0.92)';
+const SHARE_LABEL_FONT = '"PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif';
 
 /**
  * 把这一杆画成一张俯视台面图。
  *
- * @param {{table:object, balls?:unknown[], shot?:object|null, maxWidth?:number}} input
+ * @param {{table:object, balls?:unknown[], shot?:object|null, mark?:object|null, maxWidth?:number}} input
  *   table    球台（决定比例与袋口位置）
  *   balls    当前所有球；落袋的会被跳过
  *   shot     单个候选（coach 卡片的 best，或备选里点中的那一个）；传空就只画球位
+ *   mark     局面图用：`{ numbers, label }` 要圈出来的球号 + 母球标记；
+ *            传了就按「整台局面」画，不传就是「这一杆」那张
  *   maxWidth 这张图最多多宽（CSS 像素），高度按台面比例自动算
  * @returns {{canvas:HTMLCanvasElement, width:number, height:number}|null}
  *   width/height 是 CSS 像素；贴进成品图时按这个尺寸占位（离屏画布本身按 dpr 放大过）
  */
-export function createShareScene({ table, balls, shot, maxWidth = 984 } = {}) {
+export function createShareScene({ table, balls, shot, mark, maxWidth = 984 } = {}) {
   if (!table) return null;
   const canvas = document.createElement('canvas');
   const view = createRenderer({ canvas, table });
@@ -1305,8 +1312,10 @@ export function createShareScene({ table, balls, shot, maxWidth = 984 } = {}) {
 
   const list = Array.isArray(balls) ? balls : [];
   const candidate = shot && typeof shot === 'object' ? shot : null;
+  const marks = mark && typeof mark === 'object' ? mark : null;
   // 辅助线压在球下面：球正好压在线上时，号码盘不会被线条糊住
   if (candidate) drawShareGuides(view, table, list, candidate);
+  if (marks) drawShareMarks(view, table, list, marks, { w, h });
 
   for (const b of list) {
     if (!b || typeof b !== 'object' || b.pocketed === true) continue;
@@ -1314,6 +1323,64 @@ export function createShareScene({ table, balls, shot, maxWidth = 984 } = {}) {
   }
 
   return { canvas, width: Math.round(w), height: Math.round(h) };
+}
+
+/**
+ * 局面图上的两类标记：把「当前该打的那一组」圈起来，再给母球单独标一下。
+ *
+ * 为什么圈在球外面而不是给球加高亮底色：导出的图是给人对照台面看的，
+ * 号码盘是唯一能对上「几号球」的东西，任何压在上面的装饰都是负资产。
+ */
+function drawShareMarks(view, table, balls, mark, box) {
+  const ctx = view.ctx;
+  const r = Math.max(2.5, table.ballRadius * view.scale);
+  const numbers = Array.isArray(mark.numbers) ? mark.numbers : [];
+
+  if (numbers.length) {
+    ctx.save();
+    ctx.setLineDash([8, 6]);
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = SHARE_MARK_STROKE;
+    for (const b of balls) {
+      if (!b || typeof b !== 'object' || b.pocketed === true) continue;
+      if (!numbers.includes(b.number)) continue;
+      const p = view.project(b.x, b.y);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r * 1.55, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  const cue = cueBallOf(balls);
+  if (!cue) return;
+  const p = view.project(cue.x, cue.y);
+  ctx.save();
+  ctx.setLineDash([4, 5]);
+  ctx.lineWidth = 2.5;
+  ctx.strokeStyle = SHARE_CUE_MARK;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, r * 1.95, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // 标签默认压在白球下方；贴底库时翻到上面，免得掉出画布
+  const fontSize = Math.max(15, Math.round(r * 1.6));
+  ctx.font = `600 ${fontSize}px ${SHARE_LABEL_FONT}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const label = '母球';
+  const boxW = Math.round(ctx.measureText(label).width) + 14;
+  const boxH = Math.round(fontSize * 1.45);
+  const cx = Math.min(Math.max(p.x, boxW / 2 + 2), (box.w || 0) - boxW / 2 - 2);
+  let top = p.y + r * 2.4;
+  if (Number.isFinite(box.h) && top + boxH > box.h - 2) top = p.y - r * 2.4 - boxH;
+  ctx.fillStyle = 'rgba(11, 18, 25, 0.86)';
+  roundRectPath(ctx, cx - boxW / 2, top, boxW, boxH, 6);
+  ctx.fill();
+  ctx.fillStyle = SHARE_CUE_MARK;
+  ctx.fillText(label, cx, top + boxH / 2);
+  ctx.restore();
 }
 
 /** 这一杆的三样东西：目标球到袋口、母球出杆方向、母球预计落点。 */

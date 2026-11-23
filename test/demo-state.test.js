@@ -22,6 +22,7 @@ import {
   NEXT_SHOT_SLOW_MS,
   autoPauseHint,
   buildShareSummary,
+  buildTableSummary,
   captureBallFrame,
   clamp,
   computeMatchStats,
@@ -2051,4 +2052,154 @@ test('buildShareSummary：空值 / 类型不对 / 缺字段都不抛，最差也
       assert.equal(typeof line.value, 'string');
     }
   }
+});
+
+// ---------------------------------------------------------------- 分享局面的文案
+//
+// buildTableSummary 决定「分享局面」那张图下半部分印什么。和 buildShareSummary 一样
+// 分工：排版在 app.js，说什么在这里，于是文案字段、顺序、措辞都能在 Node 里逐字钉住。
+// 它比「这一杆」多一层责任——图上的圈（mark）也从这里出，文案说「你 全色 剩 3」和
+// 图上圈住的那三颗必须是同一批号码。
+
+/** 一局八球中盘：台面上只剩指定号码，双方已分球、可指定轮到谁。 */
+function eightballGame({ numbers, groups = ['solid', 'stripe'], turn = 0, shots = 6 }) {
+  const game = createGame(table, makeBalls(numbers), { names: ['你', '对手'] });
+  game.breakShot = false;
+  game.open = false;
+  game.shots = shots;
+  game.turn = turn;
+  game.players[0].group = groups[0];
+  game.players[1].group = groups[1];
+  return game;
+}
+
+test('buildTableSummary：八球中盘印轮到谁 / 比分 / 两组剩余 / 下一步，mark 圈本组那几颗', () => {
+  const game = eightballGame({ numbers: [3, 4, 5, 9, 10, 11, 8] });
+  const out = buildTableSummary({
+    game,
+    balls: game.balls,
+    table,
+    shot: { found: true, best: shareCandidate() },
+  });
+
+  assert.equal(out.title, '八球 · 第 6 杆');
+  assert.deepEqual(
+    out.lines.map((l) => l.label),
+    ['轮到', '比分', '球组', '下一步'],
+    '行序固定：轮到谁 → 比分 → 球组 → 下一步',
+  );
+  const value = (label) => out.lines.find((l) => l.label === label).value;
+  assert.equal(value('轮到'), '你（全色）', '八球光说名字不够，得带他打哪一组');
+  assert.equal(value('比分'), '你 4 : 4 对手', '台面上本组剩 3 颗，就是进了 4 颗');
+  assert.equal(value('球组'), '你 全色 剩 3 · 对手 花色 剩 3');
+  assert.equal(value('下一步'), '3 号球 → 右下底袋，中杆 · 中力');
+  assert.deepEqual(out.mark.numbers, [3, 4, 5], '图上圈的必须和文案里「剩 3」对得上');
+  assert.equal(out.mark.label, '全色');
+});
+
+test('buildTableSummary：九球不分组，只报台面剩几颗与当前该打的最小号', () => {
+  const game = createGame(table, makeBalls([1, 2, 3, 4, 5]), {
+    names: ['你', '对手'],
+    kind: 'nineball',
+  });
+  game.breakShot = false;
+  game.open = false;
+  game.shots = 3;
+  const out = buildTableSummary({ game, balls: game.balls, shot: { found: false } });
+  const value = (label) => out.lines.find((l) => l.label === label).value;
+
+  assert.equal(out.title, '九球 · 第 3 杆');
+  assert.equal(value('轮到'), '你', '九球没有「你打哪一组」，别硬加括号');
+  assert.equal(value('比分'), '已进 4 颗 · 台面剩 5 颗', '9 颗的玩法，剩 5 颗就是进了 4 颗');
+  assert.equal(value('球组'), '无分组 · 目标 1 号球 · 台面剩 5 颗');
+  assert.deepEqual(out.mark.numbers, [1], '九球永远只能先碰最小号');
+  // 求解过但没球可打，和「还没求解」是两件事，这里必须分开说
+  assert.equal(value('下一步'), '求解过：没有可直接进攻的球，先防守或解一杆。');
+});
+
+test('buildTableSummary：斯诺克印红球剩余与该打的球，彩球用球名不用号码', () => {
+  const game = createGame(table, makeBalls([1, 2, 3, 16, 20]), {
+    names: ['你', '对手'],
+    kind: 'snooker',
+  });
+  game.shots = 2;
+  const out = buildTableSummary({ game, balls: game.balls });
+  // 每次重新算：下面会改 ballOn，抓着第一次的结果读会读到旧文案
+  const ballOnLine = () =>
+    buildTableSummary({ game, balls: game.balls }).lines.find((l) => l.label === '球局').value;
+
+  assert.equal(out.title, '斯诺克 · 第 2 杆');
+  assert.equal(out.lines.find((l) => l.label === '比分').value, '你 0 : 0 对手');
+  assert.equal(ballOnLine(), '红球剩 3 颗 · 该打 红球');
+  assert.deepEqual(out.mark.numbers, [1, 2, 3], '该打红球时圈的是红球，不是彩球');
+
+  // 刚打进红球 → 任意彩球；红球打完 → 只能打指定的那颗彩球
+  game.snooker.ballOn = 'color';
+  assert.equal(ballOnLine(), '红球剩 3 颗 · 该打 任意彩球');
+  game.snooker.ballOn = 20;
+  assert.match(ballOnLine(), /该打 粉球$/, '20 号是粉球，印「20 号球」没人知道那是哪颗');
+  assert.deepEqual(
+    buildTableSummary({ game, balls: game.balls }).mark.numbers,
+    [20],
+    '指定彩球时只圈那一颗',
+  );
+});
+
+test('buildTableSummary：只剩黑八时点明「只剩黑八」，mark 圈 8 号', () => {
+  const game = eightballGame({ numbers: [8], shots: 11 });
+  const out = buildTableSummary({ game, balls: game.balls });
+  const value = (label) => out.lines.find((l) => l.label === label).value;
+
+  assert.equal(value('比分'), '你 7 : 7 对手', '两组都清完，各进 7 颗');
+  assert.equal(value('球组'), '你 全色 剩 0 · 对手 花色 剩 0 · 只剩黑八');
+  assert.deepEqual(out.mark.numbers, [8], '本组清完之后该打的就是 8 号');
+});
+
+test('buildTableSummary：「还没求解」与「求解过没球」分开写，异常入参一律不抛', () => {
+  const game = eightballGame({ numbers: [3, 9, 8] });
+  const next = (shot) =>
+    buildTableSummary({ game, balls: game.balls, shot }).lines.find((l) => l.label === '下一步')
+      .value;
+
+  assert.equal(next(undefined), '还没求解');
+  assert.equal(next(null), '还没求解');
+  assert.equal(next({ found: false }), '求解过：没有可直接进攻的球，先防守或解一杆。');
+  assert.equal(
+    next({ found: false, message: '台面上没有可以合法先碰的球。' }),
+    '台面上没有可以合法先碰的球。',
+    '求解器给了说明就照它说，别用通用兜底盖掉',
+  );
+
+  const cases = [
+    undefined,
+    {},
+    null,
+    { game: '一串没用的文本', balls: 5 },
+    { game: { kind: 'eightball', players: null }, balls: null },
+    { game: { kind: 'snooker' }, balls: [{ number: 0 }] },
+  ];
+  for (const input of cases) {
+    const out = buildTableSummary(input);
+    assert.equal(typeof out.title, 'string');
+    assert.ok(Array.isArray(out.lines) && out.lines.length >= 1);
+    for (const line of out.lines) {
+      assert.equal(typeof line.label, 'string');
+      assert.equal(typeof line.value, 'string');
+    }
+    assert.ok(Array.isArray(out.mark.numbers), 'mark 永远是可用的数组，绘图层不必再判空');
+  }
+});
+
+test('buildTableSummary：没有对局时按「练习摆球」说，照样给出下一步', () => {
+  const out = buildTableSummary({
+    balls: makeBalls([5, 6]),
+    table,
+    shot: { found: true, best: shareCandidate() },
+  });
+
+  assert.equal(out.title, '练习台面 · 还剩 2 颗球');
+  assert.deepEqual(out.lines.map((l) => l.label), ['玩法', '台面', '下一步']);
+  assert.equal(out.lines[0].value, '练习摆球（还没开局）');
+  assert.equal(out.lines[1].value, '2 颗目标球 · 母球在台上');
+  assert.deepEqual(out.mark.numbers, [], '练习模式不分组，一颗都不圈');
 });
