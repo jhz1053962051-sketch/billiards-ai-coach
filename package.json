@@ -10,6 +10,7 @@
     "demo": "node tools/serve.mjs",
     "status": "node tools/status.mjs",
     "check:demo": "node tools/check-demo.mjs",
+    "build:min": "node tools/build-min.mjs",
     "verify:demo": "node tools/verify-demo.mjs",
     "verify:pose": "node tools/verify-pose.mjs",
     "verify": "node tools/verify-all.mjs",

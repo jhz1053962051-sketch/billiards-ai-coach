@@ -1,0 +1,302 @@
+{
+  "generator": "tools/build-min.mjs",
+  "format": 1,
+  "note": "删注释与空白；sha256 是源码字节的哈希，重建后逐项对比即可判断 dist 是否过期",
+  "files": [
+    {
+      "path": "demo/app.js",
+      "src": "demo/app.js",
+      "mode": "minify",
+      "srcBytes": 148427,
+      "outBytes": 90476,
+      "sha256": "8eaa54f20dedd99b4d3a86e1895782219615ad66e58ddd8c8c6cf18d69fb7e19"
+    },
+    {
+      "path": "demo/file-guard.js",
+      "src": "demo/file-guard.js",
+      "mode": "minify",
+      "srcBytes": 3174,
+      "outBytes": 2214,
+      "sha256": "ee029a2bace9081cea5b7fb10720fa47c06f962dc71c2666d40feb1ba491f52d"
+    },
+    {
+      "path": "demo/index.html",
+      "src": "demo/index.html",
+      "mode": "copy",
+      "srcBytes": 76153,
+      "outBytes": 76153,
+      "sha256": "93d2ba084a7d46a1509f5608b5c6eb246fd73353c7082f55fbf578d175e07601"
+    },
+    {
+      "path": "demo/pose.html",
+      "src": "demo/pose.html",
+      "mode": "copy",
+      "srcBytes": 21715,
+      "outBytes": 21715,
+      "sha256": "f8a18b1f238ae3fd8c940c9ca59775b3148e8822ed22facf59e0fd19c6ae4fd1"
+    },
+    {
+      "path": "demo/pose.js",
+      "src": "demo/pose.js",
+      "mode": "minify",
+      "srcBytes": 19909,
+      "outBytes": 12785,
+      "sha256": "d323b64ec20cd01df462fd4abfa5f1e3eec887a9e654c3188cbb56bcbc4a9f5d"
+    },
+    {
+      "path": "demo/practice.js",
+      "src": "demo/practice.js",
+      "mode": "minify",
+      "srcBytes": 17419,
+      "outBytes": 13733,
+      "sha256": "a011729fa2f7645a5af1be08309d58da8f5d6c22d2070177c14c35220fafe277"
+    },
+    {
+      "path": "demo/render.js",
+      "src": "demo/render.js",
+      "mode": "minify",
+      "srcBytes": 57444,
+      "outBytes": 33286,
+      "sha256": "580c23b7083eb1fd893ca7c8f054849d62393da208e0c803db1be9a3aca4732b"
+    },
+    {
+      "path": "demo/save.js",
+      "src": "demo/save.js",
+      "mode": "minify",
+      "srcBytes": 22861,
+      "outBytes": 9542,
+      "sha256": "ad78f034e7ccedf3bd4d04d7061249919cd4d7a3d8d2b06e1b4b8ea3ea890314"
+    },
+    {
+      "path": "demo/state.js",
+      "src": "demo/state.js",
+      "mode": "minify",
+      "srcBytes": 82083,
+      "outBytes": 35167,
+      "sha256": "ce81fc4723de4a21874fd12023119e33942643e476ebe360e5352121d912fbed"
+    },
+    {
+      "path": "src/aim.js",
+      "src": "src/aim.js",
+      "mode": "minify",
+      "srcBytes": 11422,
+      "outBytes": 4468,
+      "sha256": "f662a6f6e15a634ccd0f801cabc4dc2023d0bcddd1e4719b8e0a867db64d3e98"
+    },
+    {
+      "path": "src/constants.js",
+      "src": "src/constants.js",
+      "mode": "minify",
+      "srcBytes": 17309,
+      "outBytes": 1979,
+      "sha256": "97027fd041727bdb7757da0529ac30ef01bb97a4153992f0114a948099b1f270"
+    },
+    {
+      "path": "src/geometry.js",
+      "src": "src/geometry.js",
+      "mode": "minify",
+      "srcBytes": 945,
+      "outBytes": 463,
+      "sha256": "68c58cc21c71290f8e325766b18fe7b82b0957c226a34ae7093cb632a8462072"
+    },
+    {
+      "path": "src/opponent.js",
+      "src": "src/opponent.js",
+      "mode": "minify",
+      "srcBytes": 13153,
+      "outBytes": 5493,
+      "sha256": "04b7242abcdd9b36138b7cd316a65548fd79b468d5ea72dd92cb3c3fcf94b991"
+    },
+    {
+      "path": "src/physics.js",
+      "src": "src/physics.js",
+      "mode": "minify",
+      "srcBytes": 45675,
+      "outBytes": 12625,
+      "sha256": "2cc5d67293dc3cac2624ac15e9c47c59df52ad6a8e8e59c4ccb4cb9ca33673f8"
+    },
+    {
+      "path": "src/pose/analyze.js",
+      "src": "src/pose/analyze.js",
+      "mode": "minify",
+      "srcBytes": 23007,
+      "outBytes": 12257,
+      "sha256": "ac4c187c02d59df15c67846f39f743887aaaf0f410ebb25d496fb5c1b5091b7e"
+    },
+    {
+      "path": "src/pose/checks.js",
+      "src": "src/pose/checks.js",
+      "mode": "minify",
+      "srcBytes": 32490,
+      "outBytes": 16476,
+      "sha256": "576ab9550a24fd81a5df3fc8ed35ccb3cf49ccaa8f195c84db9970f34a7d12e6"
+    },
+    {
+      "path": "src/pose/landmarks.js",
+      "src": "src/pose/landmarks.js",
+      "mode": "minify",
+      "srcBytes": 9089,
+      "outBytes": 4370,
+      "sha256": "2f95e46f98e24a29239f6b59ff53a2ba1a39e69fca427526273b6cb931ab6f3d"
+    },
+    {
+      "path": "src/pose/reference.js",
+      "src": "src/pose/reference.js",
+      "mode": "minify",
+      "srcBytes": 19708,
+      "outBytes": 10678,
+      "sha256": "28652dc5a6aa6fff13e75b30e950404dd56254efa6178dd5de0306e7007aa544"
+    },
+    {
+      "path": "src/rack.js",
+      "src": "src/rack.js",
+      "mode": "minify",
+      "srcBytes": 19742,
+      "outBytes": 7510,
+      "sha256": "dd05ee471de5212857daab60764474fb653256c0864012198a492fa5b76cfca4"
+    },
+    {
+      "path": "src/rules.js",
+      "src": "src/rules.js",
+      "mode": "minify",
+      "srcBytes": 42868,
+      "outBytes": 17725,
+      "sha256": "08e1824bdaa085e3b061746ce3aa471307663aa89bb72166f093c92b1a91d28d"
+    },
+    {
+      "path": "src/safety.js",
+      "src": "src/safety.js",
+      "mode": "minify",
+      "srcBytes": 15665,
+      "outBytes": 4436,
+      "sha256": "14c2e5e934f4f204d12a1579016d61fc3dde16fd4d60b2048e5ec91a54d957d5"
+    },
+    {
+      "path": "src/sim.js",
+      "src": "src/sim.js",
+      "mode": "minify",
+      "srcBytes": 5865,
+      "outBytes": 1873,
+      "sha256": "6cabef717f08c527df55ccd4ab63093b4d3cf7e3db0df9930e3ef7f54f37bfe2"
+    },
+    {
+      "path": "src/snooker.js",
+      "src": "src/snooker.js",
+      "mode": "minify",
+      "srcBytes": 18780,
+      "outBytes": 9308,
+      "sha256": "c3a6546a0cdb2057c17f2c5fd0a4f1ed56c36798e3ead44a922ab30f8f96b97d"
+    },
+    {
+      "path": "src/solver.js",
+      "src": "src/solver.js",
+      "mode": "minify",
+      "srcBytes": 77222,
+      "outBytes": 30935,
+      "sha256": "42fcc37e0105997bb2bd1dc5db17de6864c26fc59aef1699d1652c4e9b25323a"
+    },
+    {
+      "path": "src/table.js",
+      "src": "src/table.js",
+      "mode": "minify",
+      "srcBytes": 10566,
+      "outBytes": 2783,
+      "sha256": "d5d92b09931322331d7aaff72f27e133cef7875c12d6271a8af9b29ed74cfbbc"
+    },
+    {
+      "path": "src/tolerance.js",
+      "src": "src/tolerance.js",
+      "mode": "minify",
+      "srcBytes": 3827,
+      "outBytes": 1497,
+      "sha256": "667fe28fb0650e77ff42fd478a9a5d3d3f6ef9fa4a5943e447c2fb864e3cbf8c"
+    },
+    {
+      "path": "vendor/pose/LICENSE",
+      "src": "vendor/pose/LICENSE",
+      "mode": "copy",
+      "srcBytes": 11323,
+      "outBytes": 11323,
+      "sha256": "283ea6cc2997a1a70da0049e09adf9317bb60ca1b51279b65196b83a69e1996b"
+    },
+    {
+      "path": "vendor/pose/manifest.json",
+      "src": "vendor/pose/manifest.json",
+      "mode": "copy",
+      "srcBytes": 1027,
+      "outBytes": 1027,
+      "sha256": "5ed6e4c26cf1909415b63e7297945a59be291f16e8d01eaecf79d4274cfed260"
+    },
+    {
+      "path": "vendor/pose/NOTICE",
+      "src": "vendor/pose/NOTICE",
+      "mode": "copy",
+      "srcBytes": 1284,
+      "outBytes": 1284,
+      "sha256": "97379a086ae8d8fa745e81f9a8b8ace28c95f5456ce1b26a7a6393441e376758"
+    },
+    {
+      "path": "vendor/pose/pose_landmarker_lite.task",
+      "src": "vendor/pose/pose_landmarker_lite.task",
+      "mode": "copy",
+      "srcBytes": 5777746,
+      "outBytes": 5777746,
+      "sha256": "59929e1d1ee95287735ddd833b19cf4ac46d29bc7afddbbf6753c459690d574a"
+    },
+    {
+      "path": "vendor/pose/vision_bundle.mjs",
+      "src": "vendor/pose/vision_bundle.mjs",
+      "mode": "copy",
+      "srcBytes": 156344,
+      "outBytes": 156344,
+      "sha256": "870da5cfc43bfcf2a8b0f14e8152dae8c7e701722e1191b0e592b94b81b4127a"
+    },
+    {
+      "path": "vendor/pose/wasm/vision_wasm_internal.js",
+      "src": "vendor/pose/wasm/vision_wasm_internal.js",
+      "mode": "copy",
+      "srcBytes": 334128,
+      "outBytes": 334128,
+      "sha256": "85c1a342be70427987f900969a5f26e17557351111364e6585e97fb03e93e108"
+    },
+    {
+      "path": "vendor/pose/wasm/vision_wasm_internal.wasm",
+      "src": "vendor/pose/wasm/vision_wasm_internal.wasm",
+      "mode": "copy",
+      "srcBytes": 14466654,
+      "outBytes": 14466654,
+      "sha256": "bcc13df22d3d69ec8cbe8e280989356d844ae00f4523eb82072d2484f44134dc"
+    }
+  ],
+  "totals": {
+    "files": 33,
+    "srcBytes": 21565024,
+    "outBytes": 21188453
+  },
+  "firstScreen": {
+    "files": [
+      "demo/app.js",
+      "demo/file-guard.js",
+      "demo/practice.js",
+      "demo/render.js",
+      "demo/save.js",
+      "demo/state.js",
+      "src/aim.js",
+      "src/constants.js",
+      "src/geometry.js",
+      "src/opponent.js",
+      "src/physics.js",
+      "src/rack.js",
+      "src/rules.js",
+      "src/safety.js",
+      "src/sim.js",
+      "src/snooker.js",
+      "src/solver.js",
+      "src/table.js",
+      "src/tolerance.js"
+    ],
+    "count": 19,
+    "srcBytes": 614447,
+    "outBytes": 285513
+  }
+}

@@ -21,6 +21,11 @@ _research/
 .DS_Store
 Thumbs.db
 
+# 最小化产物里的第三方大二进制：构建时从 vendor/ 原样拷过来，不进仓库
+# （14.5MB 的 wasm + 5.7MB 的模型，仓库里已有 vendor/pose 下的原文件）。
+dist/vendor/pose/wasm/*.wasm
+dist/vendor/pose/pose_landmarker_lite.task
+
 # 日志
 *.log
 # 后台起静态服务器时 nohup 留下的输出（本机运行态）

@@ -1006,6 +1006,22 @@ CI 在 `.github/workflows/verify.yml`：push 到 `main` / `master`、PR、手动
 
 **关于依赖**：`package.json` 新增了 `devDependencies: { "typescript": "5.9.3" }`，仓库因此多了一份 `package-lock.json`（`node_modules/` 早已 gitignore）。**运行时依旧零依赖**——`src/`、`demo/`、`vendor/` 没有任何一行 import typescript，它只在开发期与 CI 里跑 `tsc`；打包/部署那套不受影响。CI 里 `npm ci` 只为了装这一个包。
 
+## 构建：最小化产物（`dist/`）
+
+`npm run build:min`（`tools/build-min.mjs`）产出 `dist/`：把 `demo/`、`src/` 下的每个 `.js` 去掉注释与多余空白，`demo/*.html` 与 `vendor/pose/` 原样拷过去。**零依赖、零打包器**——脚本只 import `node:` 内置模块，词法扫描自己写；不做变量名混淆（风险高、收益低）。
+
+为什么手写词法而不是正则替换：`//`、`/* */`、引号、正则字面量、模板字符串里的 `${}` 都可能包含「看起来像注释」的片段。脚本按字符状态机走，字符串与模板串整段跳过；`/` 用「前一个词 + 前一个字符」判是不是正则开头（前面是 `)` `]` `}` 就保守当成除号）；块注释里出现过换行就记一笔，让 ASI 敏感的位置保留换行；`//!` 与 `/*!` 开头的许可注释原样保留。
+
+体积（首屏 19 个 JS，含 `demo/file-guard.js`）：600.0 KB → 278.8 KB，省 53.5%；全部 24 个 JS 701.8 KB → 334.1 KB。压缩率最高的是注释最密的 `src/constants.js`（16.9 → 1.9 KB），最低的是 `demo/practice.js`（17.0 → 13.4 KB，它主要是字符串文案）。
+
+**怎么保证没改行为**：① 每个输出文件 `node --check` 通过；② `node tools/build-min.mjs --check` 会重算一遍，并把源与 dist 的 **token 流**逐 token 比对；③ 用仓库已有的 typescript 把源与 dist 各解析成 AST、去掉注释节点后逐节点比对（24 个文件全等；这是本地一次性验证，不在门禁里）；④ 起服务跑 E2E：`node tools/build-min.mjs --serve 4180` 之后 `DEMO_URL=http://127.0.0.1:4180/demo/ node tools/verify-demo.mjs`，断言数与源码版一致；姿态页同理 `POSE_BASE=http://127.0.0.1:4180 node tools/verify-pose.mjs`。
+
+**接入用的是方案 A**：`index.html` 仍然指向 `demo/*.js`，`dist/` 只用于部署。源码保持可编辑、本地调试不用先 build；`dist/BUILD.json` 登记了每个文件的源路径、源/输出字节数与**源文件 SHA256**，改完代码忘了 build 时 `--check` 会直接报「内容过期」并退 1。新增的纪律只有一条：**发布前跑一次 `npm run build:min`**，日常开发不需要。
+
+`dist/vendor/pose/` 下两个大二进制（14.5MB 的 wasm、5.7MB 的模型）在 `.gitignore` 里，构建时从 `vendor/` 拷过来；`dist/` 的文本文件与 `BUILD.json` 都在仓库里，所以在干净 clone 上跑一次 `build:min` 就得到完整可发布的 `dist/`。
+
+双击 `demo/index.html` 本来也打不开（`type="module"` 走 `file://` 会被 CORS 拦，`file-guard.js` 正是干这个的），方案 A 因此没有额外损失：本地看页面一直靠 `npm run demo` 起服务。CI 目前不加构建步骤——`.github/workflows/verify.yml` 验的是源码；哪天要发 Pages，在发布 job 里加一行 `npm run build:min` 再把 `dist/` 发出去即可。
+
 ## 许可
 
 MIT。第三方资产：MediaPipe Pose Landmarker（Apache-2.0），模型与 wasm 见 `vendor/pose/`，许可证全文与来源声明也在那个目录（`LICENSE` / `NOTICE`）——Apache-2.0 第 4(a) 条要求分发时随附许可证副本，只在 README 里写一句出处不等于随附文本。那 5 个文件的 sha256 登记在 `vendor/pose/manifest.json`，`npm test` 会逐个核对。

@@ -1,0 +1,1547 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>台球 AI 教练 · 击球几何与物理仿真</title>
+<!-- 禁止一切外部资源与内联脚本。页面自己只加载同源的 app.js / file-guard.js，
+     数据全在本机，没有任何联网需求——那就把这条允许写死，省得哪天某个
+     import 里混进一段外链脚本，页面还能安安静静跑下去。
+     style 放 'unsafe-inline' 是因为正文用了 46 处 style="..." 内联样式；
+     真要收紧得先把它们全挪进 <style>，对本地演示页不划算。
+     注意：meta 里的 CSP 不支持 frame-ancestors，写了也会被忽略，别以为挡得住套框。 -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
+<!-- 普通脚本、必须排在所有 module 之前：file:// 下模块会被 CORS 拒，只有它能说话 -->
+<script src="./file-guard.js"></script>
+<style>
+  :root {
+    /* 缤纷台球主题：明朗通透的竞技沙盘底色 + 真实 1-15 号球全谱渐变 */
+    --bg: #141c26;
+    --stage-bg: radial-gradient(ellipse at 50% 50%, #22374d 0%, #172535 60%, #101a26 100%);
+    --panel: #182330;
+    --panel-card: rgba(28, 41, 56, 0.85);
+    --panel-card-hover: rgba(35, 52, 72, 0.95);
+    --line: rgba(255, 255, 255, 0.12);
+    --line-light: rgba(255, 255, 255, 0.2);
+    --text: #ffffff;
+    --text-secondary: #cbd5e1;
+    --muted: #94a3b8;
+
+    /* 多彩台球色球渐变（黄、蓝、红、紫、橙、绿、酒红、曜石黑）。
+       两个主色系压深了：这俩渐变上压的是纯白字，实测对比度不够。
+       改前 --grad-green #10b981→#059669 = 2.54:1（#solve）、
+       --grad-blue #0ea5e9→#2563eb = 2.77:1（#shoot / #gSolve），
+       都低于 WCAG AA 的 4.5:1。压深后（按最亮的那一端算，最差处达标）：
+       --grad-green #047857→#065f46 = 5.48:1、--grad-blue #0369a1→#1d4ed8 = 5.93:1。
+       hover 态同样要过 4.5:1，所以只往更深处走，不再回到亮色。
+       色相没变，还是翡翠绿 / 晴空蓝，只是不再「白纸白字」。 */
+    --grad-green: linear-gradient(135deg, #047857 0%, #065f46 100%);
+    --grad-green-hover: linear-gradient(135deg, #047857 0%, #064e3b 100%);
+    --grad-blue: linear-gradient(135deg, #0369a1 0%, #1d4ed8 100%);
+    --grad-blue-hover: linear-gradient(135deg, #0369a1 0%, #1e40af 100%);
+    --grad-amber: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+    --grad-amber-hover: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%);
+    --grad-purple: linear-gradient(135deg, #a855f7 0%, #7c3aed 100%);
+    --grad-purple-hover: linear-gradient(135deg, #c084fc 0%, #9333ea 100%);
+    --grad-orange: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
+    --grad-ruby: linear-gradient(135deg, #f43f5e 0%, #e11d48 100%);
+    --grad-indigo: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
+
+    /* 台球全色系光谱彩带 */
+    --grad-spectrum: linear-gradient(90deg, #f59e0b 0%, #f97316 20%, #ef4444 40%, #a855f7 60%, #0ea5e9 80%, #10b981 100%);
+
+    --accent: #10b981;
+    --accent-light: #34d399;
+    --warn: #fbbf24;
+    --danger: #f87171;
+    --radius-sm: 6px;
+    --radius-md: 10px;
+    --radius-lg: 14px;
+    --shadow-card: 0 6px 20px -2px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    --transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%;
+    background: var(--bg); color: var(--text);
+    font: 14px/1.6 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+    overflow: hidden;
+  }
+  body { display: flex; flex-direction: column; }
+
+  /* 顶部导航栏：通透明朗，底部嵌台球全谱彩虹微光线条 */
+  header {
+    min-height: 58px; padding: 0 20px;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, rgba(26, 38, 52, 0.96) 0%, rgba(20, 29, 41, 0.94) 100%);
+    backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+    display: flex; align-items: center; gap: 16px;
+    z-index: 100; flex-shrink: 0;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+    position: relative;
+  }
+  header::after {
+    content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 2px;
+    background: var(--grad-spectrum); opacity: 0.85;
+  }
+
+  .brand-group { display: flex; align-items: center; gap: 10px; }
+  .brand-logo {
+    font-size: 20px; width: 36px; height: 36px;
+    border-radius: 10px;
+    background: linear-gradient(135deg, #1e293b, #0f172a);
+    border: 2px solid rgba(255, 255, 255, 0.15);
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  }
+  header h1 {
+    font-size: 15px; margin: 0; font-weight: 700;
+    letter-spacing: .4px; color: #fff;
+    display: flex; align-items: center; gap: 8px;
+    white-space: nowrap;
+  }
+  .badge-ai {
+    font-size: 10px; font-weight: 800; padding: 2px 7px; border-radius: 5px;
+    background: var(--grad-amber);
+    color: #1a0f00; letter-spacing: 0.5px;
+    box-shadow: 0 2px 6px rgba(245, 158, 11, 0.4);
+  }
+  .tabs {
+    display: flex; gap: 3px;
+    background: rgba(15, 23, 34, 0.65);
+    border: 1px solid var(--line); border-radius: 8px; padding: 3px;
+  }
+  .tabs button {
+    border: 0; background: transparent; color: var(--muted); padding: 6px 16px;
+    border-radius: 6px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+    transition: var(--transition);
+  }
+  .tabs button:hover { color: var(--text); }
+  .tabs button.on {
+    background: var(--grad-blue);
+    color: #ffffff; font-weight: 600;
+    box-shadow: 0 2px 10px rgba(14, 165, 233, 0.45);
+  }
+  .sub-pill {
+    display: flex; align-items: center; gap: 6px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--line);
+    border-radius: 20px; padding: 4px 14px;
+  }
+  header .sub {
+    color: var(--text-secondary); font-size: 12px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 440px;
+  }
+  header select {
+    background: linear-gradient(145deg, #243547 0%, #1a2735 100%);
+    color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 12px; font: inherit; font-size: 12px;
+    outline: none; cursor: pointer; transition: var(--transition);
+  }
+  header select:hover { border-color: rgba(14, 165, 233, 0.5); }
+  header nav { margin-left: auto; }
+  header nav a {
+    color: #fff; text-decoration: none; font-size: 12px; font-weight: 600;
+    padding: 6px 14px; border-radius: 8px;
+    background: var(--grad-purple);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    transition: var(--transition);
+    display: flex; align-items: center; gap: 4px;
+    box-shadow: 0 3px 10px rgba(168, 85, 247, 0.35);
+  }
+  header nav a:hover {
+    background: var(--grad-purple-hover);
+    box-shadow: 0 4px 16px rgba(168, 85, 247, 0.55);
+    transform: translateY(-1px);
+  }
+
+  /* 主体舞台区域：通透敞亮的现代球馆顶灯 */
+  main { flex: 1; display: flex; min-height: 0; position: relative; }
+  #stage {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    padding: 24px; min-width: 0; position: relative;
+    background: var(--stage-bg);
+    overflow: hidden;
+  }
+  .stage-controls {
+    position: absolute;
+    top: 20px;
+    right: 24px;
+    z-index: 20;
+    display: flex;
+    gap: 10px;
+    pointer-events: none;
+  }
+  .view-toggle-btn {
+    pointer-events: auto;
+    background: linear-gradient(135deg, rgba(26, 38, 52, 0.92) 0%, rgba(17, 26, 36, 0.92) 100%);
+    border: 1px solid rgba(255, 255, 255, 0.20);
+    border-radius: 20px;
+    padding: 6px 14px;
+    color: #ffffff;
+    font-size: 13px;
+    font-weight: 600;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    transition: var(--transition);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+  .view-toggle-btn:hover {
+    background: linear-gradient(135deg, rgba(38, 56, 76, 0.96) 0%, rgba(24, 38, 54, 0.96) 100%);
+    border-color: rgba(14, 165, 233, 0.65);
+    box-shadow: 0 6px 20px rgba(14, 165, 233, 0.4);
+    transform: translateY(-1px);
+  }
+  .view-toggle-btn.fpv {
+    background: linear-gradient(135deg, rgba(14, 165, 233, 0.35) 0%, rgba(16, 185, 129, 0.25) 100%);
+    border-color: #38bdf8;
+    box-shadow: 0 0 18px rgba(14, 165, 233, 0.45), inset 0 0 4px #38bdf8;
+  }
+  .view-toggle-btn kbd {
+    font-size: 11px;
+    padding: 1px 6px;
+    background: rgba(255, 255, 255, 0.12);
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    border-radius: 4px;
+    color: #38bdf8;
+  }
+  canvas {
+    max-width: 100%; max-height: 100%; touch-action: none; cursor: grab;
+    border-radius: 12px;
+    box-shadow: 0 24px 60px -5px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.1), 0 0 45px rgba(14, 165, 233, 0.12);
+    transition: transform 0.15s ease;
+  }
+  canvas.dragging { cursor: grabbing; }
+  canvas.placing { cursor: crosshair; }
+
+  /* 侧边操作栏：明朗清爽的卡片布局 */
+  aside {
+    width: 386px; flex: none; border-left: 1px solid var(--line);
+    background: linear-gradient(180deg, #182330 0%, #131c26 100%);
+    padding: 16px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 13px;
+  }
+  aside::-webkit-scrollbar { width: 6px; }
+  aside::-webkit-scrollbar-track { background: transparent; }
+  aside::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.2); border-radius: 3px; }
+  aside::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.35); }
+
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  button {
+    background: linear-gradient(145deg, #243548 0%, #1c2a3a 100%);
+    color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 13px; font: inherit; font-size: 13px; font-weight: 500;
+    cursor: pointer; transition: var(--transition);
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  }
+  button:hover {
+    background: linear-gradient(145deg, #2d425a 0%, #223447 100%);
+    border-color: var(--line-light);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  }
+  button:active { transform: translateY(0); }
+  button.primary {
+    background: var(--grad-green);
+    border-color: #6ee7b7; color: #ffffff; font-weight: 600;
+    box-shadow: 0 3px 14px rgba(16, 185, 129, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  }
+  button.primary:hover {
+    background: var(--grad-green-hover);
+    box-shadow: 0 4px 20px rgba(16, 185, 129, 0.55);
+    border-color: #a7f3d0;
+  }
+  button:disabled { opacity: .45; cursor: not-allowed; transform: none !important; box-shadow: none !important; }
+
+  select {
+    background: linear-gradient(145deg, #243548 0%, #1c2a3a 100%);
+    color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 10px; font: inherit; font-size: 13px;
+    outline: none; transition: var(--transition);
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.2);
+  }
+  select:hover { border-color: rgba(255, 255, 255, 0.25); }
+
+  /* 卡片：不同功能模块拥有辨识度极高彩色发光边框。
+     卡片间距统一在这里给：之前是每张卡各自写一个行内 margin-bottom:12px，
+     十三处重复、漏一处就贴在一起。行内那一份已经清掉，只剩 .row / details
+     这种不是 .card 的容器还留着自己的行内边距。 */
+  .card {
+    background: var(--panel-card);
+    border: 1px solid var(--line);
+    border-radius: 10px; padding: 13px 14px; box-shadow: var(--shadow-card);
+    margin-bottom: 12px;
+    transition: border-color .15s, box-shadow .15s, background .15s;
+  }
+  .card:hover {
+    background: var(--panel-card-hover);
+    border-color: rgba(255, 255, 255, 0.25);
+    box-shadow: 0 8px 24px -2px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  }
+  .card h2 {
+    margin: 0 0 10px; font-size: 12px; font-weight: 700;
+    color: var(--muted); letter-spacing: 1.2px; text-transform: uppercase;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+
+  /* AI 战术核心卡：翡翠绿主题 */
+  .card.hero {
+    border-left: 3px solid #10b981;
+    background: linear-gradient(155deg, rgba(16, 185, 129, 0.15) 0%, rgba(28, 41, 56, 0.9) 60%);
+    box-shadow: 0 6px 22px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(16, 185, 129, 0.3);
+  }
+  /* 备选方案卡：晴空蓝主题 */
+  .card.alts-card {
+    border-left: 3px solid #0ea5e9;
+    background: linear-gradient(155deg, rgba(14, 165, 233, 0.12) 0%, rgba(28, 41, 56, 0.9) 60%);
+  }
+  /* 手打微调卡：琥珀橙金主题 */
+  .card.tune-card {
+    border-left: 3px solid #f59e0b;
+    background: linear-gradient(155deg, rgba(245, 158, 11, 0.12) 0%, rgba(28, 41, 56, 0.9) 60%);
+  }
+  /* 摆球卡：罗兰紫主题 */
+  .card.rack-card {
+    border-left: 3px solid #a855f7;
+    background: linear-gradient(155deg, rgba(168, 85, 247, 0.12) 0%, rgba(28, 41, 56, 0.9) 60%);
+  }
+
+  /* 建议与结论 */
+  #advice {
+    font-size: 14px; line-height: 1.65; color: #ffffff;
+    word-break: break-word; font-weight: 500;
+  }
+  #advice.empty { color: var(--muted); font-weight: 400; }
+  #verdict {
+    margin-top: 8px; color: #6ee7b7; font-size: 12px; font-weight: 600;
+    display: inline-block; padding: 2px 10px; border-radius: 6px;
+    background: linear-gradient(135deg, rgba(16, 185, 129, 0.25) 0%, rgba(5, 150, 105, 0.15) 100%);
+    border: 1px solid rgba(16, 185, 129, 0.45);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+  }
+  #verdict:empty { display: none; }
+  #verdict.hard {
+    color: #fde68a;
+    background: linear-gradient(135deg, rgba(245, 158, 11, 0.28) 0%, rgba(217, 119, 6, 0.16) 100%);
+    border-color: rgba(251, 191, 36, 0.5);
+  }
+  #verdict.brutal {
+    color: #fca5a5;
+    background: linear-gradient(135deg, rgba(239, 68, 68, 0.28) 0%, rgba(185, 28, 28, 0.16) 100%);
+    border-color: rgba(248, 113, 113, 0.5);
+  }
+  /* 难度档位的精度前提。档位名本身有前提（±0.2°），不写出来会误导：
+     同一个「很容易」，瞄得准是 97%，瞄得松就只剩 80%。 */
+  .verdict-note {
+    margin-top: 8px; color: var(--muted); font-size: 11px; line-height: 1.55;
+    padding-left: 2px;
+  }
+
+  /* 备选方案列表：晴空蓝高亮渐变 */
+  .alt {
+    display: flex; justify-content: space-between; gap: 8px; align-items: center;
+    padding: 8px 10px; border-radius: 7px; cursor: pointer; border: 1px solid transparent;
+    background: rgba(255, 255, 255, 0.03);
+    transition: var(--transition);
+  }
+  .alt:hover {
+    background: rgba(14, 165, 233, 0.15);
+    border-color: rgba(14, 165, 233, 0.4); transform: translateX(2px);
+  }
+  .alt.active {
+    background: linear-gradient(135deg, rgba(14, 165, 233, 0.25) 0%, rgba(37, 99, 235, 0.15) 100%);
+    border-color: #38bdf8;
+    box-shadow: inset 0 0 12px rgba(14, 165, 233, 0.2), 0 2px 8px rgba(0, 0, 0, 0.25);
+  }
+  .alt .name { font-size: 13px; font-weight: 500; display: block; }
+  .alt .position { color: #7dd3fc; font-size: 11px; display: block; line-height: 1.4; }
+  .alt .meta { color: var(--text-secondary); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  /* 没有鼠标的设备上 hover 永远不触发，靠变色做「可点」提示等于没做。
+     给一个常驻的箭头 + 边框，手指点下去还有 :active 反馈。 */
+  .alt .go { color: var(--muted); font-size: 15px; line-height: 1; margin-left: 4px; flex: none; }
+  @media (hover: none) {
+    .alt { border-color: rgba(255, 255, 255, 0.1); }
+    .alt:active { background: rgba(14, 165, 233, 0.22); border-color: rgba(14, 165, 233, 0.5); }
+  }
+  .empty { color: var(--muted); font-size: 13px; }
+  .hint { color: var(--muted); font-size: 12px; line-height: 1.65; margin: 0 0 6px; }
+  .hint b { color: var(--text-secondary); font-weight: 600; }
+
+  /* 开关控件：明快蓝色切换 */
+  label.switch {
+    display: flex; align-items: center; gap: 9px; font-size: 13px;
+    color: var(--text-secondary); cursor: pointer; user-select: none;
+    padding: 3px 0;
+  }
+  /* 开关：命中区 36×24，胶囊本体仍是 36×19。桌面指针下限是 24×24，
+     19 高的 input 直接撑高会把胶囊拉成一坨，所以胶囊画到 ::before 上、
+     垂直居中，input 自己只当点击框（窄屏那段再把它放大到 44×44）。 */
+  label.switch input[type=checkbox] {
+    appearance: none; -webkit-appearance: none;
+    width: 36px; height: 24px; border-radius: 10px;
+    background: none; border: 0;
+    position: relative; cursor: pointer; transition: var(--transition);
+    flex-shrink: 0;
+  }
+  label.switch input[type=checkbox]::before {
+    content: ''; position: absolute; left: 0; top: 50%;
+    width: 36px; height: 19px; margin-top: -9.5px;
+    border-radius: 10px; background: #233448; border: 1px solid var(--line);
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.4); transition: var(--transition);
+  }
+  label.switch input[type=checkbox]::after {
+    content: ''; position: absolute; top: 50%; left: 2px; margin-top: -6.5px;
+    width: 13px; height: 13px; border-radius: 50%;
+    background: #94a3b8; transition: var(--transition);
+  }
+  label.switch input[type=checkbox]:checked::before {
+    background: var(--grad-blue);
+    border-color: #38bdf8;
+    box-shadow: 0 0 10px rgba(14, 165, 233, 0.45);
+  }
+  label.switch input[type=checkbox]:checked::after {
+    transform: translateX(17px);
+    background: #ffffff;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  }
+
+  /* 击球点 2D 示意靶盘：珍珠白立体母球 */
+  .cue-pad-row {
+    display: flex; align-items: center; gap: 14px;
+    background: rgba(15, 23, 34, 0.65);
+    border: 1px solid var(--line);
+    border-radius: 9px; padding: 10px 12px; margin-bottom: 12px;
+  }
+  .cue-ball-pad {
+    position: relative; width: 70px; height: 70px; border-radius: 50%;
+    background: radial-gradient(circle at 35% 35%, #ffffff 0%, #f1f5f9 50%, #cbd5e1 80%, #94a3b8 100%);
+    box-shadow: inset 0 2px 6px rgba(255, 255, 255, 0.95), 0 6px 18px rgba(0, 0, 0, 0.5), 0 0 14px rgba(14, 165, 233, 0.25);
+    cursor: crosshair; touch-action: none; flex-shrink: 0; user-select: none;
+    border: 1px solid rgba(255, 255, 255, 0.6);
+  }
+  .cue-ball-crosshair-h, .cue-ball-crosshair-v {
+    position: absolute; background: rgba(71, 85, 105, 0.5); pointer-events: none;
+  }
+  .cue-ball-crosshair-h { left: 12%; right: 12%; top: 50%; height: 1px; }
+  .cue-ball-crosshair-v { top: 12%; bottom: 12%; left: 50%; width: 1px; }
+  .cue-ball-dot {
+    position: absolute; width: 13px; height: 13px; border-radius: 50%;
+    background: var(--grad-ruby);
+    border: 2px solid #ffffff;
+    box-shadow: 0 0 10px rgba(244, 63, 94, 0.95), 0 2px 4px rgba(0, 0, 0, 0.4);
+    transform: translate(-50%, -50%); left: 50%; top: 50%; pointer-events: none;
+  }
+  .cue-pad-info { font-size: 12px; color: var(--muted); line-height: 1.5; }
+  .cue-pad-info b { color: var(--text); font-weight: 600; }
+
+  /* 4 个滑块采用多彩色调区分 */
+  .ctrl { margin: 0 0 10px; }
+  .ctrl label {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;
+  }
+  .ctrl label b {
+    color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums;
+    background: rgba(255, 255, 255, 0.08);
+    padding: 1px 7px; border-radius: 4px;
+    border: 1px solid var(--line);
+  }
+  .ctrl input[type=range] {
+    /* 18 → 24：滑块本体就是命中区，18 高过不了 24×24。
+       轨道仍是 ::-webkit-slider-runnable-track 画的 5px，只是上下各多 3px
+       可拖拽空白，视觉密度不变（窄屏下再统一到 44）。 */
+    width: 100%; margin: 0; height: 24px; background: transparent; cursor: pointer;
+    -webkit-appearance: none; appearance: none;
+  }
+  .ctrl input[type=range]::-webkit-slider-runnable-track {
+    height: 5px;
+    background: #233448;
+    border-radius: 3px; border: 1px solid var(--line);
+  }
+  /* 力度：翡翠绿到炽红渐变滑块 */
+  #power::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; margin-top: -6px;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--grad-green);
+    border: 2px solid #ffffff; box-shadow: 0 2px 8px rgba(16, 185, 129, 0.6);
+  }
+  /* 侧边栏力度快捷档位微调按钮 */
+  .power-chips-row {
+    display: flex; gap: 5px; margin-top: 6px;
+  }
+  .power-chip {
+    flex: 1; padding: 4px 0; font-size: 11px; font-weight: 600;
+    border-radius: 6px; background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--line); color: var(--text-secondary);
+    cursor: pointer; transition: var(--transition);
+  }
+  .power-chip:hover {
+    background: rgba(14, 165, 233, 0.22);
+    border-color: #38bdf8; color: #ffffff;
+    transform: translateY(-1px);
+  }
+  .power-chip.active {
+    background: linear-gradient(135deg, rgba(14, 165, 233, 0.35) 0%, rgba(16, 185, 129, 0.25) 100%);
+    border-color: #38bdf8; color: #ffffff;
+    box-shadow: 0 0 8px rgba(14, 165, 233, 0.35);
+  }
+
+  /* 经典垂直拉杆能量槽（参考 8 Ball Pool / 腾讯桌球） */
+  .cue-power-meter {
+    position: absolute;
+    left: 20px;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 25;
+    /* 66 → 72：预设芯片是 2 列 1fr（gap 4），内容宽 = 72-18 = 54，
+       每列 25px 才够 WCAG 2.2 的 24×24 下限；66 时每列只有 22。
+       顺带把 header 里那 3px 的文字溢出也吃掉了（原先 content 48 装不下 51）。 */
+    width: 72px;
+    background: linear-gradient(180deg, rgba(20, 30, 44, 0.94) 0%, rgba(12, 18, 26, 0.94) 100%);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 18px;
+    padding: 12px 8px 10px;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+    transition: box-shadow 0.2s ease, border-color 0.2s ease;
+  }
+  .cue-power-meter:hover {
+    border-color: rgba(56, 189, 248, 0.45);
+    box-shadow: 0 18px 46px rgba(0, 0, 0, 0.65), 0 0 20px rgba(14, 165, 233, 0.2);
+  }
+  .power-meter-header {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    width: 100%;
+  }
+  .power-meter-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+  .power-meter-badge-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .power-tier-badge {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 6px;
+    color: #fff;
+    /* 白字压 #10b981 只有 2.54:1，和 .primary 同一个坑，一起压深到 5.48:1 */
+    background: #047857;
+    box-shadow: 0 2px 8px rgba(4, 120, 87, 0.45);
+    transition: background 0.2s ease, box-shadow 0.2s ease;
+  }
+  .power-pct-text {
+    font-size: 12px;
+    font-weight: 800;
+    color: #f8fafc;
+    font-variant-numeric: tabular-nums;
+  }
+  .power-speed-text {
+    font-size: 11px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+  .power-meter-body {
+    position: relative;
+    width: 100%;
+    display: flex;
+    justify-content: center;
+    padding: 4px 0;
+  }
+  .power-track {
+    position: relative;
+    width: 24px;
+    height: 220px;
+    background: linear-gradient(180deg, #090e15 0%, #111a24 100%);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 12px;
+    box-shadow: inset 0 3px 8px rgba(0, 0, 0, 0.8), 0 1px 2px rgba(255, 255, 255, 0.1);
+    cursor: pointer;
+    overflow: visible;
+  }
+  .power-fill {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 27%;
+    border-radius: 11px;
+    background: linear-gradient(to top, #10b981 0%, #06b6d4 35%, #f59e0b 70%, #ef4444 100%);
+    background-size: 100% 220px;
+    background-position: bottom;
+    box-shadow: 0 0 14px rgba(16, 185, 129, 0.5);
+    pointer-events: none;
+    transition: height 0.05s ease-out;
+  }
+  .power-scale-marks {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+  .scale-mark {
+    position: absolute;
+    left: -3px;
+    right: -3px;
+    height: 1px;
+    background: rgba(255, 255, 255, 0.25);
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+  }
+  /* 刻度字「爆/发/中/轻」原来 9px，是整页最小的一号字，手机上看不清。
+     提到 11px 后单个字宽 11px：轨道右边距 27px、轨道本身 22–24px，
+     标签挂在轨道左侧、不压轨道，四档在桌面 220px / 手机 104px 的轨道上
+     间距分别是 55px / 26px，11px 字也不会挤到一起。 */
+  .scale-mark i {
+    font-style: normal;
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.6);
+    position: absolute;
+    right: 27px;
+    font-weight: 600;
+  }
+  .scale-mark.mark-100 { bottom: 100%; background: rgba(239, 68, 68, 0.6); }
+  .scale-mark.mark-75 { bottom: 75%; background: rgba(245, 158, 11, 0.5); }
+  .scale-mark.mark-50 { bottom: 50%; background: rgba(14, 165, 233, 0.4); }
+  .scale-mark.mark-25 { bottom: 25%; background: rgba(16, 185, 129, 0.4); }
+  .scale-mark.mark-100 i { color: #f87171; }
+  .scale-mark.mark-75 i { color: #fbbf24; }
+  .scale-mark.mark-50 i { color: #38bdf8; }
+  .scale-mark.mark-25 i { color: #34d399; }
+
+  .power-handle {
+    position: absolute;
+    left: 50%;
+    bottom: 27%;
+    transform: translate(-50%, 50%);
+    width: 32px;
+    height: 14px;
+    border-radius: 7px;
+    background: linear-gradient(180deg, #f8fafc 0%, #94a3b8 100%);
+    border: 1px solid #ffffff;
+    box-shadow: 0 3px 8px rgba(0, 0, 0, 0.6), 0 0 10px rgba(56, 189, 248, 0.6);
+    cursor: grab;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: bottom 0.05s ease-out, transform 0.1s ease;
+  }
+  .power-handle:active, .power-handle.dragging {
+    cursor: grabbing;
+    transform: translate(-50%, 50%) scale(1.12);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.8), 0 0 16px rgba(56, 189, 248, 0.9);
+  }
+  .handle-grip {
+    width: 14px;
+    height: 2px;
+    background: #334155;
+    border-radius: 1px;
+    box-shadow: 0 3px 0 #334155, 0 -3px 0 #334155;
+  }
+
+  .power-meter-presets {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+    width: 100%;
+    margin-top: 2px;
+  }
+  .power-meter-chip {
+    padding: 3px 0;
+    /* 桌面指针下限 24×24（WCAG 2.2 SC 2.5.8）：22×24 的芯片宽度差 2px，
+       高度本来是 padding+10px 字撑出来的 24，显式钉住免得字重变化再掉下去。 */
+    min-width: 24px;
+    min-height: 24px;
+    font-size: 10px;
+    font-weight: 700;
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: var(--transition);
+  }
+  .power-meter-chip:hover {
+    background: rgba(14, 165, 233, 0.25);
+    border-color: #38bdf8;
+    color: #ffffff;
+    transform: translateY(-1px);
+  }
+  .power-meter-chip.active {
+    background: linear-gradient(135deg, rgba(14, 165, 233, 0.4) 0%, rgba(16, 185, 129, 0.3) 100%);
+    border-color: #38bdf8;
+    color: #fff;
+    box-shadow: 0 0 8px rgba(14, 165, 233, 0.4);
+  }
+  #power::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; margin-top: -6px;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--grad-green);
+    border: 2px solid #ffffff; box-shadow: 0 2px 8px rgba(16, 185, 129, 0.6);
+  }
+  /* 瞄准偏移：晴空蓝 */
+  #aimOffset::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; margin-top: -6px;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--grad-blue);
+    border: 2px solid #ffffff; box-shadow: 0 2px 8px rgba(14, 165, 233, 0.6);
+  }
+  /* 高低杆：琥珀黄 */
+  #tipB::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; margin-top: -6px;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--grad-amber);
+    border: 2px solid #ffffff; box-shadow: 0 2px 8px rgba(245, 158, 11, 0.6);
+  }
+  /* 左右塞：紫罗兰 */
+  #tipA::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; margin-top: -6px;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--grad-purple);
+    border: 2px solid #ffffff; box-shadow: 0 2px 8px rgba(168, 85, 247, 0.6);
+  }
+  .ctrl input[type=range]:disabled { opacity: .4; cursor: not-allowed; }
+  kbd {
+    font: inherit; font-size: 11px; padding: 1px 6px; border-radius: 4px;
+    background: linear-gradient(180deg, #283a4e 0%, #1a2736 100%);
+    border: 1px solid rgba(255, 255, 255, 0.2); border-bottom-width: 2px; color: var(--text);
+  }
+  .kb { display: grid; grid-template-columns: auto 1fr; gap: 5px 12px; font-size: 12px; color: var(--text-secondary); }
+  .kb kbd { justify-self: start; white-space: nowrap; }
+
+  /* 可折叠卡片 */
+  details.card-collapsible {
+    background: var(--panel-card);
+    border: 1px solid var(--line);
+    border-radius: 10px; box-shadow: var(--shadow-card); overflow: hidden;
+  }
+  details.card-collapsible summary {
+    padding: 10px 14px; font-size: 12px; font-weight: 700;
+    color: var(--muted); letter-spacing: 1.2px; text-transform: uppercase;
+    cursor: pointer; list-style: none; display: flex; align-items: center; justify-content: space-between;
+    user-select: none; transition: background .15s;
+  }
+  details.card-collapsible summary:hover { background: rgba(255, 255, 255, 0.04); }
+  details.card-collapsible summary::-webkit-details-marker { display: none; }
+  details.card-collapsible summary::after {
+    content: '▾'; font-size: 13px; color: var(--muted); transition: transform 0.2s ease;
+  }
+  details.card-collapsible[open] summary::after { transform: rotate(180deg); }
+  details.card-collapsible .details-body {
+    padding: 0 14px 12px; border-top: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  /* 锦标赛记分牌：全色金/花色蓝清晰夺目 */
+  .score { display: flex; flex-direction: column; gap: 7px; }
+  .who {
+    display: flex; align-items: center; gap: 9px; padding: 10px 12px;
+    border-radius: 8px; border: 1px solid var(--line);
+    background: rgba(15, 23, 34, 0.6);
+    transition: var(--transition);
+  }
+  .who.turn {
+    border-color: #38bdf8;
+    background: linear-gradient(135deg, rgba(14, 165, 233, 0.25) 0%, rgba(37, 99, 235, 0.1) 100%);
+    box-shadow: 0 0 20px rgba(14, 165, 233, 0.3), inset 0 0 2px #38bdf8;
+  }
+  .who .nm { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 7px; }
+  .who.turn .nm::before {
+    content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--grad-green);
+    box-shadow: 0 0 10px #34d399;
+    animation: turnPulse 1.6s infinite ease-in-out;
+  }
+  @keyframes turnPulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.35; transform: scale(0.75); }
+  }
+  .who .tag2 {
+    font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 5px;
+    background: #243548; border: 1px solid var(--line); color: var(--text-secondary);
+  }
+  .who .tag2.solid {
+    background: var(--grad-amber);
+    border-color: #fcd34d; color: #1a0f00;
+    box-shadow: 0 2px 6px rgba(245, 158, 11, 0.4);
+  }
+  .who .tag2.stripe {
+    background: var(--grad-blue);
+    border-color: #7dd3fc; color: #ffffff;
+    box-shadow: 0 2px 6px rgba(14, 165, 233, 0.4);
+  }
+  .who .tag2.eight {
+    background: linear-gradient(145deg, #334155, #1e293b);
+    border-color: #64748b; color: #f8fafc;
+  }
+  .who .fs {
+    margin-left: auto; color: #fee2e2; font-size: 12px; font-weight: 700;
+    padding: 1px 7px;
+    background: var(--grad-ruby);
+    border-radius: 4px; border: 1px solid #f87171;
+    box-shadow: 0 2px 6px rgba(244, 63, 94, 0.4);
+  }
+
+  #report { font-size: 13px; line-height: 1.65; }
+  #report.empty { color: var(--muted); }
+  #report .foul { color: var(--danger); font-weight: 600; }
+  #gAdvice { font-size: 14px; line-height: 1.65; color: #ffffff; font-weight: 500; }
+  #gAdvice.empty { color: var(--muted); font-weight: 400; }
+  #gVerdict {
+    margin-top: 8px; color: #6ee7b7; font-size: 12px; font-weight: 600;
+    display: inline-block; padding: 2px 10px; border-radius: 6px;
+    background: linear-gradient(135deg, rgba(16, 185, 129, 0.25) 0%, rgba(5, 150, 105, 0.15) 100%);
+    border: 1px solid rgba(16, 185, 129, 0.45);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+  }
+  #gVerdict:empty { display: none; }
+  #gVerdict.hard {
+    color: #fde68a;
+    background: linear-gradient(135deg, rgba(245, 158, 11, 0.28) 0%, rgba(217, 119, 6, 0.16) 100%);
+    border-color: rgba(251, 191, 36, 0.5);
+  }
+  #gVerdict.brutal {
+    color: #fca5a5;
+    background: linear-gradient(135deg, rgba(239, 68, 68, 0.28) 0%, rgba(185, 28, 28, 0.16) 100%);
+    border-color: rgba(248, 113, 113, 0.5);
+  }
+
+  .log {
+    max-height: 160px; overflow-y: auto; font-size: 12px;
+    color: var(--text-secondary); line-height: 1.65;
+  }
+  .log div { padding: 4px 0; border-bottom: 1px dashed rgba(255, 255, 255, 0.08); }
+  .log div:last-child { border-bottom: 0; }
+  .log::-webkit-scrollbar { width: 4px; }
+  .log::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.2); border-radius: 2px; }
+
+  /* 赛后复盘：本局统计 + 跨局战绩。
+     数值格沿用练习统计那套三列网格（.practice-buckets），不另造一套设计语言。
+     minmax(0, 1fr) + 单元格 min-width:0 是 390 宽下不溢出的关键：
+     默认的 minmax(auto, 1fr) 会被内容撑开，一行三个数字就能把侧栏顶出去。 */
+  .match-stats { font-size: 12px; color: var(--text-secondary); line-height: 1.55; }
+  .match-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .match-grid div {
+    min-width: 0; padding: 6px; text-align: center;
+    border: 1px solid var(--line); border-radius: 6px;
+    background: rgba(255, 255, 255, 0.03);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .match-grid b { display: block; color: var(--text); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .match-title { margin: 10px 0 2px; font-size: 11px; color: var(--muted); letter-spacing: .6px; }
+  .match-list { margin: 0; padding: 0; list-style: none; }
+  .match-list li {
+    display: flex; gap: 8px; justify-content: space-between; align-items: baseline;
+    padding: 3px 0; border-bottom: 1px dashed rgba(255, 255, 255, 0.08);
+    min-width: 0;
+  }
+  .match-list li:last-child { border-bottom: 0; }
+  .match-list li span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .match-list li span:last-child { flex: none; font-variant-numeric: tabular-nums; }
+  .match-list .warm { color: var(--accent-light); }
+  .match-list .cold { color: var(--danger); }
+  .match-sum { margin-top: 2px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .match-form { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+  .match-dot {
+    width: 12px; height: 12px; border-radius: 50%;
+    background: rgba(255, 255, 255, 0.18); flex: none;
+  }
+  .match-dot.warm { background: var(--accent); }
+  .match-dot.cold { background: #ef4444; }
+  .practice-buckets {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px;
+    margin: 8px 0; color: var(--text-secondary); font-size: 11px;
+  }
+  .practice-buckets div {
+    padding: 6px; border: 1px solid var(--line); border-radius: 6px;
+    background: rgba(255, 255, 255, 0.03); text-align: center;
+  }
+  .practice-buckets b { display: block; color: var(--text); font-size: 13px; }
+  .practice-week { margin-top: 10px; }
+  .practice-goal { margin-top: 10px; }
+  .practice-goal-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .practice-goal-header label { color: var(--text-secondary); font-size: 12px; }
+  .practice-goal-header select {
+    padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px;
+    background: #1b2938; color: var(--text); font: inherit; font-size: 12px;
+  }
+  .practice-goal-track {
+    height: 8px; margin-top: 6px; overflow: hidden;
+    border-radius: 999px; background: rgba(255, 255, 255, 0.08);
+  }
+  .practice-goal-fill {
+    width: 0; height: 100%; border-radius: inherit;
+    background: linear-gradient(90deg, #0ea5e9, #34d399);
+    transition: width 0.25s ease;
+  }
+  .practice-trend {
+    display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 5px;
+    margin-top: 7px; text-align: center;
+  }
+  .practice-day {
+    display: flex; min-width: 0; flex-direction: column; align-items: center;
+    color: var(--muted); font-size: 10px; line-height: 1.35;
+  }
+  .practice-day-rate { color: var(--text-secondary); font-size: 10px; min-height: 14px; }
+  .practice-day-track {
+    display: flex; width: 100%; height: 54px; align-items: flex-end; justify-content: center;
+    overflow: hidden; border-radius: 5px; background: rgba(255, 255, 255, 0.06);
+  }
+  .practice-day-bar {
+    width: 62%; min-height: 2px; border-radius: 4px 4px 0 0;
+    background: linear-gradient(180deg, #34d399, #059669);
+  }
+  .practice-day-bar.no-data { background: rgba(148, 163, 184, 0.25); }
+  .practice-day-count { color: var(--text-secondary); margin-top: 3px; white-space: nowrap; }
+  .practice-day-label { white-space: nowrap; }
+  /* 「记进 / 记失误」也是白字压绿/红渐变：原来 #059669→#10b981 最差 2.54:1、
+     #9f1239→#e11d48 最差 4.70:1，跟 .primary 同一套色，一起压深。
+     改后 5.48:1 / 6.28:1。 */
+  button.practice-made:not(:disabled) {
+    flex: 1; background: linear-gradient(135deg, #047857, #065f46);
+    border-color: rgba(110, 231, 183, 0.65); font-weight: 700;
+  }
+  button.practice-missed:not(:disabled) {
+    flex: 1; background: linear-gradient(135deg, #9f1239, #be123c);
+    border-color: rgba(251, 113, 133, 0.55); font-weight: 700;
+  }
+  button.practice-clear { font-size: 11px; padding-inline: 9px; }
+  button.practice-undo { font-size: 11px; padding-inline: 9px; }
+  button.practice-export { width: 100%; margin-top: 7px; color: var(--text-secondary); }
+  .practice-backup-actions { display: flex; gap: 7px; margin-top: 7px; }
+  .practice-backup-actions button { flex: 1; padding-inline: 7px; font-size: 11px; }
+  .miss-reason-row { display: flex; align-items: center; gap: 8px; margin-top: 7px; }
+  .miss-reason-row label { color: var(--muted); font-size: 12px; }
+  .miss-reason-row select {
+    flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid var(--line);
+    border-radius: 6px; background: #1b2938; color: var(--text); font: inherit; font-size: 12px;
+  }
+  /* 焦点框全站只留这一处（之前 694 行还有一条 outline 2px / offset 2px 的旧规则，
+     已被这条完全覆盖，删掉）。
+     .alt 是 app.js 挂 role="button" + tabindex 的 div，不在 button 选择器里，
+     以前落回浏览器默认的 outline:auto，三行候选和全站其它焦点不是一套视觉；
+     统一到这里，一把键盘走下来看到的是同一个框。 */
+  button:focus-visible, select:focus-visible, input[type=checkbox]:focus-visible,
+  input[type=range]:focus-visible, a:focus-visible, summary:focus-visible,
+  .alt:focus-visible {
+    outline: 2px solid #38bdf8; outline-offset: 3px;
+    /* 上面那些元素带 `transition: all .2s`，outline 的宽/色/offset 也会被插值：
+       Tab 过去的第一帧其实是「solid 3px 近白、offset 0」，0.2s 后才落到 2px/3px/天蓝。
+       快照式审计正好抓到这一帧，于是把 .alt 记成了「浏览器默认焦点框」。
+       焦点态直接关掉过渡，按 Tab 的第一帧就是同一个框。 */
+    transition: none;
+  }
+  .practice-details { margin-top: 8px; }
+  /* 这两条 summary 只有文字高（19.19px），比 24 小；给 2px 上下内边距 + 24 下限，
+     list-item 的三角标记照旧，不改 display 也就不用动 ::marker。 */
+  .practice-details summary {
+    color: var(--text-secondary); font-size: 12px; cursor: pointer;
+    min-height: 24px; padding: 2px 0;
+  }
+  .practice-details .hint { margin-top: 6px; }
+
+  @media (max-width: 900px) {
+    body { height: auto; min-height: 100%; overflow: auto; }
+    header {
+      display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+      gap: 8px; padding: 8px 14px;
+    }
+    .sub-pill { min-width: 0; max-width: none; }
+    header .sub { max-width: none; }
+    header nav { margin-left: 0; }
+    main { flex: none; flex-direction: column; min-height: auto; }
+    #stage { flex: none; height: min(58vh, 500px); min-height: 300px; padding: 16px; }
+    /* 力度条：窄屏下从台面左侧挪到台面下方，改成横铺的一条。
+       轨道本身必须保持竖直——app.js 用 track 的 rect.height 和 clientY 算力度，
+       还往 fill/handle 写 height%/bottom%，横过来就得改 JS，那是这一轮的禁区。
+       所以只把外层换成行布局、把轨道压短，拖拽的几何一点没变。 */
+    .cue-power-meter {
+      position: static; transform: none; width: auto;
+      margin: 10px 12px 6px; flex-direction: row;
+      align-items: center; justify-content: space-between; gap: 14px;
+      padding: 8px 14px; border-radius: 14px;
+    }
+    .power-meter-header { width: auto; flex: none; align-items: flex-start; gap: 2px; }
+    .power-meter-body { flex: 1 1 auto; width: auto; padding: 0; }
+    /* 轨道本体 22 → 44：手指下限 44px，而这里一直只有 22px（既有问题，非回退）。
+       没有用 ::before 撑透明命中区——伪元素只改命中不改几何，
+       getBoundingClientRect 仍是 22×104，可访问性审计和探针照旧判不达标；
+       直接加宽盒子才是诚实的。app.js 的换算只有
+       ratio = 1 - (clientY - rect.top) / rect.height，与宽度无关，数值不受影响。 */
+    .power-track { width: 44px; height: 104px; }
+    /* 刻度字「爆/发/中/轻」原本靠 right:27px 挂在轨道左外侧 3px；
+       轨道加宽 22px 后同一偏移会把字压进轨道里，所以补上这 22px。 */
+    .scale-mark i { right: 49px; }
+    /* 渐变原本按 220px 写死，轨道压短后不跟着缩就只剩最底下那段绿色 */
+    .power-fill { background-size: 100% 100%; }
+    .power-meter-presets { width: auto; flex: none; margin-top: 0; }
+    .power-meter-chip { padding: 5px 10px; font-size: 11px; }
+    aside { width: 100%; max-height: none; overflow: visible; border-left: 0; border-top: 1px solid var(--line); padding: 14px; }
+    footer { flex-wrap: wrap; gap: 4px 16px; padding: 8px 14px; }
+  }
+  @media (max-width: 600px) {
+    header { grid-template-columns: minmax(0, 1fr) auto; gap: 7px; padding: 8px 10px; }
+    header h1 { font-size: 13px; gap: 5px; }
+    .brand-logo { width: 32px; height: 32px; }
+    .tabs button { padding: 5px 10px; }
+    .sub-pill { display: none; }
+    header select { justify-self: start; }
+    header nav { justify-self: end; }
+    /* 台面高度跟着 canvas 实际高度收紧，不再留 48vh 的死高度。
+       竖屏手机下 canvas 永远是**宽度受限**的：app.js 的 resize() 调
+       view.fit(#stage 内容宽 - 10, #stage 内容高 - 10)（内容盒 = clientWidth /
+       clientHeight 减掉左右各 16px 的 padding），390 宽时 (390-32-10)/2.8 ≈ 124
+       远小于高度允许的 ≈ 190，所以 canvas 高度只由宽度决定（与 #stage 高度无关）。
+       这里直接把这个高度算出来，比例取三种台里最宽的 pool8：
+       (1.12 + 2×0.13) / (2.24 + 2×0.13) = 0.552（FRAME_MARGIN 见 render.js）。
+       取上限是为了让最高的那种台也不被 overflow:hidden 裁掉，pool9 / 斯诺克
+       各自剩 ≤ 8px 居中余量。高度只依赖 100vw、不依赖 canvas 自身尺寸，
+       因此不存在「容器变小 → canvas 更小 → 空白还在」的反馈环。
+       min-height 必须归零：260px 会把收紧后的高度又顶回去。 */
+    #stage {
+      height: min(calc((100vw - 10px) * 0.552 + 32px), 48vh);
+      min-height: 0;
+    }
+    aside { padding: 10px; }
+    .practice-buckets { gap: 4px; font-size: 10px; }
+    .practice-buckets div { padding: 6px 3px; }
+    footer { font-size: 10px; }
+  }
+
+  footer {
+    padding: 8px 20px; border-top: 1px solid var(--line);
+    color: var(--muted); font-size: 12px;
+    background: linear-gradient(180deg, #182330 0%, #111a24 100%);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  /* 分享这一杆：一行按钮，出图后下面接预览。
+     390 宽的手机上 aside 内容宽约 370，所以按钮和提示允许换行、预览图 width:100%，
+     绝不设固定宽度——verify-demo 的窄屏断言会查整页有没有横向滚动条。 */
+  .share-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+  .share-btn {
+    padding: 9px 14px; border-radius: 9px; cursor: pointer; font-size: 13px; font-weight: 600;
+    font-family: inherit; color: #7dd3fc;
+    background: rgba(56, 189, 248, 0.14); border: 1px solid rgba(56, 189, 248, 0.55);
+  }
+  .share-btn:hover { background: rgba(56, 189, 248, 0.24); }
+  .share-btn:disabled { opacity: 0.55; cursor: progress; }
+  .share-row .hint { margin: 0; flex: 1 1 140px; min-width: 0; }
+  .share-out { margin-top: 10px; }
+  .share-out img {
+    display: block; width: 100%; height: auto;
+    border-radius: 10px; border: 1px solid var(--line);
+  }
+  .share-actions { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px; font-size: 13px; }
+  .share-actions a { color: #7dd3fc; font-weight: 600; text-decoration: none; padding: 4px 0; }
+  .share-actions a:hover { text-decoration: underline; }
+
+  /* ===== 窄屏（手机）专项：首屏顺序、点击目标、正文可读性 =====
+     全部只在 max-width:900px 生效。桌面 1440 的层级、密度、字号一个像素不动——
+     手机上要「够大够清楚」，桌面上要「一屏塞得下」，这两件事本来就该分开做。 */
+  @media (max-width: 900px) {
+    /* 1）首屏先给「备选进球路线」。
+       390×844 实测：这块原本排在 AI 卡后面，而 header 96 + 台面 241.8 + 力度条 122
+       已经吃掉首屏 55%，备选路线只剩下 13px 露头，要滚 245.5px 才看全。
+       这里用容器上的 flex order 把它提到 AI 卡之前，**不改 DOM 顺序**：
+       桌面端「先结论、后备选」的层级是有意排的，不该为手机让路。 */
+    #practicePanel { display: flex; flex-direction: column; }
+    #practicePanel > .row { order: -2; }        /* 求解 / 演示 / 重置 仍然排第一 */
+    #practicePanel > .alts-card { order: -1; }  /* 备选路线紧跟着它 */
+
+    /* 2）点击目标 ≥44px。44px 是手指的物理下限（约 7mm）。
+       只放大盒子本身，不用 transform: scale 把视觉虚胖——
+       那样元素的 rect 还是小的，用户点到的也还是小的。 */
+    button, select, summary, .share-btn,
+    .power-chip, .power-meter-chip, .alt { min-height: 44px; }
+    /* 桌面给 .practice-details summary 定的 24 下限（选择器带类，比这里的
+       `summary` 更具体）会盖掉上面这条，所以窄屏要显式抬回 44。 */
+    .practice-details summary { min-height: 44px; padding: 0; }
+    /* 力度芯片 33×29.6 是整页最小的一块，宽高都得撑 */
+    .power-meter-chip { min-width: 44px; }
+    summary { display: flex; align-items: center; }
+    header nav a { min-height: 44px; display: inline-flex; align-items: center; }
+    /* 滑块本体 18px 高，撑到 44 但轨道还是 ::-webkit-slider-runnable-track 画的那条
+       5px 细轨，只是上下各多一圈可拖拽的空白，视觉密度没变。 */
+    input[type=range] { min-height: 44px; }
+
+    /* 3）复选框：视觉还是 36×19 的小开关，命中区撑到 44×44。
+       直接把 input 拉高会把开关拉成一坨胶囊，所以「胶囊」画到 ::before 上，
+       input 自己透明、只当点击区，圆点跟着重新对中。 */
+    label.switch { min-height: 44px; }
+    label.switch input[type=checkbox] {
+      width: 44px; height: 44px; border: 0; background: none; box-shadow: none;
+    }
+    label.switch input[type=checkbox]::before {
+      content: ''; position: absolute; left: 50%; top: 50%;
+      width: 36px; height: 19px; margin: -9.5px 0 0 -18px;
+      border-radius: 10px; background: #233448; border: 1px solid var(--line);
+      box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.4); transition: var(--transition);
+    }
+    label.switch input[type=checkbox]::after { top: 50%; left: 50%; margin: -6.5px 0 0 -16px; }
+    label.switch input[type=checkbox]:checked { background: none; border-color: transparent; box-shadow: none; }
+    label.switch input[type=checkbox]:checked::before {
+      background: var(--grad-blue); border-color: #38bdf8;
+      box-shadow: 0 0 10px rgba(14, 165, 233, 0.45);
+    }
+    label.switch input[type=checkbox]:checked::after { transform: translateX(17px); }
+
+    /* 4）顶部栏：控件全部 44 高了，就把内边距和行距压到最小，
+       别让「点得准」变成「首屏全给导航」。
+       实测 header 96 → 115 是「44 高的按钮 + 自己那圈 3px 内边距 + 1px 边框」叠出来的：
+       52 高的 .tabs 盒子把第一行撑到 52。把它的内边距收掉，两个页签直接吃满 44，
+       header 回到 106——省下的 9px 全给首屏内容。 */
+    header { padding: 6px 10px; gap: 6px; }
+    .tabs { padding: 0; }
+
+    /* 5）正文 14px（手机）。13px 是下限，但 390 宽的屏上 13px 仍然是「要凑近看」的量级，
+       统一到 14px：这就是浏览器默认正文大小，读起来不需要调节。 */
+    .hint, .empty, .log, .kb, .ctrl label, .cue-pad-info,
+    .miss-reason-row label, .practice-goal-header label,
+    .practice-details summary, #report, .match-stats { font-size: 14px; }
+    button, select, label, h1 { font-size: 14px; }
+    .alt .name { font-size: 14px; }
+    .alt .position { font-size: 12px; }
+    .verdict-note { font-size: 12px; }
+    .practice-buckets, .practice-day, .practice-day-rate { font-size: 11px; }
+    /* 小字再抬一档：力度条的标签/读数、芯片、快捷键字母、PRO 徽章。
+       轨道刻度（.scale-mark i）留在 11px 是有理由的：手机轨道只有 104px 高、
+       四个刻度间距 26px，12px 的「爆/发/中/轻」会把右侧边距吃穿（见该规则上方注释）。 */
+    .power-meter-title, .power-speed-text, .power-tier-badge,
+    .power-meter-chip, .power-chip, kbd, .badge-ai { font-size: 12px; }
+    header nav a { font-size: 14px; }
+    /* 页内标题与页签：它们各自有类/后代选择器（header h1、.tabs button）压着基础规则，
+       这里显式给到 14px，别让「主标题比正文还小」。 */
+    header h1 { font-size: 14px; }
+    .tabs button { font-size: 14px; }
+    /* 极密的两处例外：备选路线里那两行参数（.meta 是 nowrap，加大会横向溢出）
+       和「窄/中/宽」三档统计（三列并排，12px 就会折行）。这两处留 11–12px。 */
+    button.practice-clear, button.practice-undo,
+    .practice-backup-actions button { font-size: 12px; }
+    footer { font-size: 12px; }
+    .share-actions a { min-height: 44px; display: inline-flex; align-items: center; }
+  }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand-group">
+    <div class="brand-logo">🎱</div>
+    <h1>台球 AI 教练 <span class="badge-ai">PRO</span></h1>
+  </div>
+  <div class="tabs">
+    <button type="button" id="tabPractice" class="on">练习</button>
+    <button type="button" id="tabGame">打一局</button>
+  </div>
+  <div class="sub-pill">
+    <span class="sub" id="subtitle">拖动任意球改摆位 · 求解后给出瞄准线、容错窗口与力度</span>
+  </div>
+  <select id="tablePreset" title="球台尺寸" aria-label="球台尺寸（黑八 / 九球 / 斯诺克）"></select>
+  <nav><a href="./pose.html">动作评估 ↗</a></nav>
+</header>
+
+<main>
+  <div id="stage">
+    <!-- 自动出杆提示条：撤销 / 读档之后先停住对手，免得「刚恢复的局面 1 秒后
+         自己变了」被当成读档失败。显示与否、文案、要不要给「继续」按钮全由
+         app.js 的 updateAutoPauseBar 决定（判断本身在 state.js 的 autoPauseHint，
+         那一条要能在 Node 里单测）。
+         定位一律走行内样式：这次只加结构，不动 <style> 里的布局规则。 -->
+    <div id="autoPauseBar" class="hidden" style="position:absolute;left:50%;top:10px;transform:translateX(-50%);z-index:6;display:flex;align-items:center;gap:10px;padding:8px 14px;border-radius:999px;background:rgba(15,23,42,.92);border:1px solid rgba(245,158,11,.55);color:#fef3c7;font-size:13px;line-height:1.4;max-width:calc(100% - 32px);box-shadow:0 8px 24px rgba(0,0,0,.35);">
+      <span id="autoPauseText">已暂停对手自动出杆 —— 点此继续</span>
+      <button id="autoPauseResume" type="button" style="padding:4px 10px;border-radius:999px;border:1px solid rgba(245,158,11,.7);background:rgba(245,158,11,.18);color:#fde68a;font-size:13px;cursor:pointer;white-space:nowrap;">点此继续</button>
+    </div>
+    <div class="stage-controls">
+      <button type="button" id="viewToggle" class="view-toggle-btn" title="切换第一人称视角 / 俯视视角 (快捷键: V)">
+        <span class="vt-icon">🎥</span>
+        <span id="viewToggleText">视角: 俯视</span>
+        <kbd>V</kbd>
+      </button>
+    </div>
+    <!-- 台面是 <canvas>：屏幕阅读器原本只能拿到一个匿名的「画布」。
+         role="img" + 描述性 aria-label 告诉它这是一张什么图；
+         具体走势（瞄准线、容错窗口、力度）都另有文本输出，不指望它读像素。 -->
+    <canvas id="table" role="img"
+      aria-label="球台俯视图：从上方俯视的台面，画有全部目标球、母球、瞄准线与容错窗口。可用鼠标或手指拖动球改摆位，结果同时以文字给在右侧面板。"></canvas>
+  </div>
+
+  <!-- 经典游戏级垂直拉杆力度槽 (参考 8 Ball Pool / 腾讯桌球)。
+       放在 #stage 之外、main 之内：宽屏下 main 与 #stage 同起点同高度，absolute
+       定位算出来的位置与放在 #stage 里分毫不动；窄屏下 main 变成纵向流，它就落到
+       台面下方，不再压住球桌。真正的窄屏样式在 @media (max-width: 900px) 里。 -->
+  <div id="cuePowerMeter" class="cue-power-meter" title="拖拽或点击拉杆调整击球力度 (快捷键: ↑ / ↓)">
+    <div class="power-meter-header">
+      <span class="power-meter-title">击球力度</span>
+      <div class="power-meter-badge-row">
+        <span id="powerMeterLevel" class="power-tier-badge">轻力</span>
+        <span id="powerMeterPct" class="power-pct-text">27%</span>
+      </div>
+      <div id="powerMeterSpeed" class="power-speed-text">2.20 m/s</div>
+    </div>
+    <div class="power-meter-body">
+      <div id="powerMeterTrack" class="power-track">
+        <div id="powerMeterFill" class="power-fill"></div>
+        <div class="power-scale-marks">
+          <span class="scale-mark mark-100" data-pct="100"><i>爆</i></span>
+          <span class="scale-mark mark-75" data-pct="75"><i>发</i></span>
+          <span class="scale-mark mark-50" data-pct="50"><i>中</i></span>
+          <span class="scale-mark mark-25" data-pct="25"><i>轻</i></span>
+        </div>
+        <div id="powerMeterHandle" class="power-handle">
+          <div class="handle-grip"></div>
+        </div>
+      </div>
+    </div>
+    <div class="power-meter-presets">
+      <button type="button" class="power-meter-chip" data-speed="2.05" title="轻力 25% (2.05 m/s)">轻</button>
+      <button type="button" class="power-meter-chip" data-speed="3.55" title="中力 50% (3.55 m/s)">中</button>
+      <button type="button" class="power-meter-chip" data-speed="5.10" title="发力 75% (5.10 m/s)">发</button>
+      <button type="button" class="power-meter-chip" data-speed="6.60" title="爆杆 100% (6.60 m/s)">爆</button>
+    </div>
+  </div>
+  <aside>
+    <!-- 练习模式 -->
+    <div id="practicePanel">
+      <div class="row" style="margin-bottom:12px">
+        <button type="button" id="solve" class="primary" style="flex:1">求解最佳方案</button>
+        <button type="button" id="shoot" style="background:var(--grad-blue);border-color:#38bdf8;color:#fff;font-weight:600">演示这一杆</button>
+        <button type="button" id="reset">重置</button>
+      </div>
+
+      <div class="card hero">
+        <h2>AI 击球战术</h2>
+        <div id="advice" class="empty">点「求解最佳方案」开始。</div>
+        <div id="verdict"></div>
+        <div id="verdictNote" class="verdict-note"></div>
+      </div>
+
+      <!-- 备选路线紧跟在「AI 击球战术」下面，不排在专项训练之后：这是教练给出的
+           第二层价值（换一条路线怎么打），原来要往下滚才看得到，1440×900 首屏外。
+           顺序调整纯属排版，卡片内容与 id 都没动。 -->
+      <div class="card alts-card">
+        <h2>备选进球路线</h2>
+        <!-- 鼠标悬停有变色，触屏没有；不写一句话，手机上看着就是一列文字 -->
+        <div class="hint" style="margin-bottom:6px">点某一条就换成那个方案（球杆会跟着转过去）。</div>
+        <div id="alts" class="empty">—</div>
+      </div>
+
+      <div class="card" style="border-left:3px solid #34d399">
+        <h2>专项训练</h2>
+        <p class="hint">选择一类球型，一键摆球；每次会轮换 6 种合法球位与目标袋方向，减少记固定答案。每 5 杆命中至少 4 杆，记为完成一组。只统计你手动记录的实战结果。</p>
+        <div class="row">
+          <label for="drillSelect" class="hint" style="align-self:center">训练内容</label>
+          <select id="drillSelect" aria-label="选择专项训练">
+            <option value="straight">直线球</option>
+            <option value="cut">切球</option>
+            <option value="long">长台球</option>
+          </select>
+          <button type="button" id="startDrill" class="primary">摆好训练球</button>
+        </div>
+        <div id="drillDescription" class="hint" style="margin-top:7px"></div>
+        <div id="drillProgress" style="margin-top:6px;font-size:13px;font-weight:600" aria-live="polite"></div>
+      </div>
+
+      <div class="card" style="border-left:3px solid #34d399">
+        <h2>实战练习反馈</h2>
+        <p class="hint">在真实球桌按推荐方案练完后记录结果。「演示这一杆」只运行仿真，不会计入实战统计。</p>
+        <div class="row">
+          <button type="button" id="practiceMade" disabled class="practice-made">实战打进</button>
+          <button type="button" id="practiceMissed" disabled class="practice-missed">实战没进</button>
+          <button type="button" id="practiceUndo" class="practice-undo" disabled>撤销刚才那条</button>
+          <button type="button" id="clearPractice" class="practice-clear">清空记录</button>
+        </div>
+        <div class="miss-reason-row">
+          <label for="missReason">未进原因（可选）</label>
+          <select id="missReason">
+            <option value="">暂不标注</option>
+            <option value="aim">瞄准偏差</option>
+            <option value="speed">力度控制</option>
+            <option value="contact">击球厚薄</option>
+            <option value="spin">杆法/旋转</option>
+            <option value="position">走位/线路</option>
+            <option value="other">其他</option>
+          </select>
+        </div>
+        <div id="missReasonSummary" class="hint" style="margin-top:6px" aria-live="polite"></div>
+        <div id="practiceFocus" class="hint" style="margin-top:7px;padding:8px;border-radius:6px;background:rgba(56,189,248,.08)" aria-live="polite"></div>
+        <button type="button" id="practiceFocusAction" hidden style="margin-top:6px">开始推荐训练</button>
+        <button type="button" id="exportPractice" disabled class="practice-export">导出实战记录 CSV</button>
+        <div class="practice-backup-actions">
+          <button type="button" id="backupPractice">下载完整备份</button>
+          <button type="button" id="restorePractice">从备份恢复</button>
+        </div>
+        <input id="practiceBackupFile" type="file" accept=".json,application/json" hidden>
+        <div class="hint">备份文件包含完整记录；恢复会替换当前记录，操作前会再次确认。</div>
+        <div id="practiceMessage" class="hint" style="margin-top:7px" role="status" aria-live="polite">先求解一个目标袋方案，再记录真实练习结果。</div>
+        <div id="practiceSummary" style="margin-top:8px;font-size:13px;font-weight:600" aria-live="polite">还没有实战记录。</div>
+        <!-- 统计一坨（今日目标、近七天、校准、容错分组）能占半屏，而真正每天看的是
+             上面那一行数字。折起来，想看细节再展开；记录按钮和状态行始终在外。 -->
+        <details class="practice-details" id="practiceStats">
+          <summary id="practiceStatsSummary">练习统计与今日目标</summary>
+          <div class="practice-goal">
+            <div class="practice-goal-header">
+              <label for="practiceGoal">今日实战目标</label>
+              <select id="practiceGoal" aria-label="每日实战练习目标">
+                <option value="5">5 杆</option>
+                <option value="10" selected>10 杆</option>
+                <option value="20">20 杆</option>
+              </select>
+            </div>
+            <div id="practiceGoalSummary" class="hint" style="margin-top:4px" aria-live="polite"></div>
+            <div id="practiceGoalBar" class="practice-goal-track" role="progressbar" aria-label="今日练习目标进度" aria-valuemin="0" aria-valuemax="10" aria-valuenow="0">
+              <div id="practiceGoalFill" class="practice-goal-fill"></div>
+            </div>
+          </div>
+          <div class="practice-week">
+            <div id="practiceWeekSummary" class="hint" aria-live="polite">近 7 天还没有实战记录。</div>
+            <div id="practiceTrend" class="practice-trend" role="group" aria-label="近 7 天每日练习命中率"></div>
+          </div>
+          <div id="practiceCalibration" class="hint" role="status" aria-live="polite" style="margin-top:6px"></div>
+          <div id="practiceBuckets" class="practice-buckets"></div>
+        </details>
+        <details class="practice-details">
+          <summary id="practiceHistorySummary">查看最近记录</summary>
+          <div id="practiceHistory" class="log empty">—</div>
+          <p class="hint">只保存在本机浏览器。容错分组按求解器给出的角度统计，不代表自动测得的个人瞄准误差。</p>
+        </details>
+      </div>
+
+      <div class="card tune-card">
+        <h2>手打微调出杆</h2>
+        <!-- 击球点直观靶盘 -->
+        <div class="cue-pad-row">
+          <div id="cueBallPad" class="cue-ball-pad" title="拖动或点击圆盘设置击球点（高低杆与左右塞）" role="img" aria-label="击球点示意图：圆盘上的红点表示杆头打在母球上的位置，可拖动。">
+            <div class="cue-ball-crosshair-h"></div>
+            <div class="cue-ball-crosshair-v"></div>
+            <div id="cueBallDot" class="cue-ball-dot"></div>
+          </div>
+          <div class="cue-pad-info">
+            <b>击球点视效靶</b><br>
+            可直接在左球面上点选/拖动击球点，或通过下方滑块精细微调。
+          </div>
+        </div>
+
+        <div class="ctrl">
+          <label for="power">力度 <b id="powerVal">2.20 m/s</b></label>
+          <input type="range" id="power" min="0.55" max="6.6" step="0.05" value="2.20">
+          <div class="power-chips-row">
+            <button type="button" class="power-chip" data-speed="2.05" title="轻力 25% (2.05 m/s)">轻 25%</button>
+            <button type="button" class="power-chip" data-speed="3.55" title="中力 50% (3.55 m/s)">中 50%</button>
+            <button type="button" class="power-chip" data-speed="5.10" title="发力 75% (5.10 m/s)">发 75%</button>
+            <button type="button" class="power-chip" data-speed="6.60" title="爆杆 100% (6.60 m/s)">爆 100%</button>
+          </div>
+        </div>
+        <div class="ctrl">
+          <label for="aimOffset">瞄准偏移 <b id="aimOffsetVal">0.00°</b></label>
+          <input type="range" id="aimOffset" min="-8" max="8" step="0.05" value="0">
+        </div>
+        <div class="ctrl">
+          <label for="tipB">高低杆 <b id="tipBVal">中杆</b></label>
+          <input type="range" id="tipB" min="-0.5" max="0.5" step="0.05" value="0">
+        </div>
+        <div class="ctrl">
+          <label for="tipA">左右塞 <b id="tipAVal">无塞</b></label>
+          <input type="range" id="tipA" min="-0.5" max="0.5" step="0.05" value="0">
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button type="button" id="useSolution" style="flex:1;background:var(--grad-indigo);border-color:#818cf8;color:#fff;font-weight:600">套用求解参数</button>
+          <button type="button" id="shootManual" class="primary" style="flex:1">按这些参数打</button>
+        </div>
+        <p class="hint" style="margin-top:8px">
+          手动参数从当前瞄准线出发：先「求解」定方向，再用「瞄准偏移」微调。左右塞会改变母球出库角，是真实侧旋物理。
+        </p>
+      </div>
+
+      <div class="card rack-card">
+        <h2>台面摆球</h2>
+        <div class="row" style="align-items:center">
+          <select id="ballPick" style="flex:1" aria-label="选择要加上的目标球"></select>
+          <button type="button" id="addBall" style="background:var(--grad-purple);border-color:#c084fc;color:#fff;font-weight:600">+ 加一颗</button>
+        </div>
+        <div class="row" style="align-items:center;margin-top:8px">
+          <select id="ballRemove" style="flex:1" aria-label="选择要拿掉的目标球"></select>
+          <button type="button" id="removeBall">- 拿掉</button>
+          <button type="button" id="rackUp">摆满 15 颗</button>
+        </div>
+        <p class="hint" style="margin-top:8px">最多 16 颗（1 颗母球 + 15 颗目标球）。加错了用「拿掉」单独移走那一颗，不用整盘重置。</p>
+      </div>
+
+      <div class="card">
+        <h2>辅助显示</h2>
+        <label class="switch"><input type="checkbox" id="showCone" checked> 显示容错锥（视觉放大 20×）</label>
+        <label class="switch"><input type="checkbox" id="showGhost" checked> 显示假想球与进球线</label>
+      </div>
+
+      <details class="card-collapsible" style="margin-bottom:12px">
+        <summary>键盘快捷键指南</summary>
+        <div class="details-body">
+          <div class="kb" style="margin-top:8px">
+            <kbd>V</kbd><span>切换第一人称 / 俯视视角</span>
+            <kbd>S</kbd><span>求解 / 对手回合时看它打</span>
+            <kbd>Enter</kbd><span>打这一杆</span>
+            <kbd>Z</kbd><span>撤销上一杆（球局）</span>
+            <kbd>N</kbd><span>新的一局（球局） / 重置（练习）</span>
+            <kbd>1</kbd><span>切到练习</span>
+            <kbd>2</kbd><span>切到打一局</span>
+            <kbd>← →</kbd><span>瞄准偏移 ±0.1°</span>
+            <kbd>↑ ↓</kbd><span>力度 ±0.1 m/s</span>
+          </div>
+          <p class="hint" style="margin-top:8px">焦点在输入框、下拉或滑块上时不抢按键。</p>
+        </div>
+      </details>
+
+      <details class="card-collapsible">
+        <summary>教练算法原理说明</summary>
+        <div class="details-body">
+          <p class="hint" style="margin-top:8px">
+            <b>容错窗口</b>是这一杆允许的瞄准角误差。它是排序依据——不是"能不能进"，
+            而是"偏多少度还进得去"。袋口越大、球越近、切角越薄，窗口越宽。
+          </p>
+          <p class="hint">
+            推荐杆的力度和瞄准角都用真实物理核试打过：能进才留下，进不了直接淘汰。
+          </p>
+        </div>
+      </details>
+    </div>
+
+    <!-- 球局模式 -->
+    <div id="gamePanel" class="hidden">
+      <div class="row" style="margin-bottom:12px">
+        <button type="button" id="newGame" class="primary">新的一局</button>
+        <select id="gameKind" title="玩哪种规则" aria-label="对局规则（黑八 / 九球 / 斯诺克）">
+          <option value="eightball">黑八（15 颗三角）</option>
+          <option value="nineball">九球（9 颗菱形）</option>
+          <option value="snooker">斯诺克（15 红 + 6 彩）</option>
+        </select>
+        <button type="button" id="gSolve" style="background:var(--grad-blue);border-color:#38bdf8;color:#fff;font-weight:600">求解</button>
+        <button type="button" id="gShoot" style="background:var(--grad-amber);border-color:#fbbf24;color:#1a0f00;font-weight:700">打这一杆</button>
+        <button type="button" id="gUndo">撤销上一杆</button>
+        <button type="button" id="gRerack" class="hidden">重摆开球</button>
+      </div>
+      <label class="switch" style="margin-bottom:10px"><input type="checkbox" id="autoOpponent" checked> 对手自动出杆（关掉就是双方都由你操作）</label>
+      <label class="switch" style="margin-bottom:12px"><input type="checkbox" id="allowSafety" checked> 没有进攻机会时打防守（关掉就退回兜底直撞）</label>
+
+      <div id="gChoice" class="card hidden">
+        <h2>开球不达标</h2>
+        <p class="hint" style="margin-bottom:8px">
+          九球开球要至少三颗目标球「进袋或越过开球线」。这一杆没做到，按 WPA Regulation 16
+          接手方有选择权——你可以照现在这样接着打，也可以把台面交回给开球方（对方再开球时可以推杆）。
+        </p>
+        <div class="row">
+          <button type="button" id="gAccept">照这样打</button>
+          <button type="button" id="gHandBack">交回给对手</button>
+        </div>
+      </div>
+
+      <div class="card" style="border-left:3px solid #38bdf8">
+        <h2>对战记分牌</h2>
+        <!-- 轮次与比分是异步变化的（对手回合、判罚），屏幕阅读器不会主动去念。
+             aria-live 只声明「这块会变」；写什么、什么时候写仍由 app.js 决定。 -->
+        <div class="score" id="score" aria-live="polite"></div>
+      </div>
+
+      <div class="card" style="border-left:3px solid #f43f5e">
+        <h2>这一杆播报</h2>
+        <div id="report" class="empty">点「新的一局」开始。</div>
+      </div>
+
+      <div class="card hero">
+        <h2>AI 击球战术建议</h2>
+        <div id="gAdvice" class="empty">—</div>
+        <div id="gVerdict"></div>
+      </div>
+
+      <div class="card">
+        <h2>对局存档</h2>
+        <div class="row">
+          <button type="button" id="saveGame">保存这一局</button>
+          <button type="button" id="loadGame">读取存档</button>
+          <button type="button" id="clearSave">删掉存档</button>
+        </div>
+        <p class="hint" id="saveInfo" style="margin-top:8px">还没有存档。存的是局面本身（球位、分组、杆数、轮到谁），刷新页面之后还能接着打。</p>
+        <!-- 存档只在当前浏览器里，换台机器、换个浏览器、清了站点数据就没了。
+             给一份能拿走的文件，换设备之后还能接着打这一局。 -->
+        <div class="row" style="margin-top:8px">
+          <button type="button" id="exportGameSave">导出到文件</button>
+          <button type="button" id="importGameSave">从文件读取</button>
+        </div>
+        <input id="gameSaveFile" type="file" accept=".json,application/json" hidden>
+        <!-- 另一个标签页存了新档时不自动换桌——正打到关键一杆时局面自己变掉
+             比丢存档更难受。但也不能只提示不给路，所以给一个按下去才生效的入口。 -->
+        <button type="button" id="takeOtherSave" class="hidden" style="margin-top:8px">读入另一个标签页存的</button>
+        <p class="hint" style="margin-top:6px">导出的是一个 JSON 文件，换设备后「从文件读取」能接着打。文件里的球位会按球台尺寸校验，越界或玩法不认识就整份丢掉。</p>
+      </div>
+
+      <div class="card">
+        <h2>对局记录</h2>
+        <div class="log" id="log">—</div>
+      </div>
+
+      <!-- 赛后复盘：本局统计 + 跨局战绩。战绩单独存在 dsh-billiards-matches
+           这个 key 里，不进存档——存档的语义是「一局」，读档 / 清档 / 导入都会
+           整份换掉，塞在一起会互相覆盖。 -->
+      <div class="card">
+        <h2>赛后复盘</h2>
+        <div class="match-stats" id="matchStats">—</div>
+      </div>
+    </div>
+
+    <!-- 出图：三种导出一张图，共用同一个预览区与「长按保存」提示。
+         放在两个面板之外，是因为「分享局面」在对局里才有比分可印，练习里也有台面可看
+         ——两处都得点得到，所以不能挂在任何一个面板里面。
+         「复盘这一局」只在局已结束时可用，禁用理由写在按钮 title 上。
+         图上半是台面俯视图，下半是这份文案，方便直接发给别人；
+         点图（手机长按也行）直接在新标签里看到原图。 -->
+    <div class="card">
+      <h2>导出一张图</h2>
+      <div class="share-row">
+        <button id="shareShot" type="button" class="share-btn">分享这一杆</button>
+        <button id="shareTable" type="button" class="share-btn">分享局面</button>
+        <button id="shareMatch" type="button" class="share-btn" disabled title="本局还没结束，打完这一局才能导出复盘。">复盘这一局</button>
+        <span id="shareHint" class="hint" role="status">生成一张图，发给练球的人。</span>
+      </div>
+      <div id="shareOut" class="share-out hidden">
+        <!-- 不给 width/height 属性：它随文案行数变，写死就是错的 -->
+        <a id="sharePreview" href="#" target="_blank" rel="noopener">
+          <img id="shareImage" alt="这一杆的走位与打法示意图">
+        </a>
+        <div class="share-actions">
+          <a id="shareDownload" href="#" download="billiards-shot.png">下载 PNG</a>
+          <a id="shareOpen" href="#" target="_blank" rel="noopener">新标签打开（手机长按保存）</a>
+        </div>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<footer>
+  <span>纯 JS · 零运行时依赖 · 物理核、求解器与规则引擎均为 ES module</span>
+  <span>按 WPA 国际台球协会锦标赛官方规则仿真</span>
+</footer>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>
