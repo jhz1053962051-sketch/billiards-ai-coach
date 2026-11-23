@@ -3058,6 +3058,149 @@ console.log('姿态页窄屏 390×844:', poseNarrow);
 
 await send(ws, 'Emulation.clearDeviceMetricsOverride');
 
+// ------------------------------------------------------------ 分享这一杆（导出 PNG）
+//
+// 「把这一杆导成一张图发给别人」这条路上，文案部分已经在 test/demo-state.test.js
+// 里逐字钉住了；但「点一下到底出不出得来一张图、出来多大、要不要几秒」只有真
+// 浏览器知道。这里做的全是真事：真导航、真点按钮、真读 <img> 的 naturalWidth，
+// 而不是去问 window.__app 要一个自己填的返回值。
+//
+// 两条路径都走一遍：
+//   · API（shareShot 的返回值）—— 拿得到字节数与宽高，用来判断「像不像一张图」；
+//   · 真点按钮 —— 人实际点的就是它，且能顺便验证按钮在手机上点得动。
+
+await send(ws, 'Page.navigate', { url: URL });
+await sleep(1500);
+
+const shareReport = JSON.parse(await evaluate(`(async () => {
+  window.__app.setMode('practice');
+  window.__app.resetLayout();
+  window.__app.runSolve();
+  const solution = window.__app.state.solution;
+  const result = await window.__app.shareShot();
+  const img = document.getElementById('shareImage');
+  const dl = document.getElementById('shareDownload');
+  const open = document.getElementById('shareOpen');
+  const box = document.getElementById('shareOut');
+  return JSON.stringify({
+    found: Boolean(solution && solution.found),
+    solved: Boolean(solution),
+    ok: Boolean(result && result.ok),
+    title: (result && result.title) || '',
+    bytes: (result && result.bytes) || 0,
+    naturalW: img.naturalWidth,
+    naturalH: img.naturalHeight,
+    imgSrc: img.getAttribute('src') || '',
+    imgAlt: img.getAttribute('alt') || '',
+    hidden: box.classList.contains('hidden'),
+    dlHref: dl.getAttribute('href') || '',
+    dlName: dl.getAttribute('download') || '',
+    openHref: open.getAttribute('href') || '',
+    hint: document.getElementById('shareHint').textContent,
+  });
+})()`));
+console.log('分享这一杆:', JSON.stringify(shareReport));
+
+check(
+  '分享这一杆：先求解再导出，拿到的是一张 1080 宽的图',
+  shareReport.ok === true && shareReport.naturalW === 1080,
+  `ok=${shareReport.ok} 宽=${shareReport.naturalW} 高=${shareReport.naturalH}`
+);
+// 上半是台面俯视图（1080×约 537），下半是七行文字，所以总高必然超过台面那张
+// 单图、也超过 1080 的方形；给一个宽口径下限，不把行高写死进断言。
+check(
+  '分享这一杆：高度按文案自适应，比正方形的台面图更高',
+  shareReport.naturalH > 900 && shareReport.naturalH > shareReport.naturalW * 0.9,
+  `尺寸=${shareReport.naturalW}×${shareReport.naturalH}`
+);
+check(
+  '分享这一杆：图片是真的解码过的 PNG（blob: 且字节数合理）',
+  shareReport.imgSrc.startsWith('blob:') && shareReport.bytes > 20000,
+  `src=${shareReport.imgSrc.slice(0, 12)}… bytes=${shareReport.bytes}`
+);
+check(
+  '分享这一杆：预览区展开，下载链接指向同一个 blob 且文件名带 .png',
+  shareReport.hidden === false &&
+    shareReport.dlHref.startsWith('blob:') &&
+    /^billiards-shot-\d{8}-\d{4}\.png$/.test(shareReport.dlName) &&
+    shareReport.openHref.startsWith('blob:'),
+  `hidden=${shareReport.hidden} href=${shareReport.dlHref.slice(0, 12)}… name=${shareReport.dlName}`
+);
+check(
+  '分享这一杆：图片替代文本带上这一杆的结论（读屏能用）',
+  /这一杆：.+→.+/.test(shareReport.imgAlt),
+  `alt=${shareReport.imgAlt}`
+);
+
+// 390×844：按钮要点得到、不压台面，图出来后也不许把整页顶出横向滚动条。
+await send(ws, 'Emulation.setDeviceMetricsOverride', {
+  width: 390,
+  height: 844,
+  deviceScaleFactor: 2,
+  mobile: true,
+});
+await sleep(500);
+const shareNarrow = JSON.parse(await evaluate(`(async () => {
+  const vw = document.documentElement.clientWidth;
+  const btn = document.getElementById('shareShot');
+  const stage = document.getElementById('stage');
+  const pick = (el) => {
+    const r = el.getBoundingClientRect();
+    return { left: Math.round(r.left), right: Math.round(r.right), top: Math.round(r.top), w: Math.round(r.width) };
+  };
+  // 先把上一次的结果收起来，确认下面的数字是「真点一下」点出来的
+  const out = document.getElementById('shareOut');
+  out.classList.add('hidden');
+  const before = pick(btn);
+  btn.click();
+  const t0 = Date.now();
+  let img = null;
+  while (Date.now() - t0 < 12000) {
+    const el = document.getElementById('shareImage');
+    if (!out.classList.contains('hidden') && el.naturalWidth > 0) {
+      img = el;
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  const r = img ? img.getBoundingClientRect() : null;
+  return JSON.stringify({
+    vw,
+    btn: before,
+    inView: before.left >= -1 && before.right <= vw + 1 && before.w > 0,
+    belowStage: stage ? before.top >= Math.round(stage.getBoundingClientRect().bottom) - 1 : true,
+    clickedW: img ? img.naturalWidth : 0,
+    clickedH: img ? img.naturalHeight : 0,
+    cssW: r ? Math.round(r.width) : 0,
+    scrollW: document.documentElement.scrollWidth,
+    ms: img ? Date.now() - t0 : -1,
+  });
+})()`));
+console.log('分享这一杆·390 窄屏:', JSON.stringify(shareNarrow));
+
+check(
+  '390 宽下「分享这一杆」按钮在视口内、宽度正常（点得到）',
+  shareNarrow.inView === true && shareNarrow.btn.w > 60,
+  JSON.stringify(shareNarrow.btn) + ` viewport=${shareNarrow.vw}`
+);
+check(
+  '390 宽下按钮排在台面下方，不遮挡球桌',
+  shareNarrow.belowStage === true,
+  `btn.top=${shareNarrow.btn.top}`
+);
+check(
+  '390 宽下真点按钮也能出图（naturalWidth > 0，且不是等来的假图）',
+  shareNarrow.clickedW === 1080 && shareNarrow.clickedH > 900,
+  `${shareNarrow.clickedW}×${shareNarrow.clickedH} 用时=${shareNarrow.ms}ms`
+);
+check(
+  '390 宽下预览图按列宽缩放，整页没有横向滚动',
+  shareNarrow.cssW > 200 && shareNarrow.cssW <= shareNarrow.vw && shareNarrow.scrollW <= shareNarrow.vw + 1,
+  `cssW=${shareNarrow.cssW} scrollWidth=${shareNarrow.scrollW} viewport=${shareNarrow.vw}`
+);
+
+await send(ws, 'Emulation.clearDeviceMetricsOverride');
+
 // ------------------------------------------------------------ 收尾
 
 // 有些崩溃发生在某段断言之后（比如回放的 tick 要等帧放完才走到回调），

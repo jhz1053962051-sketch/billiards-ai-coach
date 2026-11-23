@@ -23,7 +23,7 @@ import {
   pocketName,
   planShot,
 } from '../src/solver.js';
-import { createRenderer, interpolateBallStates, sampleDampedCamera } from './render.js';
+import { createRenderer, createShareScene, interpolateBallStates, sampleDampedCamera } from './render.js';
 import { ballStyle, groupOf, RACK_NUMBERS, createStandardRack, createRack, GAME_KINDS } from '../src/rack.js';
 import {
   createGame,
@@ -58,6 +58,7 @@ import {
 // 这里只留「读什么状态、画什么、什么时候拦下来」。
 import {
   autoPauseHint,
+  buildShareSummary,
   clamp,
   computeMatchStats,
   currentAim,
@@ -233,6 +234,7 @@ function resetLayout() {
   state.practiceRecorded = false;
   state.activeDrillId = null;
   state.animating = false;
+  invalidateShare();
   updateDrillStatus();
   updatePracticeFeedback();
   state.balls = [];
@@ -1116,6 +1118,8 @@ function recordPracticeOutcome(made) {
 
 function runSolve() {
   state.practiceRecorded = false;
+  // 局面要重新算了，上一次导出的图不再代表这一杆
+  invalidateShare();
   const t0 = performance.now();
   const all = solveShot(table, state.balls);
   const ms = performance.now() - t0;
@@ -2408,6 +2412,234 @@ function downloadText(filename, text, mime = 'application/json') {
   return true;
 }
 
+// ---------------------------------------------------------------- 分享这一杆
+//
+// 把当前这一杆画成一张手机能看清的 PNG：上半是台面俯视图（球位 + 目标球到袋口
+// 的线 + 母球预计落点），下半是这次解法的文字。
+//
+// 走 canvas.toBlob + URL.createObjectURL，**不转 data: URL**：1080 宽的 PNG 常在
+// 几百 KB 量级，base64 再撑三分之一纯属白给；而 index.html 的 CSP 里
+// img-src 本来就写了 blob:，一条 CSP 都不用改。
+//
+// 出图不直接下载，先摆进 <img> 预览：人要的是「发给别人」，手机上长按预览图就能
+// 存相册；桌面端右下角再给一条带 download 的链接。一次点击把两条路都铺好，
+// 比「点完静默下载、用户去下载栏里找」强。
+
+const SHARE_WIDTH = 1080; // 成品图固定 1080 宽：手机缩到 370 也清楚
+const SHARE_PAD = 48;
+const SHARE_FONT = '"PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif';
+const SHARE_TITLE_FONT = `700 46px ${SHARE_FONT}`;
+const SHARE_META_FONT = `500 26px ${SHARE_FONT}`;
+const SHARE_LABEL_FONT = `600 30px ${SHARE_FONT}`;
+const SHARE_VALUE_FONT = `500 30px ${SHARE_FONT}`;
+const SHARE_FOOT_FONT = `500 22px ${SHARE_FONT}`;
+const SHARE_TITLE_H = 58;
+const SHARE_META_H = 34;
+const SHARE_LINE_H = 44; // 一行值的高度（30px 字 + 行距）
+const SHARE_ROW_GAP = 24; // 行与行之间的空白
+const SHARE_LABEL_COL = 156; // 「字段名」那一列的宽度
+const SHARE_BG = '#0b1219';
+const SHARE_TEXT = '#e8f0f7';
+const SHARE_MUTED = '#93a4b5';
+
+/** 已经生成过的那张图：blob URL 得自己撤销，否则连点几次会一直占着内存。 */
+const shareState = { url: '', filename: '' };
+
+function shareFileName() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `billiards-shot-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.png`;
+}
+
+/** 这一杆换了（重新求解 / 重置），旧图就不再代表当前局面，收起来别再骗人。 */
+function invalidateShare() {
+  if (shareState.url) {
+    URL.revokeObjectURL(shareState.url);
+    shareState.url = '';
+  }
+  shareState.filename = '';
+  const out = $('shareOut');
+  if (out) out.classList.add('hidden');
+  const img = $('shareImage');
+  if (img) img.removeAttribute('src');
+  const hint = $('shareHint');
+  if (hint) hint.textContent = '生成一张图，发给练球的人。';
+}
+
+/**
+ * 按字符折行。中文没有词边界，逐字量宽度是最稳的一种；数字和英文会被拆开，
+ * 但这些字段里最长的是「容错」那句中文，拆不拆无所谓。
+ */
+function wrapShareText(ctx, text, maxWidth) {
+  const chars = Array.from(String(text ?? ''));
+  if (!chars.length) return [''];
+  const lines = [];
+  let line = '';
+  for (const ch of chars) {
+    const next = line + ch;
+    if (line && ctx.measureText(next).width > maxWidth) {
+      lines.push(line);
+      line = ch;
+    } else {
+      line = next;
+    }
+  }
+  lines.push(line);
+  return lines;
+}
+
+/**
+ * 合成成品图。高度由文案行数决定——先量后画，两遍用的是同一套字体常量，
+ * 所以量出来的结论和画出来的位置一致。
+ */
+function composeShareImage(summary, scene, meta) {
+  const measure = document.createElement('canvas').getContext('2d');
+  const bodyWidth = SHARE_WIDTH - SHARE_PAD * 2 - SHARE_LABEL_COL;
+  const rows = summary.lines.map((row) => {
+    measure.font = SHARE_VALUE_FONT;
+    return { label: row.label, chunks: wrapShareText(measure, row.value, bodyWidth) };
+  });
+  const rowsH = rows.reduce((sum, r) => sum + r.chunks.length * SHARE_LINE_H + SHARE_ROW_GAP, 0);
+  const sceneH = scene ? scene.height : 0;
+  const height = Math.round(
+    SHARE_PAD +
+      SHARE_TITLE_H +
+      SHARE_META_H +
+      18 +
+      sceneH +
+      (scene ? 34 : 0) +
+      rowsH +
+      40 +
+      SHARE_PAD,
+  );
+
+  const out = document.createElement('canvas');
+  out.width = SHARE_WIDTH;
+  out.height = height;
+  const ctx = out.getContext('2d');
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = SHARE_BG;
+  ctx.fillRect(0, 0, out.width, out.height);
+
+  let y = SHARE_PAD;
+  ctx.fillStyle = SHARE_TEXT;
+  ctx.font = SHARE_TITLE_FONT;
+  ctx.fillText(summary.title, SHARE_PAD, y);
+  y += SHARE_TITLE_H;
+
+  ctx.fillStyle = SHARE_MUTED;
+  ctx.font = SHARE_META_FONT;
+  ctx.fillText(meta, SHARE_PAD, y);
+  y += SHARE_META_H + 18;
+
+  if (scene) {
+    // 台面图自带木框与袋口，直接贴上去；边角是透明的，不会盖住深色底
+    ctx.drawImage(
+      scene.canvas,
+      0,
+      0,
+      scene.canvas.width,
+      scene.canvas.height,
+      SHARE_PAD,
+      y,
+      scene.width,
+      sceneH,
+    );
+    y += sceneH + 34;
+  }
+
+  for (const row of rows) {
+    ctx.fillStyle = SHARE_MUTED;
+    ctx.font = SHARE_LABEL_FONT;
+    ctx.fillText(row.label, SHARE_PAD, y + 2);
+    ctx.fillStyle = SHARE_TEXT;
+    ctx.font = SHARE_VALUE_FONT;
+    row.chunks.forEach((chunk, i) => {
+      ctx.fillText(chunk, SHARE_PAD + SHARE_LABEL_COL, y + i * SHARE_LINE_H);
+    });
+    y += row.chunks.length * SHARE_LINE_H + SHARE_ROW_GAP;
+  }
+
+  ctx.fillStyle = SHARE_MUTED;
+  ctx.font = SHARE_FOOT_FONT;
+  ctx.fillText('AI 台球教练 · 长按图片可保存', SHARE_PAD, y + 6);
+
+  return out;
+}
+
+/** 生成 blob：离屏画布 → toBlob。返回 null 表示这张图没出来。 */
+async function buildShareBlob() {
+  const card = state.solution;
+  const summary = buildShareSummary({ shot: card, table, balls: state.balls });
+  const scene = createShareScene({
+    table,
+    balls: state.balls,
+    shot: card && card.found ? card.best : null,
+    maxWidth: SHARE_WIDTH - SHARE_PAD * 2,
+  });
+  const board = TABLE_PRESETS[table.preset]?.label ?? '台面';
+  const d = new Date();
+  const meta = `${board} · ${d.getMonth() + 1} 月 ${d.getDate()} 日 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  const canvas = composeShareImage(summary, scene, meta);
+  const blob = await new Promise((resolve) => {
+    canvas.toBlob((b) => resolve(b), 'image/png');
+  });
+  return { blob, summary, width: canvas.width, height: canvas.height };
+}
+
+/**
+ * 「分享这一杆」按钮的全部行为：出图 → 预览 → 挂下载链接。
+ *
+ * 返回结构化结果而不是只改 DOM，是为了让 E2E 能直接问「图有多大、多少字节」，
+ * 不必去猜界面上的文案。任何一步失败都只写提示，不抛——按钮上炸掉比没有图更糟。
+ */
+async function shareShot() {
+  const button = $('shareShot');
+  const hint = $('shareHint');
+  if (!state.solution) {
+    hint.textContent = '先点「求解最佳方案」，再把这一杆分享出去。';
+    return { ok: false, reason: 'no-solution' };
+  }
+  button.disabled = true;
+  hint.textContent = '正在生成…';
+  try {
+    const { blob, summary, width, height } = await buildShareBlob();
+    if (!blob) {
+      hint.textContent = '这张图没生成出来，换个浏览器或重试一次。';
+      return { ok: false, reason: 'no-blob' };
+    }
+    if (shareState.url) URL.revokeObjectURL(shareState.url);
+    const url = URL.createObjectURL(blob);
+    const filename = shareFileName();
+    shareState.url = url;
+    shareState.filename = filename;
+
+    const img = $('shareImage');
+    img.alt = `这一杆：${summary.title}`;
+    img.src = url;
+    $('sharePreview').href = url;
+    $('shareOpen').href = url;
+    const download = $('shareDownload');
+    download.href = url;
+    download.download = filename;
+    $('shareOut').classList.remove('hidden');
+    hint.textContent = `${width}×${height} PNG · ${Math.round(blob.size / 1024)} KB`;
+
+    // 等解码完再返回：调用方（和 E2E）拿到结果时 naturalWidth 已经是真值
+    try {
+      await img.decode();
+    } catch {
+      // 解码失败就让 <img> 自己显示破图，提示照常给
+    }
+    return { ok: true, width, height, bytes: blob.size, url, filename, title: summary.title };
+  } catch (err) {
+    hint.textContent = '生成失败：这个浏览器画不出导出图。';
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function exportGameSave() {
   const text = exportGameText();
   if (!text) {
@@ -2598,6 +2830,8 @@ $('tabGame').addEventListener('click', () => setMode('game'));
 $('solve').addEventListener('click', () => { if (!state.animating) runSolve(); });
 $('shoot').addEventListener('click', () => { if (!state.animating) shootPractice(); });
 $('reset').addEventListener('click', resetLayout);
+// 出图要等解码，所以这里不 await：按钮自己会在 finally 里解禁
+$('shareShot').addEventListener('click', () => { if (!state.animating) shareShot(); });
 $('addBall').addEventListener('click', addBall);
 $('rackUp').addEventListener('click', rackUp);
 $('newGame').addEventListener('click', newGame);
@@ -3057,6 +3291,8 @@ window.__app = {
   // 导出/导入到文件：端到端脚本直接喂文本，不必去模拟文件选择器与下载
   exportGameText,
   importGameText,
+  // 分享这一杆：端到端脚本要能拿到图真的多大、多少字节，而不是只看到按钮
+  shareShot,
   refreshSaveInfo,
   onKeyDown,
   toggleView,

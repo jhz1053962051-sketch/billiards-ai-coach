@@ -21,6 +21,7 @@ import {
   HISTORY_LIMIT,
   NEXT_SHOT_SLOW_MS,
   autoPauseHint,
+  buildShareSummary,
   captureBallFrame,
   clamp,
   computeMatchStats,
@@ -1927,4 +1928,127 @@ test('clearMatches：清空之后读回来是空的', () => {
   assert.equal(readMatches(store).length, 1);
   assert.equal(clearMatches(store), true);
   assert.deepEqual(readMatches(store), []);
+});
+
+// ---------------------------------------------------------------- 分享这一杆的文案
+//
+// buildShareSummary 决定「分享图下半部分印什么」。图本身（离屏画布、字号、
+// 折行）在 app.js 里，浏览器端到端只能看个大概；文案字段与**顺序**在这里钉死，
+// 改断言的成本才不是「起一次 Chrome」。
+
+/** 一条正常的进攻候选，字段含义见 src/solver.js 里候选对象的注释。 */
+function shareCandidate(over = {}) {
+  return {
+    targetId: 'b3',
+    targetNumber: 3,
+    pocketId: 'c-br',
+    cutDeg: 32.4,
+    toleranceDeg: 0.57,
+    distanceCue: 0.85,
+    speed: 2.6,
+    power: { name: '中', speed: 2.6 },
+    tip: { a: 0, b: 0, name: '中杆' },
+    cueRest: { x: 1.62, y: 0.83 },
+    ...over,
+  };
+}
+
+test('buildShareSummary：正常一杆印出七个字段，顺序固定（目标球→袋口→杆法→力度→切角→容错→母球落点）', () => {
+  const table = createTable('pool9');
+  const out = buildShareSummary({
+    shot: { found: true, best: shareCandidate() },
+    table,
+    balls: [{ number: 0, x: 0.6, y: 0.6, pocketed: false }],
+  });
+
+  assert.equal(out.title, '3 号球 → 右下底袋');
+  assert.deepEqual(
+    out.lines.map((l) => l.label),
+    ['目标球', '袋口', '杆法', '力度', '切角', '容错', '母球落点'],
+  );
+  const value = (label) => out.lines.find((l) => l.label === label).value;
+  assert.equal(value('目标球'), '3 号球');
+  assert.equal(value('袋口'), '右下底袋');
+  assert.equal(value('杆法'), '中杆');
+  assert.equal(value('力度'), '中力（2.60 m/s）', '光说「中」复现不了，得带 m/s');
+  assert.equal(value('切角'), '32°');
+  // 容错那句自带「母球走多远、偏几毫米就打不进」，前半段必须原样
+  assert.match(value('容错'), /^±0\.57°（母球走 0\.85 米，方向偏 \d+(\.\d)? 毫米就打不进）$/);
+  // 落点用台面方位而不是裸坐标；具体袋名由 solver 决定，这里只钉结构
+  assert.match(value('母球落点'), /^台面.+（距.+库 \d+ 厘米）$/);
+  assert.equal(out.lines.length, 7, '没有摔袋风险就不该多出那一行');
+});
+
+test('buildShareSummary：无解时给一条「说明」，不硬凑七个空字段', () => {
+  const table = createTable('pool9');
+  const out = buildShareSummary({
+    shot: { found: false, message: '没有可以直接进攻的球——需要打防守，或先解一杆。' },
+    table,
+  });
+
+  assert.equal(out.title, '这一杆没有可以直接进攻的球');
+  assert.deepEqual(out.lines, [
+    { label: '说明', value: '没有可以直接进攻的球——需要打防守，或先解一杆。' },
+  ]);
+});
+
+test('buildShareSummary：母球会摔袋时末尾追加「⚠ 注意」，落点写「已落袋」而不是编一个坐标', () => {
+  const table = createTable('pool9');
+  const out = buildShareSummary({
+    shot: {
+      found: true,
+      best: shareCandidate({ cueRest: null, scratchRisk: true, cuePath: { kind: 'pocket' } }),
+    },
+    table,
+    balls: [{ number: 0, x: 1, y: 0.5, pocketed: true }],
+  });
+
+  assert.equal(out.lines.length, 8);
+  const last = out.lines[out.lines.length - 1];
+  assert.deepEqual(last, { label: '⚠ 注意', value: '母球有摔袋风险' });
+  assert.equal(
+    out.lines.find((l) => l.label === '母球落点').value,
+    '母球已落袋',
+    '球都进袋了还说「未要求走位」就是骗人',
+  );
+});
+
+test('buildShareSummary：斯诺克彩球走球名分支（不是「20 号球」），袋口照样按 id 翻译', () => {
+  const table = createTable('snooker');
+  const out = buildShareSummary({
+    shot: {
+      found: true,
+      best: shareCandidate({ targetId: 'black', targetNumber: 20, pocketId: 'c-tr' }),
+    },
+    table,
+    balls: [{ number: 0, x: 1, y: 0.9 }],
+  });
+
+  const ball = out.lines.find((l) => l.label === '目标球').value;
+  assert.notEqual(ball, '20 号球', '16 以上是彩球，不能再按号码念');
+  assert.ok(ball.endsWith('球'), `彩球名应形如「黑球」，实际是 ${ball}`);
+  assert.equal(out.title, `${ball} → 右上底袋`);
+  // 斯诺克台 3.569×1.778，落点方位仍然算得出来，不会退回坐标
+  assert.match(out.lines.find((l) => l.label === '母球落点').value, /^台面/);
+});
+
+test('buildShareSummary：空值 / 类型不对 / 缺字段都不抛，最差也给一个能导出的说明', () => {
+  const cases = [
+    undefined,
+    {},
+    { shot: null },
+    { shot: '一串没用的文本', table: null, balls: null },
+    { shot: { best: null, message: 42 } },
+    { shot: { best: { targetNumber: NaN, pocketId: '' } } },
+    { shot: { found: true, best: {} }, table: createTable('pool9'), balls: 'not-an-array' },
+  ];
+  for (const input of cases) {
+    const out = buildShareSummary(input);
+    assert.equal(typeof out.title, 'string');
+    assert.ok(Array.isArray(out.lines) && out.lines.length >= 1);
+    for (const line of out.lines) {
+      assert.equal(typeof line.label, 'string');
+      assert.equal(typeof line.value, 'string');
+    }
+  }
 });

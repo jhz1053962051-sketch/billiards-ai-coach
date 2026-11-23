@@ -16,7 +16,7 @@
 import { cloneGame, legalTargetNumbers, numbersOnTable } from '../src/rules.js';
 import { SEARCH_DT } from '../src/constants.js';
 import { createWorld, strike, stepWorld, allStopped, createRollTracker } from '../src/physics.js';
-import { cueRestText, pocketName } from '../src/solver.js';
+import { ballLabel, cueRestText, pocketName, toleranceText } from '../src/solver.js';
 
 // ---------------------------------------------------------------- 数值
 
@@ -1211,4 +1211,138 @@ export function summarizeHistory(entries) {
     longestRun,
     recent: results.slice(-MATCH_RECENT_LIMIT),
   };
+}
+
+// ---------------------------------------------------------------- 分享图（导出这一杆）
+//
+// 「分享这一杆」导出的图分上下两块：上面是台面俯视图，下面是这一节产出的
+// 文字。分工写清楚，免得日后又混在一起：
+//   **排版**（几行、字号、怎么折行、落在图上哪个坐标）留在 app.js——那是画布的事；
+//   **说什么**（标题、字段顺序、每条的值怎么措辞）在这里，于是同一段文案能在
+//   Node 里逐字断言，不必起浏览器。
+// 所以这里只返回结构化数据，不返回拼好的整块字符串：行距和折行不该由状态层决定。
+
+/** toleranceText 自己带「容错」二字；图上已经是「字段名 + 值」的结构，得去掉重复的那半边。 */
+const SHARE_TOL_PREFIX = /^容错\s*/;
+/** cueRestText 同理。顺带兼容不带球台时退回的坐标版本（`母球建议停位 (x, y) 米`）。 */
+const SHARE_REST_PREFIX = /^母球建议停位[：:]?\s*/;
+
+/**
+ * 这一杆要印在图上的文案：一个标题 + 若干「字段 / 值」行。
+ *
+ * 输入刻意宽容：`shot` 既可以是 coach() 的整张卡（`{ found, best, message }`），
+ * 也可以直接是候选对象（`state.solution.best` 那一个）。缺字段、类型不对、整个
+ * 传空都不抛——**能导出一张「这一杆没解」的图，比在按钮上炸掉有用**。
+ *
+ * @param {{shot?:unknown, table?:object, balls?:unknown[]}} [input]
+ *   shot  coach() 卡片或单个候选；null / 无解卡片都走「没解」分支
+ *   table 有就用来算母球落点相对哪条库边（三个朝向三分法的依据是台长台宽）
+ *   balls 有就让「母球已落袋」这种状态显出来
+ * @returns {{title:string, lines:Array<{label:string, value:string}>}}
+ *   lines 顺序固定：目标球 → 袋口 → 杆法 → 力度 → 切角 → 容错 → 母球落点，
+ *   母球有摔袋风险时末尾追加一行「⚠ 注意」
+ */
+export function buildShareSummary({ shot, table, balls } = {}) {
+  const card = shot && typeof shot === 'object' ? shot : {};
+  const best = card.best && typeof card.best === 'object' ? card.best : null;
+  const candidate = best || (looksLikeCandidate(card) ? card : null);
+
+  if (card.found === false || !candidate) {
+    const message = typeof card.message === 'string' ? card.message.trim() : '';
+    return {
+      title: '这一杆没有可以直接进攻的球',
+      lines: [{ label: '说明', value: message || '需要打防守，或先解一杆。' }],
+    };
+  }
+
+  const c = candidate;
+  const ball = shareBallText(c.targetNumber);
+  const pocket =
+    typeof c.pocketId === 'string' && c.pocketId ? pocketName(c.pocketId) : '';
+  const lines = [
+    { label: '目标球', value: ball },
+    { label: '袋口', value: pocket || '不限（只保证合法碰球）' },
+    { label: '杆法', value: shareTipText(c) },
+    { label: '力度', value: sharePowerText(c) },
+    { label: '切角', value: shareCutText(c) },
+    { label: '容错', value: shareToleranceText(c) },
+    { label: '母球落点', value: shareCueRestText(table, c, balls) },
+  ];
+  // 摔袋是「别照着打」的强信号，值得单独一行而不是塞在母球落点里
+  if (c.scratchRisk === true || (c.cuePath && c.cuePath.kind === 'pocket')) {
+    lines.push({ label: '⚠ 注意', value: '母球有摔袋风险' });
+  }
+
+  return {
+    title: pocket ? `${ball} → ${pocket}` : `${ball}（不指定袋口）`,
+    lines,
+  };
+}
+
+/** 卡片的 best 缺失时，靠这两个字段判断「传进来的其实就是候选本身」。 */
+function looksLikeCandidate(obj) {
+  return (
+    (typeof obj.targetNumber === 'number' && Number.isFinite(obj.targetNumber)) ||
+    (typeof obj.pocketId === 'string' && obj.pocketId.length > 0)
+  );
+}
+
+function shareBallText(number) {
+  if (typeof number !== 'number' || !Number.isFinite(number) || number <= 0) return '—';
+  // ballLabel 对 1..15 出「7 号球」，对 16+ 出「黑球」——斯诺克彩球天然走到后者
+  return ballLabel(number);
+}
+
+function shareTipText(c) {
+  const name = c.tip && typeof c.tip.name === 'string' ? c.tip.name.trim() : '';
+  return name || '—';
+}
+
+function sharePowerText(c) {
+  const name = c.power && typeof c.power.name === 'string' ? c.power.name.trim() : '';
+  const speed = typeof c.speed === 'number' && Number.isFinite(c.speed) ? c.speed : null;
+  // 力度光说「中」不够——同一个人隔天看这张图，m/s 才是能复现的那一半
+  if (name && speed !== null) return `${name}力（${speed.toFixed(2)} m/s）`;
+  if (name) return `${name}力`;
+  if (speed !== null) return `${speed.toFixed(2)} m/s`;
+  return '—';
+}
+
+function shareCutText(c) {
+  return typeof c.cutDeg === 'number' && Number.isFinite(c.cutDeg)
+    ? `${c.cutDeg.toFixed(0)}°`
+    : '—';
+}
+
+function shareToleranceText(c) {
+  if (typeof c.toleranceDeg !== 'number' || !Number.isFinite(c.toleranceDeg)) return '—';
+  // toleranceDeg <= 0 表示「这一杆没有可用的容错窗」，别印成 ±0.00° 让人以为精度极高
+  if (c.toleranceDeg <= 0) return '—';
+  const text = toleranceText(c).replace(SHARE_TOL_PREFIX, '').trim();
+  return text || '—';
+}
+
+/**
+ * 母球落点。cueRest 有坐标就问 cueRestText 要方位（它会按台长台宽算「台面上右」
+ * 这类说法，还带上离最近库边的厘米数）；没有落点就分两种情况说清楚：
+ * 母球已经落袋 / 这一杆没要求走位——这俩在图上必须能区分。
+ */
+function shareCueRestText(table, c, balls) {
+  const rest = c.cueRest;
+  if (rest && typeof rest === 'object' && Number.isFinite(rest.x) && Number.isFinite(rest.y)) {
+    const text = cueRestText(table, rest).replace(SHARE_REST_PREFIX, '').trim();
+    if (text && text !== '—') return text;
+  }
+  const cue = cueBallOf(balls);
+  if (cue && cue.pocketed === true) return '母球已落袋';
+  return '未要求走位';
+}
+
+function cueBallOf(balls) {
+  if (!Array.isArray(balls)) return null;
+  for (const b of balls) {
+    if (!b || typeof b !== 'object') continue;
+    if (b.number === 0 || b.id === 'cue') return b;
+  }
+  return null;
 }

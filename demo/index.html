@@ -979,6 +979,26 @@
     background: linear-gradient(180deg, #182330 0%, #111a24 100%);
     display: flex; justify-content: space-between; align-items: center;
   }
+  /* 分享这一杆：一行按钮，出图后下面接预览。
+     390 宽的手机上 aside 内容宽约 370，所以按钮和提示允许换行、预览图 width:100%，
+     绝不设固定宽度——verify-demo 的窄屏断言会查整页有没有横向滚动条。 */
+  .share-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+  .share-btn {
+    padding: 9px 14px; border-radius: 9px; cursor: pointer; font-size: 13px; font-weight: 600;
+    font-family: inherit; color: #7dd3fc;
+    background: rgba(56, 189, 248, 0.14); border: 1px solid rgba(56, 189, 248, 0.55);
+  }
+  .share-btn:hover { background: rgba(56, 189, 248, 0.24); }
+  .share-btn:disabled { opacity: 0.55; cursor: progress; }
+  .share-row .hint { margin: 0; flex: 1 1 140px; min-width: 0; }
+  .share-out { margin-top: 10px; }
+  .share-out img {
+    display: block; width: 100%; height: auto;
+    border-radius: 10px; border: 1px solid var(--line);
+  }
+  .share-actions { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px; font-size: 13px; }
+  .share-actions a { color: #7dd3fc; font-weight: 600; text-decoration: none; padding: 4px 0; }
+  .share-actions a:hover { text-decoration: underline; }
   .hidden { display: none !important; }
 </style>
 </head>
@@ -1068,6 +1088,24 @@
         <div id="advice" class="empty">点「求解最佳方案」开始。</div>
         <div id="verdict"></div>
         <div id="verdictNote" class="verdict-note"></div>
+
+        <!-- 导出这一杆：点一下把当前方案画成一张 1080 宽的 PNG，下面是预览。
+             图里上半是台面俯视图，下半是这份文案，方便直接发给别人。 -->
+        <div class="share-row">
+          <button id="shareShot" type="button" class="share-btn">分享这一杆</button>
+          <span id="shareHint" class="hint" role="status">生成一张图，发给练球的人。</span>
+        </div>
+        <div id="shareOut" class="share-out hidden">
+          <!-- 点图（手机长按也行）直接在新标签里看到原图，宽高在生成时填，
+               不给 width/height 属性是因为它随文案行数变，写死就是错的。 -->
+          <a id="sharePreview" href="#" target="_blank" rel="noopener">
+            <img id="shareImage" alt="这一杆的走位与打法示意图">
+          </a>
+          <div class="share-actions">
+            <a id="shareDownload" href="#" download="billiards-shot.png">下载 PNG</a>
+            <a id="shareOpen" href="#" target="_blank" rel="noopener">新标签打开（手机长按保存）</a>
+          </div>
+        </div>
       </div>
 
       <!-- 备选路线紧跟在「AI 击球战术」下面，不排在专项训练之后：这是教练给出的

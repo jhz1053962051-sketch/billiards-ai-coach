@@ -1259,3 +1259,161 @@ function shade(hex, k) {
   const f = (v) => Math.max(0, Math.min(255, Math.round(k < 0 ? v * (1 + k) : v + (255 - v) * k)));
   return `rgb(${f(r)}, ${f(g)}, ${f(b)})`;
 }
+
+// ---------------------------------------------------------------- 分享图（导出这一杆）
+//
+// 「分享这一杆」需要一张能发给别人的静态图，上半部分是台面俯视图。
+// 这里**不另画一份台子**：木框、袋口、台呢、球面明暗全走上面那条已经画了几千遍的
+// 路径，本函数只负责换一块离屏画布、把相机摆成纯俯视、再补上这一杆的辅助线。
+//
+// 用全新的 createRenderer 实例（不是主渲染的那个），所以主画面的相机、缩放、
+// 台面缓存一点都不会被挪动——导出一次不该让屏幕上的球台闪一下。
+//
+// 坐标系要注意：fit() 之后**所有绘制都用 CSS 像素**（dpr 已经在内部 setTransform
+// 吸掉了），所以这里给 lineWidth 写 3 就是成品图上的 3 像素；成品图拿 CSS 尺寸
+// 去贴，离屏画布的物理像素多出来的部分由 drawImage 整体缩放。
+
+/** 目标球 → 袋口的进袋线。和主画面同一套配色，看着才是同一个产品。 */
+const SHARE_TARGET_LINE = 'rgba(250, 204, 21, 0.95)';
+/** 母球 → 假想球（击球方向）。 */
+const SHARE_CUE_LINE = 'rgba(16, 185, 129, 0.95)';
+/** 母球预计落点：浅蓝填充 + 亮蓝圈。 */
+const SHARE_REST_FILL = 'rgba(56, 189, 248, 0.22)';
+const SHARE_REST_STROKE = '#38bdf8';
+/** 母球会摔袋时，把这条路径标红——这是「别照着打」的那一半信息。 */
+const SHARE_SCRATCH_STROKE = 'rgba(248, 113, 113, 0.95)';
+
+/**
+ * 把这一杆画成一张俯视台面图。
+ *
+ * @param {{table:object, balls?:unknown[], shot?:object|null, maxWidth?:number}} input
+ *   table    球台（决定比例与袋口位置）
+ *   balls    当前所有球；落袋的会被跳过
+ *   shot     单个候选（coach 卡片的 best，或备选里点中的那一个）；传空就只画球位
+ *   maxWidth 这张图最多多宽（CSS 像素），高度按台面比例自动算
+ * @returns {{canvas:HTMLCanvasElement, width:number, height:number}|null}
+ *   width/height 是 CSS 像素；贴进成品图时按这个尺寸占位（离屏画布本身按 dpr 放大过）
+ */
+export function createShareScene({ table, balls, shot, maxWidth = 984 } = {}) {
+  if (!table) return null;
+  const canvas = document.createElement('canvas');
+  const view = createRenderer({ canvas, table });
+  const { w, h } = view.fit(maxWidth, maxWidth);
+  view.setCamera({ t: 0 });
+  view.clear();
+  view.drawTable();
+
+  const list = Array.isArray(balls) ? balls : [];
+  const candidate = shot && typeof shot === 'object' ? shot : null;
+  // 辅助线压在球下面：球正好压在线上时，号码盘不会被线条糊住
+  if (candidate) drawShareGuides(view, table, list, candidate);
+
+  for (const b of list) {
+    if (!b || typeof b !== 'object' || b.pocketed === true) continue;
+    view.drawBall(b);
+  }
+
+  return { canvas, width: Math.round(w), height: Math.round(h) };
+}
+
+/** 这一杆的三样东西：目标球到袋口、母球出杆方向、母球预计落点。 */
+function drawShareGuides(view, table, balls, c) {
+  const ctx = view.ctx;
+  const target = shareBallOf(balls, c);
+  const pocket = sharePocketOf(table, c.pocketId);
+
+  if (target && pocket) {
+    const a = view.project(target.x, target.y);
+    const b = view.project(pocket.x, pocket.y);
+    ctx.save();
+    ctx.setLineDash([10, 8]);
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = SHARE_TARGET_LINE;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+    // 袋口画个圈，一眼能看出「打的是哪个袋」
+    ctx.setLineDash([]);
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, Math.max(9, table.ballRadius * view.scale * 1.5), 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  const ghost = c.ghost;
+  const hasGhost =
+    ghost && typeof ghost === 'object' && Number.isFinite(ghost.x) && Number.isFinite(ghost.y);
+  if (!hasGhost) return;
+
+  const g = view.project(ghost.x, ghost.y);
+  const r = Math.max(2.5, table.ballRadius * view.scale);
+  ctx.save();
+  ctx.setLineDash([]);
+  ctx.lineWidth = 3;
+  // 假想球：母球击球瞬间该占的位置
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.75)';
+  ctx.beginPath();
+  ctx.arc(g.x, g.y, r, 0, Math.PI * 2);
+  ctx.stroke();
+
+  const cue = cueBallOf(balls);
+  // 母球摔袋就没有「预计落点」可言，画个圈反而是误导
+  const rest = c.cuePath && c.cuePath.kind === 'pocket' ? null : c.cueRest;
+  if (cue) {
+    const from = view.project(cue.x, cue.y);
+    ctx.strokeStyle =
+      c.cuePath && c.cuePath.kind === 'pocket' ? SHARE_SCRATCH_STROKE : SHARE_CUE_LINE;
+    ctx.beginPath();
+    ctx.moveTo(from.x, from.y);
+    ctx.lineTo(g.x, g.y);
+    ctx.stroke();
+  }
+
+  // 预计落点最后画：它是图上唯一「本来这里什么都没有」的标记，被球盖住就白画了
+  if (rest && Number.isFinite(rest.x) && Number.isFinite(rest.y)) {
+    const p = view.project(rest.x, rest.y);
+    ctx.setLineDash([7, 6]);
+    ctx.lineWidth = 3;
+    ctx.fillStyle = SHARE_REST_FILL;
+    ctx.strokeStyle = SHARE_REST_STROKE;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r * 1.35, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/** 按 id 优先、号码兜底找一颗还在台面上的球。 */
+function shareBallOf(balls, c) {
+  if (!Array.isArray(balls)) return null;
+  for (const b of balls) {
+    if (!b || typeof b !== 'object' || b.pocketed === true) continue;
+    if (typeof c.targetId === 'string' && b.id === c.targetId) return b;
+  }
+  for (const b of balls) {
+    if (!b || typeof b !== 'object' || b.pocketed === true) continue;
+    if (typeof c.targetNumber === 'number' && b.number === c.targetNumber) return b;
+  }
+  return null;
+}
+
+function sharePocketOf(table, pocketId) {
+  if (!pocketId || !Array.isArray(table.pockets)) return null;
+  for (const p of table.pockets) {
+    if (p && p.id === pocketId) return p;
+  }
+  return null;
+}
+
+function cueBallOf(balls) {
+  if (!Array.isArray(balls)) return null;
+  for (const b of balls) {
+    if (b && typeof b === 'object' && b.pocketed !== true && (b.number === 0 || b.id === 'cue')) {
+      return b;
+    }
+  }
+  return null;
+}
