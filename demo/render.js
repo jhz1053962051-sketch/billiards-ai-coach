@@ -91,6 +91,272 @@ export function createRenderer({ canvas, table: initialTable }) {
   let tableCache = null;
   let tableCacheKey = null; // `${preset}:${scale}:${dpr}` 用于检测是否需要重建
 
+  // ------------------------------------------------------------ 渐变缓存
+  //
+  // 为什么按「单位空间」缓存，而不是按半径分档缓存一堆近似值：
+  // CanvasGradient 创建时只记下用户坐标里的圆心与半径，真正的像素值是在 fill 那一刻
+  // 用当时的 CTM 算出来的。所以把渐变定义成「球心 (0,0)、球半径 1」的单位版，
+  // 填充前 translate+scale 把球搬过去，与「按绝对坐标现建一个」在数学上是同一个函数；
+  // 一个对象就能跨球、跨帧、跨 DPR 复用，也不会因为 0.5px 分档带来色带边界抖动。
+  //
+  // 路径命令仍用绝对坐标构造（构造时即落到画布坐标空间），只在 fill 前后短暂套一次
+  // 变换，所以球的几何栅格化与改动前逐位相同。
+  //
+  // 失效：fit()（窗口 resize / DPR 变化）与 setTable() 都调 resetGradients() 清空。
+  // 单位空间渐变本身与像素密度无关，清空是为了让「尺寸口径变了就重建」只有一条路径，
+  // 不必逐个判断哪个缓存需要跟着尺寸走。
+  // 上限：全部是有界集合——球体/阴影/袋口各 1 个，色带按球色（≤15），球杆 4 个，
+  // 整屏 4 个（尺寸变了重建），台呢 1 个（运镜中逐帧换，静止时命中）。
+  const gradCache = {
+    ctx: null, // 渐变属于创建它的 context；ctx 被换掉（离屏台面缓存）就整体重建
+    ballBody: null,
+    ballShadow: null,
+    pocket3d: null,
+    stripes: new Map(), // 球色 -> 单位空间色带渐变
+    cue: null,
+    screenKey: '',
+    screen: null,
+    feltKey: '',
+    felt: null,
+    geomTable: null,
+    geom: null,
+  };
+
+  /** ctx 被换掉（buildTableCache 会临时指向离屏 context）时，旧渐变不能再用。 */
+  function ensureGradientContext() {
+    if (gradCache.ctx === ctx) return;
+    gradCache.ctx = ctx;
+    gradCache.ballBody = null;
+    gradCache.ballShadow = null;
+    gradCache.pocket3d = null;
+    gradCache.stripes.clear();
+    gradCache.cue = null;
+    gradCache.screenKey = '';
+    gradCache.screen = null;
+    gradCache.feltKey = '';
+    gradCache.felt = null;
+  }
+
+  /** 尺寸口径变了（resize / DPR / 换台）：所有渐变重建一次。 */
+  function resetGradients() {
+    gradCache.ctx = null;
+    ensureGradientContext();
+  }
+
+  /** 以 (x, y) 为心、半径 r，用单位空间渐变填充当前路径。 */
+  function fillUnitGradient(g, x, y, r) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(r, r);
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.restore();
+  }
+
+  /** 球体明暗：左上亮、右下暗。单位空间：圆心 (0,0)、球半径 1。 */
+  function ballBodyGradient() {
+    ensureGradientContext();
+    if (!gradCache.ballBody) {
+      const g = ctx.createRadialGradient(-0.38, -0.42, 0.05, -0.1, -0.1, 1.35);
+      g.addColorStop(0, 'rgba(255,255,255,0.55)');
+      g.addColorStop(0.32, 'rgba(255,255,255,0.10)');
+      g.addColorStop(0.62, 'rgba(0,0,0,0.02)');
+      g.addColorStop(1, 'rgba(0,0,0,0.55)');
+      gradCache.ballBody = g;
+    }
+    return gradCache.ballBody;
+  }
+
+  /** 接触阴影。绘制时本来就在单位空间（scale(r*0.96, r*0.72)），直接缓存一个。 */
+  function ballShadowGradient() {
+    ensureGradientContext();
+    if (!gradCache.ballShadow) {
+      const g = ctx.createRadialGradient(0, 0, 0.08, 0, 0, 1);
+      g.addColorStop(0, 'rgba(0,0,0,0.38)');
+      g.addColorStop(0.62, 'rgba(0,0,0,0.20)');
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      gradCache.ballShadow = g;
+    }
+    return gradCache.ballShadow;
+  }
+
+  /** 条纹带：单位空间 y ∈ [-0.67, 0.67]（原来半高 r*0.67），按球色缓存。 */
+  function stripeGradient(color) {
+    ensureGradientContext();
+    let g = gradCache.stripes.get(color);
+    if (!g) {
+      g = ctx.createLinearGradient(0, -0.67, 0, 0.67);
+      g.addColorStop(0, shade(color, -0.12));
+      g.addColorStop(0.5, color);
+      g.addColorStop(1, shade(color, -0.22));
+      gradCache.stripes.set(color, g);
+    }
+    return g;
+  }
+
+  /** 3D 袋口纵深：单位空间 (0,0,0.1) -> (0,0,1.05)。 */
+  function pocket3DGradient() {
+    ensureGradientContext();
+    if (!gradCache.pocket3d) {
+      const g = ctx.createRadialGradient(0, 0, 0.1, 0, 0, 1.05);
+      g.addColorStop(0, '#000000');
+      g.addColorStop(0.75, '#04070a');
+      g.addColorStop(1, '#111922');
+      gradCache.pocket3d = g;
+    }
+    return gradCache.pocket3d;
+  }
+
+  /** 3D 背景 / 顶灯 / 木框 / 库边：只跟画布 CSS 尺寸有关，尺寸不变就不重建。 */
+  function screenGradients(w, h) {
+    const key = `${w}x${h}`;
+    if (gradCache.screenKey === key && gradCache.screen) return gradCache.screen;
+    ensureGradientContext();
+    const bg = ctx.createRadialGradient(w * 0.5, h * 0.4, h * 0.1, w * 0.5, h * 0.5, h * 1.1);
+    bg.addColorStop(0, '#16222f');
+    bg.addColorStop(0.55, '#0d1520');
+    bg.addColorStop(1, '#070b10');
+
+    const lamp = ctx.createRadialGradient(w * 0.5, h * 0.35, 20, w * 0.5, h * 0.35, w * 0.55);
+    lamp.addColorStop(0, 'rgba(255, 240, 215, 0.08)');
+    lamp.addColorStop(1, 'rgba(0, 0, 0, 0)');
+
+    const wood = ctx.createLinearGradient(0, 0, w, h);
+    wood.addColorStop(0, '#533118');
+    wood.addColorStop(0.5, '#3d2210');
+    wood.addColorStop(1, '#2a160a');
+
+    const cush = ctx.createLinearGradient(0, 0, 0, h);
+    cush.addColorStop(0, '#1a3824');
+    cush.addColorStop(0.5, '#122b1c');
+    cush.addColorStop(1, '#0e2015');
+
+    gradCache.screen = { bg, lamp, wood, cush };
+    gradCache.screenKey = key;
+    return gradCache.screen;
+  }
+
+  /**
+   * 台呢顶光。圆心来自 project()，运镜时逐帧都在变，没法折成单位空间
+   * （内圈圆心比外圈高 0.05*pCenter.y，比例随相机变化），所以按投影结果缓存：
+   * 镜头静止时逐帧命中同一个 key，过渡期照旧重建——不为了省 CPU 去改画面。
+   */
+  function feltGradient(cx, cy, r) {
+    const key = `${cx},${cy},${r}`;
+    if (gradCache.feltKey === key && gradCache.felt) return gradCache.felt;
+    ensureGradientContext();
+    const g = ctx.createRadialGradient(cx, cy * 0.95, r * 0.05, cx, cy, r);
+    g.addColorStop(0, '#157a49');
+    g.addColorStop(0.55, '#0f5c37');
+    g.addColorStop(1, '#083620');
+    gradCache.felt = g;
+    gradCache.feltKey = key;
+    return g;
+  }
+
+  /** 球杆四段：单位空间横轴 [-0.5, 0.5]，填充时按杆宽缩放。 */
+  function cueGradients() {
+    ensureGradientContext();
+    if (gradCache.cue) return gradCache.cue;
+    const shaft = ctx.createLinearGradient(-0.5, 0, 0.5, 0);
+    shaft.addColorStop(0, '#854d0e');
+    shaft.addColorStop(0.18, '#d97706');
+    shaft.addColorStop(0.45, '#fef3c7');
+    shaft.addColorStop(0.72, '#fde68a');
+    shaft.addColorStop(1, '#92400e');
+
+    const wrap = ctx.createLinearGradient(-0.5, 0, 0.5, 0);
+    wrap.addColorStop(0, '#0f172a');
+    wrap.addColorStop(0.25, '#1e293b');
+    wrap.addColorStop(0.5, '#334155');
+    wrap.addColorStop(0.75, '#1e293b');
+    wrap.addColorStop(1, '#020617');
+
+    const ferrule = ctx.createLinearGradient(-0.5, 0, 0.5, 0);
+    ferrule.addColorStop(0, '#94a3b8');
+    ferrule.addColorStop(0.3, '#ffffff');
+    ferrule.addColorStop(0.7, '#f8fafc');
+    ferrule.addColorStop(1, '#64748b');
+
+    const tip = ctx.createLinearGradient(-0.5, 0, 0.5, 0);
+    tip.addColorStop(0, '#0369a1');
+    tip.addColorStop(0.35, '#38bdf8');
+    tip.addColorStop(0.75, '#0ea5e9');
+    tip.addColorStop(1, '#0c4a6e');
+
+    gradCache.cue = { shaft, wrap, ferrule, tip };
+    return gradCache.cue;
+  }
+
+  /**
+   * 用单位横轴渐变填当前路径：把 [-0.5, 0.5] 铺到 tipX ± width/2。
+   * 路径在建立时已落到设备坐标，变换只作用于填充用的渐变。
+   */
+  function fillCueGradient(g, tipX, width) {
+    ctx.save();
+    ctx.translate(tipX, 0);
+    ctx.scale(width, 1);
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.restore();
+  }
+
+  /**
+   * 3D 台面里那些只跟台面尺寸有关的几何（多边形 / 标记点）。
+   * 原来每帧现造 4 个边板 + 4 条木框 + 4 条库边 + 28 个瞄点，换台才需要重算。
+   */
+  function tableGeometry() {
+    if (gradCache.geomTable === table && gradCache.geom) return gradCache.geom;
+    const L = table.length;
+    const W = table.width;
+    const Mc = FRAME_MARGIN * 0.42;
+    const Mw = FRAME_MARGIN;
+
+    const apronFaces = [
+      [[-Mw, -Mw, 0], [L + Mw, -Mw, 0], [L + Mw, -Mw, -0.085], [-Mw, -Mw, -0.085]],
+      [[L + Mw, -Mw, 0], [L + Mw, W + Mw, 0], [L + Mw, W + Mw, -0.085], [L + Mw, -Mw, -0.085]],
+      [[L + Mw, W + Mw, 0], [-Mw, W + Mw, 0], [-Mw, W + Mw, -0.085], [L + Mw, W + Mw, -0.085]],
+      [[-Mw, W + Mw, 0], [-Mw, -Mw, 0], [-Mw, -Mw, -0.085], [-Mw, W + Mw, -0.085]],
+    ].map((face) => face.map(([x, y, z]) => ({ x, y, z })));
+
+    const woodRails = [
+      [{ x: -Mw, y: -Mw }, { x: L + Mw, y: -Mw }, { x: L + Mc, y: -Mc }, { x: -Mc, y: -Mc }],
+      [{ x: L + Mc, y: -Mc }, { x: L + Mw, y: -Mw }, { x: L + Mw, y: W + Mw }, { x: L + Mc, y: W + Mc }],
+      [{ x: -Mc, y: W + Mc }, { x: L + Mc, y: W + Mc }, { x: L + Mw, y: W + Mw }, { x: -Mw, y: W + Mw }],
+      [{ x: -Mw, y: -Mw }, { x: -Mc, y: -Mc }, { x: -Mc, y: W + Mc }, { x: -Mw, y: W + Mw }],
+    ];
+
+    const cushionBands = [
+      [{ x: -Mc, y: -Mc }, { x: L + Mc, y: -Mc }, { x: L, y: 0 }, { x: 0, y: 0 }],
+      [{ x: L + Mc, y: -Mc }, { x: L + Mc, y: W + Mc }, { x: L, y: W }, { x: L, y: 0 }],
+      [{ x: 0, y: W }, { x: L, y: W }, { x: L + Mc, y: W + Mc }, { x: -Mc, y: W + Mc }],
+      [{ x: -Mc, y: -Mc }, { x: 0, y: 0 }, { x: 0, y: W }, { x: -Mc, y: W + Mc }],
+    ];
+
+    const feltPoly = [
+      { x: 0, y: 0 },
+      { x: L, y: 0 },
+      { x: L, y: W },
+      { x: 0, y: W },
+    ];
+
+    const spots = [];
+    for (let i = 1; i < 8; i++) {
+      const x = (L * i) / 8;
+      spots.push({ x, y: W + Mw * 0.5 });
+      spots.push({ x, y: -Mw * 0.5 });
+    }
+    for (let i = 1; i < 4; i++) {
+      const y = (W * i) / 4;
+      spots.push({ x: -Mw * 0.5, y });
+      spots.push({ x: L + Mw * 0.5, y });
+    }
+
+    gradCache.geom = { apronFaces, woodRails, cushionBands, feltPoly, spots };
+    gradCache.geomTable = table;
+    return gradCache.geom;
+  }
+
   // 视角相机模型：t = 0 为第三人称俯视，t = 1 为第一人称趴杆瞄准视角
   const camera = {
     t: 0,
@@ -421,6 +687,7 @@ export function createRenderer({ canvas, table: initialTable }) {
 
     offset = { x: FRAME_MARGIN * scale, y: FRAME_MARGIN * scale };
     tableCache = null; // 缩放变了，缓存失效
+    resetGradients(); // 尺寸口径（含 DPR）变了，渐变一律重建
     return { w, h, scale };
   }
 
@@ -628,54 +895,33 @@ export function createRenderer({ canvas, table: initialTable }) {
     const W = table.width;
     const Mc = FRAME_MARGIN * 0.42;
     const Mw = FRAME_MARGIN;
+    const geom = tableGeometry();
+    const screen = screenGradients(w, h);
 
     // 1. 球馆氛围背景：柔和顶灯与深暗夜色聚光（平滑淡入，过渡期无跳变）
     const bgAlpha = Math.min(1, Math.max(0, (camera.t - 0.02) / 0.35));
     if (bgAlpha > 0) {
       ctx.save();
       ctx.globalAlpha = bgAlpha;
-      const bgGrad = ctx.createRadialGradient(w * 0.5, h * 0.4, h * 0.1, w * 0.5, h * 0.5, h * 1.1);
-      bgGrad.addColorStop(0, '#16222f');
-      bgGrad.addColorStop(0.55, '#0d1520');
-      bgGrad.addColorStop(1, '#070b10');
-      ctx.fillStyle = bgGrad;
+      ctx.fillStyle = screen.bg;
       ctx.fillRect(0, 0, w, h);
 
       // 台面顶部温润灯光漫射
-      const lamp = ctx.createRadialGradient(w * 0.5, h * 0.35, 20, w * 0.5, h * 0.35, w * 0.55);
-      lamp.addColorStop(0, 'rgba(255, 240, 215, 0.08)');
-      lamp.addColorStop(1, 'rgba(0, 0, 0, 0)');
-      ctx.fillStyle = lamp;
+      ctx.fillStyle = screen.lamp;
       ctx.fillRect(0, 0, w, h);
       ctx.restore();
     }
 
     // 桌身侧板补出真实厚度，让低机位下的桌沿不再像一张平面贴图。
-    const apronZ = -0.085;
-    const apronFaces = [
-      [[-Mw, -Mw, 0], [L + Mw, -Mw, 0], [L + Mw, -Mw, apronZ], [-Mw, -Mw, apronZ]],
-      [[L + Mw, -Mw, 0], [L + Mw, W + Mw, 0], [L + Mw, W + Mw, apronZ], [L + Mw, -Mw, apronZ]],
-      [[L + Mw, W + Mw, 0], [-Mw, W + Mw, 0], [-Mw, W + Mw, apronZ], [L + Mw, W + Mw, apronZ]],
-      [[-Mw, W + Mw, 0], [-Mw, -Mw, 0], [-Mw, -Mw, apronZ], [-Mw, W + Mw, apronZ]],
-    ];
-    for (const face of apronFaces) {
-      drawProjectedPolygon(face.map(([x, y, z]) => ({ x, y, z })), '#35200f', 'rgba(0,0,0,0.65)', 1);
+    for (const face of geom.apronFaces) {
+      drawProjectedPolygon(face, '#35200f', 'rgba(0,0,0,0.65)', 1);
     }
 
     // 2. 木框（四条外边，使用与 2D 完全统一的实木配色）
-    const woodGrad = ctx.createLinearGradient(0, 0, w, h);
-    woodGrad.addColorStop(0, '#533118');
-    woodGrad.addColorStop(0.5, '#3d2210');
-    woodGrad.addColorStop(1, '#2a160a');
+    const woodGrad = screen.wood;
 
     // 下、右、上、左 4 条木质长边
-    const woodRails = [
-      [{ x: -Mw, y: -Mw }, { x: L + Mw, y: -Mw }, { x: L + Mc, y: -Mc }, { x: -Mc, y: -Mc }],
-      [{ x: L + Mc, y: -Mc }, { x: L + Mw, y: -Mw }, { x: L + Mw, y: W + Mw }, { x: L + Mc, y: W + Mc }],
-      [{ x: -Mc, y: W + Mc }, { x: L + Mc, y: W + Mc }, { x: L + Mw, y: W + Mw }, { x: -Mw, y: W + Mw }],
-      [{ x: -Mw, y: -Mw }, { x: -Mc, y: -Mc }, { x: -Mc, y: W + Mc }, { x: -Mw, y: W + Mw }],
-    ];
-    for (const r of woodRails) {
+    for (const r of geom.woodRails) {
       drawProjectedPolygon(r, woodGrad, 'rgba(0,0,0,0.5)', 1);
     }
 
@@ -698,19 +944,8 @@ export function createRenderer({ canvas, table: initialTable }) {
     }
 
     // 3. 瞄点（菱形 / 珍珠贝母标志点）
-    const spots = [];
-    for (let i = 1; i < 8; i++) {
-      const x = (L * i) / 8;
-      spots.push({ x, y: W + Mw * 0.5 });
-      spots.push({ x, y: -Mw * 0.5 });
-    }
-    for (let i = 1; i < 4; i++) {
-      const y = (W * i) / 4;
-      spots.push({ x: -Mw * 0.5, y });
-      spots.push({ x: L + Mw * 0.5, y });
-    }
     ctx.fillStyle = 'rgba(255, 236, 205, 0.75)';
-    for (const s of spots) {
+    for (const s of geom.spots) {
       const p = project(s.x, s.y, 0.005);
       if (p.behind) continue;
       const sz = Math.max(1.8, 3.2 * (p.scale / scale));
@@ -724,45 +959,28 @@ export function createRenderer({ canvas, table: initialTable }) {
     }
 
     // 4. 库边缓冲带（四条内边坡度）
-    const cushGrad = ctx.createLinearGradient(0, 0, 0, h);
-    cushGrad.addColorStop(0, '#1a3824');
-    cushGrad.addColorStop(0.5, '#122b1c');
-    cushGrad.addColorStop(1, '#0e2015');
-
-    const cushionBands = [
-      [{ x: -Mc, y: -Mc }, { x: L + Mc, y: -Mc }, { x: L, y: 0 }, { x: 0, y: 0 }],
-      [{ x: L + Mc, y: -Mc }, { x: L + Mc, y: W + Mc }, { x: L, y: W }, { x: L, y: 0 }],
-      [{ x: 0, y: W }, { x: L, y: W }, { x: L + Mc, y: W + Mc }, { x: -Mc, y: W + Mc }],
-      [{ x: -Mc, y: -Mc }, { x: 0, y: 0 }, { x: 0, y: W }, { x: -Mc, y: W + Mc }],
-    ];
-    for (const c of cushionBands) {
+    const cushGrad = screen.cush;
+    for (const c of geom.cushionBands) {
       drawProjectedPolygon(c, cushGrad, 'rgba(0,0,0,0.6)', 1.2);
     }
 
     // 5. 台呢台面
-    const feltPoly = [
-      { x: 0, y: 0 },
-      { x: L, y: 0 },
-      { x: L, y: W },
-      { x: 0, y: W },
-    ];
+    const feltPoly = geom.feltPoly;
     const pCenter = project(L * 0.5, W * 0.5, 0);
     const feltR = Math.max(w, h) * 0.75;
-    const feltGrad = ctx.createRadialGradient(
-      pCenter.x, pCenter.y * 0.95, feltR * 0.05,
-      pCenter.x, pCenter.y, feltR
-    );
-    feltGrad.addColorStop(0, '#157a49');
-    feltGrad.addColorStop(0.55, '#0f5c37');
-    feltGrad.addColorStop(1, '#083620');
+    const feltGrad = feltGradient(pCenter.x, pCenter.y, feltR);
     drawProjectedPolygon(feltPoly, feltGrad, 'rgba(0,0,0,0.4)', 1);
 
     // 极细的定向织纤维固定在台呢上，近景才看得出布料而非纯色平面。
     ctx.save();
-    const feltCorners = feltPoly.map((point) => project(point.x, point.y, 0));
+    // 不再 map 出一个四元素数组：边投影边建路径
     ctx.beginPath();
-    ctx.moveTo(feltCorners[0].x, feltCorners[0].y);
-    for (let i = 1; i < feltCorners.length; i++) ctx.lineTo(feltCorners[i].x, feltCorners[i].y);
+    const fc0 = project(feltPoly[0].x, feltPoly[0].y, 0);
+    ctx.moveTo(fc0.x, fc0.y);
+    for (let i = 1; i < feltPoly.length; i++) {
+      const p = project(feltPoly[i].x, feltPoly[i].y, 0);
+      ctx.lineTo(p.x, p.y);
+    }
     ctx.closePath();
     ctx.clip();
     for (const fiber of FELT_FIBERS) {
@@ -816,14 +1034,10 @@ export function createRenderer({ canvas, table: initialTable }) {
       ctx.fillStyle = '#211208';
       ctx.fill();
 
-      const g = ctx.createRadialGradient(proj.x, proj.y, r * 0.1, proj.x, proj.y, r * 1.05);
-      g.addColorStop(0, '#000000');
-      g.addColorStop(0.75, '#04070a');
-      g.addColorStop(1, '#111922');
+      const g = pocket3DGradient();
       ctx.beginPath();
       ctx.arc(proj.x, proj.y, r * 1.02, 0, Math.PI * 2);
-      ctx.fillStyle = g;
-      ctx.fill();
+      fillUnitGradient(g, proj.x, proj.y, r);
 
       ctx.beginPath();
       ctx.arc(proj.x, proj.y, r * 1.1, Math.PI * 1.05, Math.PI * 1.95);
@@ -889,13 +1103,9 @@ export function createRenderer({ canvas, table: initialTable }) {
     ctx.clip();
     ctx.translate(cx, cy);
     ctx.rotate(angle);
-    const bandH = r * 1.34;
-    const g = ctx.createLinearGradient(0, -bandH / 2, 0, bandH / 2);
-    g.addColorStop(0, shade(color, -0.12));
-    g.addColorStop(0.5, color);
-    g.addColorStop(1, shade(color, -0.22));
-    ctx.fillStyle = g;
-    ctx.fillRect(-r * 1.1, -bandH / 2, r * 2.2, bandH);
+    ctx.scale(r, r); // 单位空间色带：y ∈ [-0.67, 0.67]
+    ctx.fillStyle = stripeGradient(color);
+    ctx.fillRect(-1.1, -0.67, 2.2, 1.34);
     ctx.restore();
   }
 
@@ -919,13 +1129,9 @@ export function createRenderer({ canvas, table: initialTable }) {
       ctx.save();
       ctx.translate(projShadow.x + r * 0.14, projShadow.y + r * 0.24 + lift);
       ctx.scale(r * 0.96, r * 0.72);
-      const shadow = ctx.createRadialGradient(0, 0, 0.08, 0, 0, 1);
-      shadow.addColorStop(0, 'rgba(0,0,0,0.38)');
-      shadow.addColorStop(0.62, 'rgba(0,0,0,0.20)');
-      shadow.addColorStop(1, 'rgba(0,0,0,0)');
       ctx.beginPath();
       ctx.arc(0, 0, 1, 0, Math.PI * 2);
-      ctx.fillStyle = shadow;
+      ctx.fillStyle = ballShadowGradient();
       ctx.fill();
       ctx.restore();
     }
@@ -947,19 +1153,10 @@ export function createRenderer({ canvas, table: initialTable }) {
       ctx.fill();
     }
 
-    // 球体明暗：左上亮、右下暗
-    const g = ctx.createRadialGradient(
-      c.x - r * 0.38, cy - r * 0.42, r * 0.05,
-      c.x - r * 0.1, cy - r * 0.1, r * 1.35
-    );
-    g.addColorStop(0, 'rgba(255,255,255,0.55)');
-    g.addColorStop(0.32, 'rgba(255,255,255,0.10)');
-    g.addColorStop(0.62, 'rgba(0,0,0,0.02)');
-    g.addColorStop(1, 'rgba(0,0,0,0.55)');
+    // 球体明暗：左上亮、右下暗（单位空间渐变，按球心/半径套变换）
     ctx.beginPath();
     ctx.arc(c.x, cy, r, 0, Math.PI * 2);
-    ctx.fillStyle = g;
-    ctx.fill();
+    fillUnitGradient(ballBodyGradient(), c.x, cy, r);
 
     // 号码盘
     if (b.number > 0 && r > 6 && Math.cos(rollAngle) > -0.02) {
@@ -1047,12 +1244,7 @@ export function createRenderer({ canvas, table: initialTable }) {
     ctx.fill();
 
     // 1. 前截枫木杆身
-    const shaftGrad = ctx.createLinearGradient(tipX - buttW * 0.5, 0, tipX + buttW * 0.5, 0);
-    shaftGrad.addColorStop(0, '#854d0e');
-    shaftGrad.addColorStop(0.18, '#d97706');
-    shaftGrad.addColorStop(0.45, '#fef3c7');
-    shaftGrad.addColorStop(0.72, '#fde68a');
-    shaftGrad.addColorStop(1, '#92400e');
+    const cue = cueGradients();
 
     ctx.beginPath();
     ctx.moveTo(tipX - tipW * 0.5, tipY);
@@ -1060,8 +1252,7 @@ export function createRenderer({ canvas, table: initialTable }) {
     ctx.lineTo(buttX + buttW * 0.5, buttY);
     ctx.lineTo(buttX - buttW * 0.5, buttY);
     ctx.closePath();
-    ctx.fillStyle = shaftGrad;
-    ctx.fill();
+    fillCueGradient(cue.shaft, tipX, buttW);
 
     // 杆身高光反光线
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.32)';
@@ -1074,12 +1265,6 @@ export function createRenderer({ canvas, table: initialTable }) {
     // 2. 握把后截 (Dark Irish Linen Wrap)
     const wrapStartY = tipY + (buttY - tipY) * 0.55;
     const wrapW = tipW + (buttW - tipW) * 0.55;
-    const wrapGrad = ctx.createLinearGradient(buttX - buttW * 0.5, 0, buttX + buttW * 0.5, 0);
-    wrapGrad.addColorStop(0, '#0f172a');
-    wrapGrad.addColorStop(0.25, '#1e293b');
-    wrapGrad.addColorStop(0.5, '#334155');
-    wrapGrad.addColorStop(0.75, '#1e293b');
-    wrapGrad.addColorStop(1, '#020617');
 
     ctx.beginPath();
     ctx.moveTo(tipX - wrapW * 0.5, wrapStartY);
@@ -1087,8 +1272,7 @@ export function createRenderer({ canvas, table: initialTable }) {
     ctx.lineTo(buttX + buttW * 0.5, buttY);
     ctx.lineTo(buttX - buttW * 0.5, buttY);
     ctx.closePath();
-    ctx.fillStyle = wrapGrad;
-    ctx.fill();
+    fillCueGradient(cue.wrap, tipX, buttW);
 
     // 握把防滑细密纹路
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.10)';
@@ -1103,11 +1287,6 @@ export function createRenderer({ canvas, table: initialTable }) {
 
     // 3. 先角 (Ferrule，象牙白)
     const ferruleH = Math.max(12, cueR * 0.36);
-    const ferruleGrad = ctx.createLinearGradient(tipX - tipW * 0.5, 0, tipX + tipW * 0.5, 0);
-    ferruleGrad.addColorStop(0, '#94a3b8');
-    ferruleGrad.addColorStop(0.3, '#ffffff');
-    ferruleGrad.addColorStop(0.7, '#f8fafc');
-    ferruleGrad.addColorStop(1, '#64748b');
 
     ctx.beginPath();
     ctx.moveTo(tipX - tipW * 0.5, tipY);
@@ -1115,23 +1294,15 @@ export function createRenderer({ canvas, table: initialTable }) {
     ctx.lineTo(tipX + tipW * 0.54, tipY + ferruleH);
     ctx.lineTo(tipX - tipW * 0.54, tipY + ferruleH);
     ctx.closePath();
-    ctx.fillStyle = ferruleGrad;
-    ctx.fill();
+    fillCueGradient(cue.ferrule, tipX, tipW);
 
     // 4. 巧克皮头 (Leather Tip，蓝色巧克粉)
     const tipH = Math.max(6, cueR * 0.18);
-    const tipGrad = ctx.createLinearGradient(tipX - tipW * 0.5, 0, tipX + tipW * 0.5, 0);
-    tipGrad.addColorStop(0, '#0369a1');
-    tipGrad.addColorStop(0.35, '#38bdf8');
-    tipGrad.addColorStop(0.75, '#0ea5e9');
-    tipGrad.addColorStop(1, '#0c4a6e');
-
     ctx.beginPath();
     ctx.moveTo(tipX - tipW * 0.48, tipY);
     ctx.bezierCurveTo(tipX - tipW * 0.48, tipY - tipH, tipX + tipW * 0.48, tipY - tipH, tipX + tipW * 0.48, tipY);
     ctx.closePath();
-    ctx.fillStyle = tipGrad;
-    ctx.fill();
+    fillCueGradient(cue.tip, tipX, tipW);
 
     ctx.restore();
   }
@@ -1230,6 +1401,7 @@ export function createRenderer({ canvas, table: initialTable }) {
     setTable(next) {
       table = next;
       tableCache = null; // 换台，缓存失效
+      resetGradients(); // 袋口半径、台面几何都变了
     },
     get table() {
       return table;
