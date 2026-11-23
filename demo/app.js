@@ -502,37 +502,138 @@ function syncCamera(t) {
 
 // 第一人称 HUD 的两行字与鬼球坐标在 state.js 的 getAimHUDInfo（纯计算，能单测）。
 
+// getAimHUDInfo 是纯函数，但它每帧都要重算的话：getPowerTier 造一个七字段对象、
+// 两次 toFixed、两段模板串，无解那条路还要 balls.find + 一个 Set。它的输入只有
+// 「模式 / 解 / 力度 / 球位」——这些都没变，结果必然一个字节都不差，所以按输入
+// 签名缓存。签名用定长 Float64Array 逐项严格比较，不做哈希：浮点哈希会碰撞，
+// 而碰撞的代价是 HUD 上留着一句过期的文案。解 / best / 袋口这些对象每次求解都是新的，
+// 摊成字段没意义，所以另存一份引用数组，按身份比较。
+const HUD_SIG_CAP = 512;
+const hudSigCur = new Float64Array(HUD_SIG_CAP);
+const hudSigPrev = new Float64Array(HUD_SIG_CAP);
+const hudRefsCur = new Array(8);
+const hudRefsPrev = new Array(8);
+let hudSigLen = -1;
+let hudRefsLen = -1;
+let hudCache = null;
+
+/**
+ * 这一帧 HUD 的输入变了吗？变了就把本次签名记为「上一份」。
+ * 球局里没有解时不缓存：这时目标球由分组 / 轮次 / 斯诺克阶段一起决定，
+ * 字段太多、又都是手打瞄准的冷路径，每帧重算也不心疼。
+ */
+function hudInputsChanged() {
+  const nums = hudSigCur;
+  const refs = hudRefsCur;
+  let n = 0;
+  let r = 0;
+  const inGame = state.mode === 'game';
+  const sol = inGame ? state.gSolution : state.solution;
+  const best = sol && sol.found ? sol.best : null;
+
+  nums[n++] = inGame ? 1 : 0;
+  nums[n++] = state.manual.speed;
+  refs[r++] = sol || null;
+  refs[r++] = best || null;
+
+  if (best) {
+    nums[n++] = best.targetNumber;
+    nums[n++] = best.toleranceDeg;
+    nums[n++] = best.ghost ? best.ghost.x : 0;
+    nums[n++] = best.ghost ? best.ghost.y : 0;
+    refs[r++] = best.pocketId ?? null;
+  } else if (inGame) {
+    return true;
+  } else {
+    // 无解：HUD 报的是「离母球最近的那颗」，任何一颗球挪动都可能换目标，
+    // 所以整张台面的号码 / 坐标 / 是否落袋都要进签名。
+    const balls = state.balls;
+    if (balls.length * 4 + 2 > HUD_SIG_CAP) return true;
+    nums[n++] = balls.length;
+    for (const b of balls) {
+      nums[n++] = b.number;
+      nums[n++] = b.x;
+      nums[n++] = b.y;
+      nums[n++] = b.pocketed ? 1 : 0;
+    }
+  }
+
+  let changed = n !== hudSigLen || r !== hudRefsLen;
+  if (!changed) {
+    for (let i = 0; i < n; i += 1) {
+      if (nums[i] !== hudSigPrev[i]) {
+        changed = true;
+        break;
+      }
+    }
+  }
+  if (!changed) {
+    for (let i = 0; i < r; i += 1) {
+      if (refs[i] !== hudRefsPrev[i]) {
+        changed = true;
+        break;
+      }
+    }
+  }
+  if (changed) {
+    hudSigPrev.set(nums.subarray(0, n));
+    for (let i = 0; i < r; i += 1) hudRefsPrev[i] = refs[i];
+    hudSigLen = n;
+    hudRefsLen = r;
+  }
+  return changed;
+}
+
+function aimHUDInfo() {
+  if (hudInputsChanged() || !hudCache) hudCache = getAimHUDInfo(state);
+  return hudCache;
+}
+
 // ---------------------------------------------------------------- 绘制
 
 function render() {
+  // getCamera() 每次返回的都是 {...camera} 克隆，一帧取三次等于白拷两次。
+  // 取一次往下传就行：syncCamera 只改 t/aimAngle/cueBall，t 传进去还是同一个值。
+  const camT = view.getCamera().t;
   view.clear();
-  syncCamera(view.getCamera().t);
+  syncCamera(camT);
   view.drawTable();
 
   if (state.mode === 'practice') {
-    drawSolution();
-    drawBalls(state.balls);
+    drawSolution(camT);
+    drawBalls(state.balls, camT);
   } else {
-    drawGameOverlay();
-    drawBalls(state.game?.balls ?? []);
+    drawGameOverlay(camT);
+    drawBalls(state.game?.balls ?? [], camT);
   }
 
   // 渲染第一人称球杆与战术瞄准准星 HUD
-  if (view.getCamera().t > 0.01) {
+  if (camT > 0.01) {
     view.drawCueStick(state.manual.strokeOffset || 0);
-    view.draw1stPersonHUD(getAimHUDInfo(state));
+    view.draw1stPersonHUD(aimHUDInfo());
   }
 }
 
-function drawBalls(balls) {
-  const visible = balls.filter((b) => !b.pocketed);
-  if (view.getCamera().t > 0.01) {
-    // 3D 深度排序：远处的球先画，近处的球后画（遮挡在前面）
-    visible.sort((a, b) => {
-      const pa = view.project(a.x, a.y, table.ballRadius);
-      const pb = view.project(b.x, b.y, table.ballRadius);
-      return pb.depth - pa.depth;
-    });
+// 每帧复用的可见球缓冲：原先每帧 filter 都要新建一个数组、丢掉上一个。
+const visibleBalls = [];
+// 深度槽位。用 Symbol 当键：JSON.stringify / Object.keys / {...ball} 都看不见它，
+// 球对象照旧能被存档和比对，只是多了一个每帧会被覆盖的临时值。
+const BALL_DEPTH = Symbol('ballDepth');
+
+function drawBalls(balls, camT) {
+  const visible = visibleBalls;
+  visible.length = 0;
+  for (const b of balls) {
+    if (!b.pocketed) visible.push(b);
+  }
+  if (camT > 0.01) {
+    // 3D 深度排序：远处的球先画，近处的球后画（遮挡在前面）。
+    // 排序前先把 depth 算一遍：比较器里再 project 的话，16 颗球要投约 128 次，
+    // 实际只需要 16 次。sort 是稳定排序，depth 相同仍按原顺序，绘制顺序不变。
+    for (const b of visible) {
+      b[BALL_DEPTH] = view.project(b.x, b.y, table.ballRadius).depth;
+    }
+    visible.sort((a, b) => b[BALL_DEPTH] - a[BALL_DEPTH]);
   }
   for (const b of visible) {
     view.drawBall(b);
@@ -670,7 +771,7 @@ function drawAimGuides(best, cue, target, pocket, camT) {
   ctx.stroke();
 }
 
-function drawSolution() {
+function drawSolution(camT) {
   const sol = state.solution;
   if (!sol || !sol.found || state.animating) return;
   const best = sol.best;
@@ -683,7 +784,6 @@ function drawSolution() {
   const ctx = view.ctx;
   const cuePx = view.project(cue.x, cue.y, table.ballRadius);
   const ghostPx = view.project(best.ghost.x, best.ghost.y, table.ballRadius);
-  const camT = view.getCamera().t;
 
   if ($('showGhost').checked) {
     drawAimGuides(best, cue, target, pocket, camT);
@@ -730,11 +830,10 @@ function drawSolution() {
   drawPositionGuide(best);
 }
 
-function drawGameOverlay() {
+function drawGameOverlay(camT) {
   const g = state.game;
   if (!g) return;
   const ctx = view.ctx;
-  const camT = view.getCamera().t;
 
   // 持球：高亮可摆放区域
   if (g.ballInHand && !state.animating) {
@@ -777,13 +876,53 @@ function drawGameOverlay() {
 
 let drag = null;
 
+// 画布矩形缓存。getBoundingClientRect() 会强制一次布局同步，而 pointermove 在高刷屏
+// 上每秒能来一两百次，量到的永远是同一个盒子。矩形只在「布局 / 滚动 / 缩放」变化时
+// 才会变，所以用事件失效、按需重量，而不是每次重新量：
+//   - 窗口 resize / 屏幕旋转 / visualViewport 的 resize+scroll（页面缩放、手机地址栏收起）
+//   - 任意滚动容器的滚动（scroll 不冒泡，用捕获阶段收；rect 是视口坐标，页一滚就变）
+//   - canvas 与根元素的尺寸变化（ResizeObserver：侧栏折展、字体回流等非 resize 的布局变化）
+// 另外每次 pointerdown 强制重量一次：一次手势只量一次，拖拽起点用的仍是真坐标。
+let canvasRectCache = null;
+let canvasRectWatched = false;
+
+function invalidateCanvasRect() {
+  canvasRectCache = null;
+}
+
+function canvasRect() {
+  if (!canvasRectCache) canvasRectCache = canvas.getBoundingClientRect();
+  return canvasRectCache;
+}
+
+function watchCanvasRect() {
+  if (canvasRectWatched) return;
+  canvasRectWatched = true;
+  window.addEventListener('resize', invalidateCanvasRect);
+  window.addEventListener('orientationchange', invalidateCanvasRect);
+  window.addEventListener('scroll', invalidateCanvasRect, true);
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', invalidateCanvasRect);
+    window.visualViewport.addEventListener('scroll', invalidateCanvasRect);
+  }
+  if (typeof ResizeObserver === 'function') {
+    const observer = new ResizeObserver(invalidateCanvasRect);
+    observer.observe(canvas);
+    observer.observe(document.documentElement);
+  }
+}
+
+watchCanvasRect();
+
 function pointerPos(ev) {
-  const rect = canvas.getBoundingClientRect();
+  const rect = canvasRect();
   return { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
 }
 
 canvas.addEventListener('pointerdown', (ev) => {
   if (state.animating) return;
+  // 手势起点重量一次：中间万一是 ResizeObserver 还没回调到的布局变化，落点也不会错。
+  invalidateCanvasRect();
   const p = pointerPos(ev);
   const w = view.toWorld(p.x, p.y);
 
