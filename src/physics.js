@@ -451,7 +451,7 @@ export function ballTOI(a, b, horizon) {
  * 无重入风险：findFirstEvent 只被 stepWorld 调用，返回值在同一个子步内就地消费完，
  * 消费过程中不会再调一次 findFirstEvent；执行模型是单线程、那一段里没有回调。
  */
-const EVENT_SCRATCH = { moving: [], t: 0, kind: '', ball: null, cushion: null, a: null, b: null };
+const EVENT_SCRATCH = { t: 0, kind: '', ball: null, cushion: null, a: null, b: null };
 
 /**
  * 库边剪枝的命中计数（仅测试用，对应 test/physics-event-buffer.test.js 的触发断言）。
@@ -483,83 +483,141 @@ export function resetPruneHitCount() {
  * 命中时把结果写进调用方传入的 buffer 并返回它（同一对象会被下一次子步覆盖，
  * 只在同一个子步内有效）；没有事件返回 null。
  *
+ * 结构：只扫一遍球。对每颗在动的球当场做「近壁剪枝 → 库边 TOI」和「球球粗筛 → 球球 TOI」，
+ * 不再先把运动球抄进一个数组、再分两轮扫。这样每次调用少一次 O(n) 遍历、少一次数组写入
+ * （对象写入带写屏障）、也少一次尾部截断；而三维代码里每一分固定成本都要乘以每杆六万余次调用。
+ *
+ * 同 t 的优先级靠 bestIsCushion 记账，而不是靠「先扫库边」的遍历顺序：
+ * 原实现是「先把所有库边扫完、再扫球球」，等价于「同 t 时库边优先」；现在两条路交错，
+ * 就必须显式表达这条规则（t 相等时库边替换球球、球球不替换库边，同类之间先到先得）。
+ *
  * @param {object} world
  * @param {number} horizon
- * @param {{moving:Array, t:number, kind:string, ball:any, cushion:any, a:any, b:any}} [buffer]
+ * @param {{t:number, kind:string, ball:any, cushion:any, a:any, b:any}} [buffer]
  */
 export function findFirstEvent(world, horizon, buffer = EVENT_SCRATCH) {
+  const table = world.table;
   const balls = world.balls;
-  const cushions = world.table.cushions;
-  const moving = buffer.moving;
-  let count = 0;
+  const n = balls.length;
+  const cushions = table.cushions;
+  const cushionCount = cushions.length;
+  const tableLength = table.length;
+  const tableWidth = table.width;
 
-  // 每子步都要跑一遍，是全流程最热的地方（CPU profile 里占 15%~20%）。
-  // 旧写法对每一对球都算一次 TOI：15 颗球就是 105 对，而大多数时刻只有一颗在动。
-  // 这里先挑出「在动」的那几颗，只让运动球去和别的球求交——静止球之间永远不会相撞。
-  // 代价是一次 O(n) 的筛选，换掉 O(n²) 的求交。
-  for (let i = 0; i < balls.length; i++) {
-    const b = balls[i];
-    if (!b.pocketed && (b.vx !== 0 || b.vy !== 0)) moving[count++] = b;
-  }
-  if (count === 0) return null;
-
-  let hasBest = false;
-  let bestT = 0;
-
-  // 库边剪枝上界：自由飞行段最大的加速度来自打滑摩擦（μg，滚动段只有 0.01g），所以
+  // 位移上界：自由飞行段最大的加速度来自打滑摩擦（μg，滚动段只有 0.01g），所以
   //   |Δx| ≤ |vx|·h + ½·μg·h²，|Δy| 同理。
-  // 台面四面壁承载了全部库边（角袋与中袋的护角也是壁上的线段），于是
-  // 「球面到最近一面壁的距离 > 该方向位移上界」时这一子步内不可能碰到任何库边，
-  // 那 6 次库边 TOI 可以整段跳过。这是纯上界剪枝：跳过的前提是「确实没有库边事件」，
-  // 而原实现在这种情况下本来也只是白扫一遍后不填 best，所以结果逐位相同。
   // 1e-9 是防止浮点舍入把上界拉低到真实位移之下（只往安全方向放大）。
   const accelBound = PHYS.muSlide * PHYS.g;
   const slack = 0.5 * accelBound * horizon * horizon + 1e-9;
-  const tableLength = world.table.length;
-  const tableWidth = world.table.width;
+  const slack2 = slack + slack;
 
-  // 库边先扫：同 t 时库边优先，与原实现的比较顺序（先库边、后球球）保持一致。
-  for (let mi = 0; mi < count; mi++) {
-    const b = moving[mi];
-    const R = b.__R;
-    const dxMax = Math.abs(b.vx) * horizon + slack;
-    const dyMax = Math.abs(b.vy) * horizon + slack;
-    if (
-      b.x - R > dxMax &&
-      tableLength - R - b.x > dxMax &&
-      b.y - R > dyMax &&
-      tableWidth - R - b.y > dyMax
-    ) {
+  let hasBest = false;
+  let bestIsCushion = false;
+  let bestT = 0;
+
+  for (let i = 0; i < n; i++) {
+    const a = balls[i];
+    if (a.pocketed) continue;
+    const avx = a.vx;
+    const avy = a.vy;
+    // 静止球不参与任何求交：两个静止球永远不会相撞，静止球也不会自己去撞库。
+    if (avx === 0 && avy === 0) continue;
+
+    const R = a.__R;
+    const ax = a.x;
+    const ay = a.y;
+    const dxMax = Math.abs(avx) * horizon + slack;
+    const dyMax = Math.abs(avy) * horizon + slack;
+    // 台面四面壁承载了全部库边（角袋与中袋的护角也是壁上的线段），于是
+    // 「球面到某面壁的距离 > 该方向位移上界」时那一侧的库边这一子步不可能有事件。
+    // 轴过滤用 continue 而不是重排数组，是为了保住「先 bottom 后 top、先纵向后横向」
+    // 的原始遍历顺序（同类事件同 t 时先到先得）。
+    const nearX = !(ax - R > dxMax && tableLength - R - ax > dxMax);
+    const nearY = !(ay - R > dyMax && tableWidth - R - ay > dyMax);
+
+    if (nearX || nearY) {
+      for (let ci = 0; ci < cushionCount; ci++) {
+        const c = cushions[ci];
+        const axisX = c.axis === 'x';
+        if (axisX ? !nearX : !nearY) continue;
+        // cushionTOI 内联：算式与导出函数逐字相同，只是省掉每个子步最多 6 次调用。
+        // 导出的 cushionTOI 保留为参考实现，test/physics-event-buffer.test.js 用它复刻旧实现。
+        const p = axisX ? ax : ay;
+        const v = axisX ? avx : avy;
+        const nrm = axisX ? c.normal.x : c.normal.y;
+        const closing = -(v * nrm);
+        if (closing <= 1e-9) continue;
+        const gap = (p - c.pos) * nrm - R;
+        let t = 0;
+        if (gap > 0) {
+          t = gap / closing;
+          if (t > horizon) continue;
+        }
+        // 同 t 时库边优先：当前 best 已经是库边就跳过，是球球则让库边顶掉它。
+        if (hasBest && (t > bestT || (t === bestT && bestIsCushion))) continue;
+
+        const along = axisX ? ay + avy * t : ax + avx * t;
+        if (along < c.from - 1e-9 || along > c.to + 1e-9) continue; // 袋口缺口
+        hasBest = true;
+        bestIsCushion = true;
+        bestT = t;
+        buffer.t = t;
+        buffer.kind = 'cushion';
+        buffer.ball = a;
+        buffer.cushion = c;
+      }
+    } else {
       pruneHits++; // 仅测试可观测的整数自增，见顶部 pruneHits 的注释
-      continue; // 离四面壁都远过这一子步能走的距离
     }
-    for (let ci = 0; ci < cushions.length; ci++) {
-      const c = cushions[ci];
-      const t = cushionTOI(b, c, horizon);
-      if (t < 0) continue;
-      if (hasBest && t >= bestT) continue;
 
-      const along = c.axis === 'x' ? b.y + b.vy * t : b.x + b.vx * t;
-      if (along < c.from - 1e-9 || along > c.to + 1e-9) continue; // 袋口缺口
-      hasBest = true;
-      bestT = t;
-      buffer.t = t;
-      buffer.kind = 'cushion';
-      buffer.ball = b;
-      buffer.cushion = c;
-    }
-  }
+    // 两颗都在动时这一对会被看两遍（a→b 一次、b→a 一次），取最小值的结果不变；
+    // 换来的是不必再为「谁是第几号」做一次查表。
+    //
+    // 球球粗筛（精确上界，不改任何结果）：两球接触的必要条件是球心距 ≤ 2R，于是
+    // |dx| ≤ 2R 且 |dy| ≤ 2R 是必要条件。整个 horizon 内两球的相对位移有上界
+    //   |Δdx| ≤ (|vax|+|vbx|)·h + 2·slack，
+    // 因为每个轴上 |加速度| ≤ μ_slide·g（打滑段；滚动段只有 μ_roll·g，更小，见 advanceBall），
+    // 所以「|dx| 已经大于 2R + 该上界」时这一对在整个 horizon 内都不可能接触，
+    // 连二次方程都不用解（省掉一次开方与 4 次乘法）。静止球（vx=vy=0）不参与相对位移，
+    // 它那一侧的上界就是 0，走的是不加上界的那条分支。
+    const twoR = R + R;
+    const fourRSq = 4 * R * R;
+    // 上界只往大了算（slack 里已有 1e-9 的绝对余量，远大于这里的舍入误差），
+    // 所以「剪掉」永远发生在真的没有碰撞的那一侧。
+    const reachX = twoR + Math.abs(avx) * horizon + slack2;
+    const reachY = twoR + Math.abs(avy) * horizon + slack2;
 
-  // 两颗都在动时这一对会被看两遍（a→b 一次、b→a 一次），取最小值的结果不变；
-  // 换来的是不必再为「谁是第几号」做一次查表。
-  for (let mi = 0; mi < count; mi++) {
-    const a = moving[mi];
-    for (let j = 0; j < balls.length; j++) {
+    for (let j = 0; j < n; j++) {
       const b = balls[j];
       if (b === a || b.pocketed) continue;
-      const t = ballTOI(a, b, horizon);
-      if (t >= 0 && (!hasBest || t < bestT)) {
+      const bvx = b.vx;
+      const bvy = b.vy;
+      const dx = b.x - ax;
+      const limX = bvx === 0 ? reachX : reachX + Math.abs(bvx) * horizon;
+      if (dx > limX || dx < -limX) continue;
+      const dy = b.y - ay;
+      const limY = bvy === 0 ? reachY : reachY + Math.abs(bvy) * horizon;
+      if (dy > limY || dy < -limY) continue;
+
+      // ballTOI 内联：算式与导出函数逐字相同（4·R·R 提到了循环外，值不变）。
+      const dvx = bvx - avx;
+      const dvy = bvy - avy;
+      const A = dvx * dvx + dvy * dvy;
+      if (A < 1e-12) continue;
+      const B = 2 * (dx * dvx + dy * dvy);
+      if (B >= 0) continue; // 正在远离
+      const C = dx * dx + dy * dy - fourRSq;
+      let t = 0;
+      if (C > 0) {
+        const disc = B * B - 4 * A * C;
+        if (disc < 0) continue;
+        t = (-B - Math.sqrt(disc)) / (2 * A);
+        if (t < 0 || t > horizon) continue;
+      }
+      // 同 t 时库边优先：t 严格小于才顶掉当前 best（相等时留给已经记下的库边）。
+      if (!hasBest || t < bestT) {
         hasBest = true;
+        bestIsCushion = false;
         bestT = t;
         buffer.t = t;
         buffer.kind = 'ball';
@@ -569,8 +627,6 @@ export function findFirstEvent(world, horizon, buffer = EVENT_SCRATCH) {
     }
   }
 
-  // 清掉尾部残留的球引用，免得复用缓冲把上一局的球一直按在内存里。
-  if (moving.length > count) moving.length = count;
   return hasBest ? buffer : null;
 }
 
