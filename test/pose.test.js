@@ -35,6 +35,8 @@ import {
   applyReliability,
   noiseRatio,
   clippedByFrame,
+  hasUsableWorld,
+  missingLandmarks,
   METRIC_NOISE,
 } from '../src/pose/checks.js';
 
@@ -410,6 +412,177 @@ test('只有对应的那几项受取景影响，不受影响的项照常判', ()
   // 头部高度只看鼻和肩，脚出画与它无关
   assert.equal(byId(checks, 'head_low').status, 'good');
   assert.equal(byId(checks, 'torso_lean').status, 'good');
+});
+
+// ---------------------------------------------------------------- 关键点缺失
+// 这一组防的是「半截 world」：录像质量差或人半个身子出画时，MediaPipe 可能只
+// 给出躯干那几个点。原来的实现只判 world 非空，缺 nose 时 checkHeadLow 直接读
+// p.nose.y 会抛 TypeError，整份报告连带白屏。现在要求「缺哪个点就把依赖它的那
+// 条判 unknown」，能算的照算。
+
+/** 只保留 names 里的关键点（world 与 image 同步裁掉）。 */
+function onlyPoints(world, names) {
+  const out = {};
+  for (const [k, v] of Object.entries(world)) {
+    if (names.includes(k)) out[k] = v;
+  }
+  return out;
+}
+
+/** 只保留躯干四个点：肩 + 髋。这是「半截 world」的最典型形态。 */
+const TORSO_POINTS = ['left_shoulder', 'right_shoulder', 'left_hip', 'right_hip'];
+
+test('hasUsableWorld：至少一个认得的点才算有世界坐标', () => {
+  assert.equal(hasUsableWorld(poseOf(goodStance())), true);
+  assert.equal(hasUsableWorld(poseOf(onlyPoints(goodStance(), TORSO_POINTS))), true);
+  // 空 world、没有 hasWorld、只有不认得的键，都按「没有世界坐标」处理
+  assert.equal(hasUsableWorld({ image: {}, world: {}, hasWorld: true }), false);
+  assert.equal(hasUsableWorld({ image: {}, world: { nose: { x: 0, y: 0, z: 0 } }, hasWorld: false }), false);
+  assert.equal(hasUsableWorld({ image: {}, world: { spine: { x: 0, y: 0, z: 0 } }, hasWorld: true }), false);
+});
+
+test('missingLandmarks：按点名列出缺失项，齐全时为空数组', () => {
+  const w = goodStance();
+  assert.deepEqual(missingLandmarks(w, ['nose', 'left_wrist']), []);
+  delete w.nose;
+  assert.deepEqual(missingLandmarks(w, ['nose', 'left_wrist']), ['nose']);
+  assert.deepEqual(missingLandmarks(null, ['nose']), ['nose']);
+});
+
+test('evaluateSetup：只有躯干关键点 → 能算的照算，其余 unknown，绝不抛异常', () => {
+  const pose = poseOf(onlyPoints(goodStance(), TORSO_POINTS));
+
+  // 关键要求：不抛异常（改动前这里是 TypeError: Cannot read properties of undefined）
+  let checks;
+  assert.doesNotThrow(() => {
+    checks = evaluateSetup(pose);
+  }, '半截 world 不能抛异常');
+  assert.equal(checks.length, 7, '七条检查都要在，不能整体消失');
+
+  const status = Object.fromEntries(checks.map((c) => [c.id, c.status]));
+  // 依赖鼻 / 腕 / 脚 / 膝的六项都判 unknown
+  for (const id of [
+    'stance_width', 'forearm_vertical', 'bridge_arm_straight',
+    'head_low', 'knee_bend', 'head_over_cue',
+  ]) {
+    assert.equal(status[id], 'unknown', `${id} 依赖的点缺失，必须判 unknown`);
+    const c = byId(checks, id);
+    assert.equal(c.score, null);
+    assert.equal(c.value, null, 'unknown 的项不许报一个没判过的数值');
+    assert.ok(Array.isArray(c.missing) && c.missing.length > 0, `${id} 必须说明缺什么`);
+    assert.match(c.detail, /缺少关键点/, `${id} 的文案要说清缺了什么`);
+  }
+  // 肩 + 髋齐了，躯干前倾是真能算的——不许被一刀切掉
+  assert.equal(status.torso_lean, 'good', '躯干前倾只用肩和髋，必须照常算出来');
+  assert.ok(Number.isFinite(byId(checks, 'torso_lean').value));
+  assert.equal(byId(checks, 'torso_lean').missing, undefined, '能算的项不该带 missing');
+
+  // 明细对得上：head_low 缺的是鼻，stance_width 缺的是脚
+  assert.ok(byId(checks, 'head_low').missing.includes('nose'));
+  assert.deepEqual(byId(checks, 'stance_width').missing.sort(), ['left_foot_index', 'right_foot_index']);
+});
+
+test('evaluateSetup：缺 nose → 只有 head_low / head_over_cue 变 unknown', () => {
+  const world = goodStance();
+  delete world.nose;
+  const checks = evaluateSetup(poseOf(world));
+  const status = Object.fromEntries(checks.map((c) => [c.id, c.status]));
+
+  assert.equal(status.head_low, 'unknown');
+  assert.equal(status.head_over_cue, 'unknown');
+  assert.deepEqual(byId(checks, 'head_low').missing, ['nose']);
+  assert.deepEqual(byId(checks, 'head_over_cue').missing, ['nose']);
+
+  // 不依赖鼻的五项仍要算出数值，而不是跟着变 unknown
+  for (const id of ['stance_width', 'forearm_vertical', 'bridge_arm_straight', 'torso_lean', 'knee_bend']) {
+    assert.notEqual(status[id], 'unknown', `${id} 不依赖鼻，不该被牵连`);
+    assert.ok(Number.isFinite(byId(checks, id).value), `${id} 应当仍有数值`);
+  }
+});
+
+test('evaluateSetup：缺一只手腕 → 只有用到它的项变 unknown', () => {
+  const world = goodStance();
+  delete world.right_wrist; // 握杆手（右手）的腕
+  const checks = evaluateSetup(poseOf(world), { handedness: 'right' });
+  const status = Object.fromEntries(checks.map((c) => [c.id, c.status]));
+
+  // 前臂垂直要腕；头在球杆上方要两只腕
+  assert.equal(status.forearm_vertical, 'unknown');
+  assert.equal(status.head_over_cue, 'unknown');
+  assert.deepEqual(byId(checks, 'forearm_vertical').missing, ['right_wrist']);
+  // 架桥臂只用左手，不受影响
+  assert.equal(status.bridge_arm_straight, 'good');
+  for (const id of ['stance_width', 'head_low', 'torso_lean', 'knee_bend']) {
+    assert.ok(Number.isFinite(byId(checks, id).value), `${id} 不该受右腕缺失影响`);
+  }
+});
+
+test('evaluateSetup：缺一个膝 → 只有 knee_bend 变 unknown', () => {
+  const world = goodStance();
+  delete world.left_knee;
+  const checks = evaluateSetup(poseOf(world));
+  const status = Object.fromEntries(checks.map((c) => [c.id, c.status]));
+
+  assert.equal(status.knee_bend, 'unknown');
+  assert.deepEqual(byId(checks, 'knee_bend').missing, ['left_knee']);
+  for (const id of ['stance_width', 'forearm_vertical', 'bridge_arm_straight', 'head_low', 'torso_lean', 'head_over_cue']) {
+    assert.notEqual(status[id], 'unknown', `${id} 不该因左膝缺失被牵连`);
+    assert.ok(Number.isFinite(byId(checks, id).value));
+  }
+});
+
+test('完整 world：结果字段集合与改动前完全一致（不新增 missing）', () => {
+  const checks = evaluateSetup(poseOf(goodStance()));
+  for (const c of checks) {
+    assert.deepEqual(
+      Object.keys(c),
+      ['id', 'label', 'category', 'value', 'unit', 'score', 'status', 'detail', 'confidence', 'needs'],
+      `${c.id} 的字段集合被改动过`
+    );
+    assert.equal(c.missing, undefined, '完整输入不许带 missing');
+    assert.equal(c.status, 'good');
+    assert.equal(c.score, 1);
+  }
+});
+
+test('analyzeImage / analyzeSequence：半截 world 不抛异常，只报 unknown', () => {
+  // 1) 单张图片：26 个点全缺，只剩躯干
+  const torso = onlyPoints(goodStance(), TORSO_POINTS);
+  const torsoPose = poseOf(torso);
+  const imgArr = LM_NAMES.map((n) => {
+    const p = torsoPose.image[n];
+    return p ? { x: p.x, y: p.y, z: p.z, visibility: 0.95 } : { x: 0.5, y: 0.5, z: 0, visibility: 0 };
+  });
+  const worldArr = LM_NAMES.map((n) => {
+    const p = torso[n];
+    return p ? { x: p.x, y: p.y, z: p.z, visibility: 0.95 } : { x: 0, y: 0, z: 0, visibility: 0 };
+  });
+  let report;
+  assert.doesNotThrow(() => {
+    report = analyzeImage({ landmarks: [imgArr], worldLandmarks: [worldArr] }, { normalize: normalizePose });
+  }, '半截 world 的图片分析不能抛异常');
+  assert.equal(report.setup.length, 7);
+  assert.equal(report.score, null, '测不到足够项目时必须放弃打分');
+  assert.equal(report.grade, '无法评估');
+  assert.ok(report.unknown.length >= 6);
+
+  // 2) 视频序列：每一帧都只剩躯干
+  const frames = strokeFrames().map((f) => ({
+    t: f.t,
+    poseResult: {
+      pose: {
+        image: onlyPoints(f.pose.image, TORSO_POINTS),
+        world: onlyPoints(f.pose.world, TORSO_POINTS),
+        hasWorld: true,
+      },
+    },
+  }));
+  let seq;
+  assert.doesNotThrow(() => {
+    seq = analyzeSequence(frames, { normalize: fakeNormalize, handedness: 'right' });
+  }, '半截 world 的序列分析不能抛异常');
+  assert.equal(seq.score, null);
+  assert.ok(seq.unknown.length >= 1);
 });
 
 // ---------------------------------------------------------------- 出杆分段
