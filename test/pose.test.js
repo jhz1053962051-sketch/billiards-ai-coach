@@ -51,6 +51,15 @@ import {
   averagePoses,
 } from '../src/pose/analyze.js';
 
+import {
+  REFERENCE,
+  REFERENCE_BY_ID,
+  REFERENCE_NOTE,
+  compareMetric,
+  compareAll,
+  describeSummary,
+} from '../src/pose/reference.js';
+
 // ---------------------------------------------------------------- 合成姿势
 
 /** 33 点全给的构造器，未指定的点放在原点、visibility 1。 */
@@ -963,4 +972,339 @@ test('analyzeSequence：完全没检测到人时不崩，只报 unknown', () => 
   assert.equal(report.score, null);
   assert.equal(report.grade, '无法评估');
   assert.ok(report.unknown.length >= 1);
+});
+
+// ---------------------------------------------------------------- 参考区间对照
+// 这一层要防两类错误：
+//   1. 把「没测到」说成「偏了」——缺关键点时编一个偏差值出来；
+//   2. 区间与 checks.js 的阈值各说各话——同一个值，检查判合格，对照说偏离。
+
+const REF_IDS = [
+  'stance_width', 'forearm_vertical', 'bridge_arm_straight',
+  'head_low', 'torso_lean', 'knee_bend', 'head_over_cue',
+];
+
+/** 造一条 check 结果，只给对照层用得到的字段。 */
+function mkCheck(id, value, opts = {}) {
+  return {
+    id,
+    label: opts.label ?? id,
+    value,
+    unit: opts.unit ?? THRESHOLDS[id]?.unit ?? '',
+    status: opts.status ?? 'good',
+    ...opts.extra,
+  };
+}
+
+test('REFERENCE：7 条区间与 THRESHOLDS 同源，basis 有据且不含编造的数据来源', () => {
+  assert.equal(REFERENCE.length, 7);
+  assert.deepEqual(REFERENCE.map((r) => r.id), REF_IDS);
+
+  for (const r of REFERENCE) {
+    const t = THRESHOLDS[r.id];
+    // ideal 必须就是 good 区间：界面同一条指标只有一套数字
+    assert.deepEqual(r.ideal, t.good, `${r.id} 的 ideal 必须与 THRESHOLDS.good 完全一致`);
+    // 容差带的外沿必须正好落在 warn 边界上
+    assert.ok(
+      Math.abs(r.ideal[0] - r.tolerance[0] - t.warn[0]) < 1e-9,
+      `${r.id} 低侧容差没有接到 warn 边界`
+    );
+    assert.ok(
+      Math.abs(r.ideal[1] + r.tolerance[1] - t.warn[1]) < 1e-9,
+      `${r.id} 高侧容差没有接到 warn 边界`
+    );
+    assert.ok(r.tolerance[0] >= 0 && r.tolerance[1] >= 0, `${r.id} 容差不能是负数`);
+    // 方向名：至少有一侧能命名，且名字是稳定的标识符
+    const dirs = [r.direction.low, r.direction.high].filter(Boolean);
+    assert.ok(dirs.length >= 1, `${r.id} 至少要有一侧方向名`);
+    for (const d of dirs) assert.match(d, /^[a-z_]+$/, `${r.id} 的方向名要稳定可判（实际 ${d}）`);
+
+    // basis 是这一层唯一没法自动验证的东西，只能钉住底线：
+    // 写得够长、说明了依据、并且明确承认没做过统计标定。
+    assert.ok(r.basis.length > 80, `${r.id} 的 basis 太短（${r.basis.length} 字），等于没写依据`);
+    assert.match(r.basis, /教练经验值，未做统计验证/, `${r.id} 的 basis 必须承认没有统计标定`);
+    // 我们没有任何选手数据，所以不许出现「职业选手平均」这类说法
+    assert.doesNotMatch(r.basis, /职业选手|选手中位|平均值|样本平均|大数据/);
+  }
+
+  assert.match(REFERENCE_NOTE, /教练经验值/);
+  assert.equal(REFERENCE_BY_ID.head_low.ideal[1], 0.55);
+});
+
+test('compareMetric：区间内与两端边界都算 good，偏差为 0', () => {
+  const inside = compareMetric(mkCheck('stance_width', 1.45, { label: '站姿宽度' }));
+  assert.equal(inside.status, 'good');
+  assert.equal(inside.deviation, 0);
+  assert.equal(inside.direction, null);
+  assert.deepEqual(inside.band.ideal, [1.0, 2.2]);
+  assert.deepEqual(inside.band.near, [0.75, 2.7]);
+  assert.match(inside.advice, /站姿宽度 1\.45 个肩宽，在参考区间（1\.00–2\.20 个肩宽）内/);
+
+  for (const v of [1.0, 2.2]) {
+    const c = compareMetric(mkCheck('stance_width', v));
+    assert.equal(c.status, 'good', `边界值 ${v} 必须算在区间内，不能算偏离`);
+    assert.equal(c.deviation, 0);
+    assert.equal(c.direction, null);
+  }
+});
+
+test('compareMetric：容差带内判 near，两侧方向各自正确且偏差带符号', () => {
+  const wide = compareMetric(mkCheck('stance_width', 2.45, { label: '站姿宽度' }));
+  assert.equal(wide.status, 'near');
+  assert.equal(wide.direction, 'too_wide');
+  assert.ok(Math.abs(wide.deviation - 0.25) < 1e-9, `高侧偏差应为 +0.25，实际 ${wide.deviation}`);
+  assert.match(wide.advice, /比推荐上限宽 0\.25 个肩宽/);
+  assert.match(wide.advice, /还在容差带里/);
+
+  const narrow = compareMetric(mkCheck('stance_width', 0.9, { label: '站姿宽度' }));
+  assert.equal(narrow.status, 'near');
+  assert.equal(narrow.direction, 'too_narrow');
+  assert.ok(Math.abs(narrow.deviation + 0.1) < 1e-9, `低侧偏差应为 −0.10，实际 ${narrow.deviation}`);
+  assert.match(narrow.advice, /比推荐下限窄 0\.10 个肩宽/);
+});
+
+test('compareMetric：出了容差带判 off，两侧都验', () => {
+  const tooNarrow = compareMetric(mkCheck('stance_width', 0.6, { label: '站姿宽度' }));
+  assert.equal(tooNarrow.status, 'off');
+  assert.equal(tooNarrow.direction, 'too_narrow');
+  assert.ok(tooNarrow.deviation < -0.3);
+  assert.match(tooNarrow.advice, /已经出了容差带/);
+
+  const tooWide = compareMetric(mkCheck('stance_width', 2.9, { label: '站姿宽度' }));
+  assert.equal(tooWide.status, 'off');
+  assert.equal(tooWide.direction, 'too_wide');
+  assert.ok(tooWide.deviation > 0.6);
+});
+
+test('compareMetric：near 与 off 的分界正好落在容差外沿', () => {
+  const edge = compareMetric(mkCheck('stance_width', 2.7)); // near 上限 2.7
+  assert.equal(edge.status, 'near', '刚好等于容差外沿仍算接近');
+  assert.ok(Math.abs(edge.deviation - 0.5) < 1e-9);
+
+  const just = compareMetric(mkCheck('stance_width', 2.72));
+  assert.equal(just.status, 'off', '越过容差外沿就是偏离');
+});
+
+test('compareMetric：单侧指标不会凭空造出另一侧的方向', () => {
+  // 架桥臂肘角最大就是 180°，高侧没有名字
+  const bent = compareMetric(mkCheck('bridge_arm_straight', 100, { label: '架桥臂伸展' }));
+  assert.equal(bent.direction, 'too_bent');
+  assert.equal(bent.status, 'off');
+  assert.equal(REFERENCE_BY_ID.bridge_arm_straight.direction.high, null);
+
+  // 倾角是绝对值，低侧不会出现
+  const tilt = compareMetric(mkCheck('forearm_vertical', 40, { label: '后手前臂垂直' }));
+  assert.equal(tilt.direction, 'too_tilted');
+  assert.equal(REFERENCE_BY_ID.forearm_vertical.direction.low, null);
+
+  // 屈膝两侧都会出现，各自的说法不同
+  const deep = compareMetric(mkCheck('knee_bend', 100, { label: '屈膝程度' }));
+  const straight = compareMetric(mkCheck('knee_bend', 178, { label: '屈膝程度' }));
+  assert.equal(deep.direction, 'too_deep');
+  assert.equal(straight.direction, 'too_straight');
+  assert.equal(deep.status, 'off');
+  assert.equal(straight.status, 'near');
+  assert.ok(deep.deviation < 0 && straight.deviation > 0);
+});
+
+test('compareMetric：unknown 原样传递，绝不补一个偏差值', () => {
+  // 缺关键点：value 是 null，方向与偏差都必须为空
+  const missing = compareMetric(
+    mkCheck('head_low', null, { label: '头部高度', status: 'unknown', extra: { missing: ['nose'] } })
+  );
+  assert.equal(missing.status, 'unknown');
+  assert.equal(missing.deviation, null);
+  assert.equal(missing.direction, null);
+  assert.deepEqual(missing.band.ideal, [0.02, 0.55], '没测到也要能画出参考区间');
+  assert.match(missing.advice, /缺少关键点 nose/);
+
+  // 「差得还没噪声大」：value 有数但 status 是 unknown，同样不许报偏差
+  const indet = compareMetric(
+    mkCheck('forearm_vertical', 22, { label: '后手前臂垂直', status: 'unknown', extra: { indeterminate: true } })
+  );
+  assert.equal(indet.status, 'unknown');
+  assert.equal(indet.deviation, null, '测不准的项给偏差就是给假信息');
+  assert.equal(indet.direction, null);
+  assert.match(indet.advice, /波动/);
+});
+
+test('compareMetric：异常输入一律退化，绝不抛异常', () => {
+  const weird = [
+    null,
+    undefined,
+    {},
+    [],
+    { id: 'stance_width' },
+    { id: 'stance_width', value: null, status: 'good' },
+    { id: 'stance_width', value: NaN, status: 'good' },
+    { id: 'stance_width', value: '1.4', status: 'good' },
+    { id: 'stance_width', value: Infinity, status: 'good' },
+    { id: 123, value: 1, status: 'good' },
+    { id: 'no_such_metric', value: 1, status: 'good' },
+    { id: 'stroke_straight', value: 0.01, unit: '偏差/行程', status: 'good' },
+  ];
+  for (const input of weird) {
+    let out;
+    assert.doesNotThrow(() => {
+      out = compareMetric(input);
+    }, `${JSON.stringify(input)} 不能让整页挂掉`);
+    assert.equal(out.status, 'unknown', `${JSON.stringify(input)} 应当退化成 unknown`);
+    assert.equal(out.deviation, null);
+    assert.equal(out.direction, null);
+    assert.equal(typeof out.advice, 'string');
+    assert.ok(out.advice.length > 0);
+  }
+  // 有 id 的才有 band；没有参考区间的 id（出杆项）band 为 null
+  assert.deepEqual(compareMetric({ id: 'stance_width', value: null }).band.ideal, [1.0, 2.2]);
+  assert.equal(compareMetric({ id: 'stroke_straight', value: 0.01 }).band, null);
+});
+
+test('compareMetric：文案里的单位与 check.unit 一致', () => {
+  // 度：整数，带 °
+  const deg = compareMetric(mkCheck('torso_lean', 95, { label: '躯干前倾' }));
+  assert.match(deg.advice, /躯干前倾 95°，比推荐上限大 17°/);
+
+  // ×肩宽：两位小数，写成「个肩宽」
+  const ratio = compareMetric(mkCheck('head_over_cue', 0.6, { label: '头在球杆上方' }));
+  assert.match(ratio.advice, /头在球杆上方 0\.60 个肩宽，偏离球杆 0\.22 个肩宽/);
+
+  // ×躯干长
+  const torso = compareMetric(mkCheck('head_low', 0.3, { label: '头部高度' }));
+  assert.match(torso.advice, /0\.30 个躯干长/);
+  assert.match(torso.advice, /在参考区间（0\.02–0\.55 个躯干长）内/);
+
+  // 三个单位都来自 THRESHOLDS，不是这里另写的一套
+  assert.equal(THRESHOLDS.torso_lean.unit, '°');
+  assert.equal(THRESHOLDS.head_over_cue.unit, '×肩宽');
+  assert.equal(THRESHOLDS.head_low.unit, '×躯干长');
+});
+
+test('compareAll：混合状态的汇总与逐项一致，顺序不重排', () => {
+  const list = [
+    mkCheck('stance_width', 1.45, { label: '站姿宽度' }),
+    mkCheck('forearm_vertical', 45, { label: '后手前臂垂直', status: 'bad' }),
+    mkCheck('bridge_arm_straight', 170, { label: '架桥臂伸展' }),
+    mkCheck('head_low', null, { label: '头部高度', status: 'unknown', extra: { missing: ['nose'] } }),
+  ];
+  const { items, summary } = compareAll(list);
+
+  assert.equal(items.length, 4);
+  assert.deepEqual(items.map((i) => i.id), list.map((c) => c.id), '顺序必须与输入一致');
+  assert.deepEqual(summary, { good: 2, near: 0, off: 1, unknown: 1 });
+  assert.equal(summary.good + summary.near + summary.off + summary.unknown, items.length);
+
+  assert.equal(items[3].value, null, 'unknown 项不许报 0');
+  assert.equal(items[3].deviation, null);
+  assert.equal(items[3].direction, null);
+  assert.ok(items[0].basis.length > 80, '每一项都带着自己的区间依据');
+  assert.equal(items[3].basis.length > 80, true);
+  assert.match(describeSummary(summary), /3 项里 2 项在参考区间内，1 项偏离。另有 1 项测不到/);
+});
+
+test('compareAll：全部 unknown 时汇总只数 unknown，总评不吹「都合格」', () => {
+  const list = REF_IDS.map((id) => mkCheck(id, null, { status: 'unknown', extra: { missing: ['nose'] } }));
+  const { items, summary } = compareAll(list);
+  assert.equal(items.length, 7);
+  assert.deepEqual(summary, { good: 0, near: 0, off: 0, unknown: 7 });
+  for (const it of items) {
+    assert.equal(it.deviation, null);
+    assert.equal(it.direction, null);
+  }
+  // 一项都没测到时不许说「0 项偏离」——那是把缺失当合格
+  assert.match(describeSummary(summary), /7 项都没测到/);
+  assert.doesNotMatch(describeSummary(summary), /0 项偏离/);
+});
+
+test('compareAll：空数组与非数组都退化成空结果', () => {
+  const empty = compareAll([]);
+  assert.deepEqual(empty.items, []);
+  assert.deepEqual(empty.summary, { good: 0, near: 0, off: 0, unknown: 0 });
+  assert.equal(describeSummary(empty.summary), '没有可对照的指标。');
+
+  for (const input of [null, undefined, {}, 42, 'nope']) {
+    let out;
+    assert.doesNotThrow(() => {
+      out = compareAll(input);
+    }, `${String(input)} 不许抛`);
+    assert.deepEqual(out.items, []);
+    assert.deepEqual(out.summary, { good: 0, near: 0, off: 0, unknown: 0 });
+  }
+  assert.equal(describeSummary(null), '没有可对照的指标。');
+});
+
+// ---------------------------------------------------------------- 报告形状回归
+// 这一层是给「以后的人」看的：report 的既有字段有单测和端到端两边钉着，
+// 新字段只能追加在末尾，顺序和键名都不许动。
+
+const OLD_REPORT_KEYS = [
+  'mode', 'frameCount', 'score', 'grade', 'coverage', 'enough', 'confidence',
+  'averagedFrames', 'weakMetrics', 'setup', 'stroke', 'checks', 'issues', 'unknown',
+];
+
+test('report：既有字段的键集合与顺序不变，comparison 只能追加在末尾', () => {
+  const setup = evaluateSetup(poseOf(goodStance()));
+  const report = summarize({ setup, mode: 'image' });
+  const keys = Object.keys(report);
+
+  assert.deepEqual(
+    keys.slice(0, OLD_REPORT_KEYS.length),
+    OLD_REPORT_KEYS,
+    '既有字段的名字或顺序被改动了——界面和端到端都按名字/顺序取'
+  );
+  assert.deepEqual(keys.slice(OLD_REPORT_KEYS.length), ['comparison'], '新增字段必须是末尾的 comparison');
+  assert.equal(keys.length, OLD_REPORT_KEYS.length + 1, '除了 comparison 不许再加别的顶层字段');
+});
+
+test('report.comparison：7 项对照齐全，总评与汇总自洽', () => {
+  const setup = evaluateSetup(poseOf(goodStance()));
+  const cmp = summarize({ setup, mode: 'image' }).comparison;
+
+  assert.equal(cmp.items.length, 7);
+  assert.deepEqual(cmp.items.map((i) => i.id), setup.map((c) => c.id), '顺序跟着 setup 走');
+  assert.deepEqual(cmp.summary, { good: 7, near: 0, off: 0, unknown: 0 });
+  assert.match(cmp.verdict, /7 项里 7 项在参考区间内/);
+  assert.equal(cmp.note, REFERENCE_NOTE);
+  assert.match(cmp.note, /教练经验值/);
+  assert.match(cmp.disclaimer, /没有用选手录像做过统计标定/);
+  for (const it of cmp.items) {
+    assert.ok(it.advice.length > 8, `${it.id} 必须带一句能直接显示的建议`);
+    assert.ok(it.band && it.band.ideal.length === 2, `${it.id} 必须带区间条用的边界`);
+  }
+});
+
+test('report.comparison：缺关键点的项是 unknown，且不带偏差值', () => {
+  const world = goodStance();
+  delete world.nose;
+  const setup = evaluateSetup(poseOf(world));
+  const cmp = summarize({ setup, mode: 'image' }).comparison;
+
+  const heads = cmp.items.filter((i) => i.id === 'head_low' || i.id === 'head_over_cue');
+  assert.equal(heads.length, 2);
+  for (const it of heads) {
+    assert.equal(it.status, 'unknown');
+    assert.equal(it.deviation, null);
+    assert.equal(it.direction, null);
+    assert.equal(it.value, null);
+  }
+  assert.equal(cmp.summary.unknown, 2);
+  assert.equal(cmp.summary.good, 5);
+});
+
+test('analyzeImage：端到端报告里带着对照层，既有字段照旧', () => {
+  const world = goodStance();
+  const img = toImage(world);
+  const imgArr = LM_NAMES.map((n) => ({ x: img[n].x, y: img[n].y, z: img[n].z, visibility: 0.95 }));
+  const worldArr = LM_NAMES.map((n) => ({ x: world[n].x, y: world[n].y, z: world[n].z, visibility: 0.95 }));
+  const report = analyzeImage(
+    { landmarks: [imgArr], worldLandmarks: [worldArr] },
+    { normalize: normalizePose }
+  );
+
+  assert.equal(report.comparison.items.length, 7);
+  assert.equal(report.comparison.summary.good, 7);
+  assert.match(report.comparison.verdict, /7 项里 7 项在参考区间内/);
+  // 既有结论不受影响
+  assert.equal(report.score, 100);
+  assert.equal(report.grade, '很规范');
+  assert.equal(report.setup.length, 7);
 });

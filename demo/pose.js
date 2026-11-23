@@ -230,6 +230,76 @@ function renderIssues(report) {
     .join('');
 }
 
+// 对照状态的中文短标签。措辞刻意避开「正确 / 错误」——区间是教练经验值，
+// 说的是「和通行做法差多远」，不是判决。
+const CMP_LABEL = { good: '在区间内', near: '接近边界', off: '偏离', unknown: '不判' };
+
+const clampPct = (p) => (p < 1.5 ? 1.5 : p > 98.5 ? 98.5 : p);
+
+/** 把一个值映射成区间条上的百分比位置（1.5%–98.5%，留出标记点的半径）。 */
+function pctIn(v, lo, hi) {
+  const span = hi - lo;
+  if (!(span > 0)) return 50;
+  return clampPct(((v - lo) / span) * 100);
+}
+
+/**
+ * 指标对照参考区间：每行一条区间条 + 一句建议。
+ *
+ * 条子的画法：外圈灰带是「接近」的容差范围，内圈绿带是推荐区间（ideal），
+ * 圆点是你这一次的位置。显示范围比容差带再宽 35%，这样偏得多的时候点不会
+ * 一直挤在边框上；真偏出显示范围时点会停在 1.5% / 98.5%，但右边的数字仍然
+ * 是真值——数才是准的，条子只负责给个直觉。
+ */
+function renderComparison(report) {
+  const cmp = report.comparison;
+  if (!cmp) return;
+  $('cmpSummary').textContent = cmp.verdict;
+
+  const rows = cmp.items.map((it) => {
+    const band = it.band;
+    let bars = '';
+    let mark = '';
+    if (band) {
+      const span = band.near[1] - band.near[0];
+      const pad = span > 0 ? span * 0.35 : Math.abs(band.ideal[1] - band.ideal[0]) || 0.5;
+      const dLo = band.near[0] - pad;
+      const dHi = band.near[1] + pad;
+      const seg = (a, b) =>
+        `left:${pctIn(a, dLo, dHi).toFixed(2)}%;width:${Math.max(
+          0.6,
+          pctIn(b, dLo, dHi) - pctIn(a, dLo, dHi)
+        ).toFixed(2)}%`;
+      bars =
+        `<span class="cmp-near" style="${seg(band.near[0], band.near[1])}"></span>` +
+        `<span class="cmp-ideal" style="${seg(band.ideal[0], band.ideal[1])}"></span>`;
+      if (Number.isFinite(it.value)) {
+        mark = `<span class="cmp-mark" style="left:${pctIn(it.value, dLo, dHi).toFixed(2)}%"></span>`;
+      }
+    }
+    return (
+      `<div class="cmp ${it.status}">` +
+        `<div class="cmp-top"><span class="cmp-name">${it.label || it.id}</span>` +
+        `<span class="cmp-val">${fmtValue(it)}</span></div>` +
+        `<div class="cmp-bar">${bars}${mark}</div>` +
+        `<div class="cmp-foot"><span class="cmp-st">${CMP_LABEL[it.status] ?? '不判'}</span>` +
+        `<span class="cmp-adv">${it.advice}</span></div>` +
+      `</div>`
+    );
+  });
+
+  const box = $('comparison');
+  box.className = rows.length ? '' : 'empty';
+  box.innerHTML = rows.length ? rows.join('') : '没有可对照的指标。';
+
+  // 每条区间凭什么——放在折叠块里，想追问的人能看到，不想看的也不占地方
+  const basis = cmp.items
+    .filter((it) => it.basis)
+    .map((it) => `<p class="cmp-b"><b>${it.label || it.id}</b>：${it.basis}</p>`)
+    .join('');
+  $('cmpBasis').innerHTML = basis || '<p class="hint">没有可用的区间依据。</p>';
+}
+
 function renderReport(report) {
   currentReport = report;
   reportSeq++;
@@ -251,6 +321,7 @@ function renderReport(report) {
 
   renderIssues(report);
   renderChecks(report);
+  renderComparison(report);
 }
 
 // ---------------------------------------------------------------- 图片流程

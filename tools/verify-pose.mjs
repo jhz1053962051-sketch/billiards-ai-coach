@@ -46,6 +46,8 @@ const SYNTH = path.join(ROOT, '_research', 'still-pose.webm');
 const SHOT_IMG = path.join(ROOT, '_research', 'pose-image.png');
 const SHOT_VID = path.join(ROOT, '_research', 'pose-video.png');
 const SHOT_STILL = path.join(ROOT, '_research', 'pose-still.png');
+const SHOT_MOB = path.join(ROOT, '_research', 'pose-ref', 'pose-390.png');
+const SHOT_CMP = path.join(ROOT, '_research', 'pose-ref', 'pose-compare.png');
 
 const fail = [];
 const skip = [];
@@ -188,6 +190,87 @@ function blankPng(w, h) {
   ]);
 }
 
+/** 对照层的一致性断言（本次新增，既有断言一条没动）。
+ *
+ * 这一层最容易骗人的地方是「汇总和逐项对不上」：顶上写「5 项在区间内」，
+ * 下面却只有 4 个绿点。所以这里不只看长度，还把逐项状态自己数一遍。
+ * 另一个要害是「没测到」不许变成「偏了 0」——unknown 项的 deviation 必须是 null。
+ */
+async function checkComparison(report, tag) {
+  const cmp = report && report.comparison;
+  if (!cmp || !Array.isArray(cmp.items)) {
+    check(false, `${tag} 报告带 comparison 层`);
+    return;
+  }
+  check(true, `${tag} 报告带 comparison 层`);
+  check(cmp.items.length === 7, `${tag} 对照 7 项（实际 ${cmp.items.length}）`);
+
+  const counted = { good: 0, near: 0, off: 0, unknown: 0 };
+  for (const it of cmp.items) counted[it.status] = (counted[it.status] ?? 0) + 1;
+  const s = cmp.summary ?? {};
+  const total = (s.good ?? 0) + (s.near ?? 0) + (s.off ?? 0) + (s.unknown ?? 0);
+  check(total === cmp.items.length, `${tag} 汇总合计等于项数（${total}/${cmp.items.length}）`);
+  check(
+    ['good', 'near', 'off', 'unknown'].every((k) => (s[k] ?? 0) === counted[k]),
+    `${tag} 汇总与逐项一致（good ${counted.good} / near ${counted.near} / off ${counted.off} / unknown ${counted.unknown}）`
+  );
+  check(
+    cmp.items.every((it) => it.status !== 'unknown' || it.deviation === null),
+    `${tag} unknown 项不带偏差值`
+  );
+  check(
+    cmp.items.every((it) => it.status === 'unknown' || typeof it.value === 'number'),
+    `${tag} 有结论的项都带数值`
+  );
+  check(
+    cmp.items.every(
+      (it) =>
+        it.deviation === null ||
+        (Math.abs(it.deviation) < 1e-12 ? it.direction === null : typeof it.direction === 'string')
+    ),
+    `${tag} 偏差为 0 时没有方向名、有偏差时方向名存在`
+  );
+  check(
+    cmp.items.every((it) => typeof it.advice === 'string' && it.advice.length > 8),
+    `${tag} 每项都有一句建议`
+  );
+  check(/教练经验值/.test(cmp.note ?? ''), `${tag} 数据里标注了「教练经验值」（${cmp.note}）`);
+  check(typeof cmp.verdict === 'string' && cmp.verdict.length > 0, `${tag} 有总评文案（${cmp.verdict}）`);
+}
+
+/** 页面上真的画出了区间条，并且把自己诚实地标成「参考区间」而不是「标准动作」。 */
+async function checkComparisonDom(tag) {
+  const dom = await page.evaluate(`(() => {
+    const rows = [...document.querySelectorAll('#comparison .cmp')];
+    const rects = rows
+      .map((r) => r.querySelector('.cmp-ideal'))
+      .filter(Boolean)
+      .map((el) => el.getBoundingClientRect());
+    const bar = rows[0] ? rows[0].querySelector('.cmp-bar') : null;
+    const br = bar ? bar.getBoundingClientRect() : null;
+    return {
+      rows: rows.length,
+      ideals: rects.length,
+      idealWidest: rects.reduce((m, r) => Math.max(m, r.width), 0),
+      barWidth: br ? br.width : 0,
+      summary: document.getElementById('cmpSummary').textContent.trim(),
+      note: document.getElementById('cmpNote').textContent.trim(),
+      basis: document.querySelectorAll('#cmpBasis .cmp-b').length,
+      overflow: rows.filter((r) => r.scrollWidth > r.clientWidth + 1).length,
+      strayWording: /标准动作/.test(document.body.textContent),
+    };
+  })()`);
+  check(dom.rows === 7, `${tag} DOM 渲染 7 行对照（实际 ${dom.rows}）`);
+  check(dom.ideals === 7, `${tag} 每行都画出推荐区间（实际 ${dom.ideals}）`);
+  check(dom.idealWidest > 1, `${tag} 区间条有可见宽度（最宽 ${dom.idealWidest.toFixed(1)}px）`);
+  check(dom.barWidth > 40, `${tag} 整条轨道排布出来了（${dom.barWidth.toFixed(0)}px）`);
+  check(dom.summary.length > 0, `${tag} 顶部有总评（${dom.summary}）`);
+  check(/教练经验值/.test(dom.note), `${tag} 页面上标注了「参考区间（教练经验值）」`);
+  check(dom.strayWording === false, `${tag} 页面上没有写成「标准动作」`);
+  check(dom.basis === 7, `${tag} 折叠块里列出 7 条依据（实际 ${dom.basis}）`);
+  check(dom.overflow === 0, `${tag} 对照行没有内容溢出（${dom.overflow} 处）`);
+}
+
 /** 等视频分析结束（用 seq 区分新旧报告，避免读到上一次的结果）。 */
 async function runVideo(page, file, timeout) {
   const baseSeq = await page.evaluate('window.__pose.seq');
@@ -265,8 +348,30 @@ try {
     check(dom.issues > 0, '结论区有文字');
     log(`  状态行：${dom.status}`);
 
+    // 新增：对照层（参考区间）在真报告和真 DOM 上都要立得住
+    await checkComparison(report, '[图片]');
+    await checkComparisonDom('[图片]');
+
     await page.screenshot(SHOT_IMG);
     log(`  截图 ${path.relative(ROOT, SHOT_IMG)}`);
+
+    // 新增：把对照卡片滚进视口再拍一张，留一份能直接看的证据（上面那张保持原样）
+    await page.evaluate(`(() => {
+      const el = document.getElementById('comparison');
+      if (el) el.scrollIntoView({ block: 'center' });
+      return true;
+    })()`);
+    await new Promise((r) => setTimeout(r, 300));
+    await fs.mkdir(path.dirname(SHOT_CMP), { recursive: true });
+    await page.screenshot(SHOT_CMP);
+    log(`  截图 ${path.relative(ROOT, SHOT_CMP)}（对照卡片）`);
+    // 还原滚动位置，后面两条路径看到的页面和以前一样
+    await page.evaluate(`(() => {
+      const aside = document.querySelector('aside');
+      if (aside) aside.scrollTop = 0;
+      window.scrollTo(0, 0);
+      return true;
+    })()`);
   }
 
   // ---------------------------------------------------------------- 真实录像
@@ -309,6 +414,9 @@ try {
     check(vdom.scrubMax === vreport.frameCount - 1, `滑杆上限是 ${vdom.scrubMax}`);
     check(vdom.groups === 2, `检查分两组渲染（实际 ${vdom.groups}）`);
     log(`  ${vdom.scrubInfo}`);
+
+    await checkComparison(vreport, '[录像]');
+    await checkComparisonDom('[录像]');
 
     await page.evaluate(`(() => {
       const s = document.getElementById('scrub');
@@ -375,8 +483,66 @@ try {
     );
     log(`  分数 ${sreport.score} / ${sreport.grade}，覆盖 ${(sreport.coverage * 100).toFixed(0)}%`);
 
+    // 静止画面里没有人出杆，但站姿仍然是从真帧里平均出来的：对照层照样要有 7 项
+    await checkComparison(sreport, '[静止]');
+
     await page.screenshot(SHOT_STILL);
     log(`  截图 ${path.relative(ROOT, SHOT_STILL)}`);
+  }
+
+  // ---------------------------------------------------------------- 移动端
+  // 390×844 是常见手机宽度。区间条是绝对定位的，最容易在窄屏把侧栏撑出横向滚动，
+  // 所以真把视口切过去量一次：文档不许变宽，条子不许越界，行内不许溢出。
+  log('\n[移动端] 390×844 区间条与文案');
+  if (hasPhoto) {
+    await page.call('Emulation.setDeviceMetricsOverride', {
+      width: 390,
+      height: 844,
+      deviceScaleFactor: 1,
+      mobile: true,
+    });
+    await new Promise((r) => setTimeout(r, 400));
+    const mob = await page.evaluate(`(() => {
+      const de = document.documentElement;
+      const rows = [...document.querySelectorAll('#comparison .cmp')];
+      const bar = document.querySelector('#comparison .cmp-bar');
+      const r = bar ? bar.getBoundingClientRect() : null;
+      return {
+        vw: window.innerWidth,
+        scrollWidth: de.scrollWidth,
+        barLeft: r ? r.left : -1,
+        barRight: r ? r.right : -1,
+        rows: rows.length,
+        overflow: rows.filter((el) => el.scrollWidth > el.clientWidth + 1).length,
+        summaryClipped: (() => {
+          const el = document.getElementById('cmpSummary');
+          return el ? el.scrollWidth > el.clientWidth + 1 : true;
+        })(),
+      };
+    })()`);
+    log(`  视口 ${mob.vw}px，文档宽 ${mob.scrollWidth}px，对照行 ${mob.rows}`);
+    check(mob.vw >= 380 && mob.vw <= 400, `视口切到 390 宽（实际 ${mob.vw}）`);
+    check(mob.scrollWidth <= mob.vw + 1, `390 宽下没有横向滚动（文档 ${mob.scrollWidth} / 视口 ${mob.vw}）`);
+    check(mob.overflow === 0, `对照行没有内容溢出（${mob.overflow} 处）`);
+    check(mob.summaryClipped === false, '顶部总评没有被裁掉');
+    check(
+      mob.barLeft >= 0 && mob.barRight <= mob.vw + 1,
+      `区间条完整落在视口内（${Math.round(mob.barLeft)}–${Math.round(mob.barRight)}）`
+    );
+    await fs.mkdir(path.dirname(SHOT_MOB), { recursive: true });
+    // 把对照卡片滚到屏幕中间再拍：截图的目的是看这一层长什么样，
+    // 停在页顶只会拍到画布，读了等于没看。
+    await page.evaluate(`(() => {
+      const el = document.getElementById('comparison');
+      if (el) el.scrollIntoView({ block: 'center' });
+      return true;
+    })()`);
+    await new Promise((r) => setTimeout(r, 300));
+    await page.screenshot(SHOT_MOB);
+    log(`  截图 ${path.relative(ROOT, SHOT_MOB)}`);
+    await page.call('Emulation.clearDeviceMetricsOverride');
+  } else {
+    skipped('移动端区间条布局（缺素材：没有报告可渲染）');
   }
 
   // ---------------------------------------------------------------- 错误

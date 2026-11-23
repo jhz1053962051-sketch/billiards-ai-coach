@@ -232,6 +232,94 @@
   }
   .chk.unknown .d { color: #64748b; font-style: italic; }
 
+  /* 指标对照参考区间：一条横向区间条，三种状态三种颜色。
+     灰带 = 容差范围，绿带 = 推荐区间，圆点 = 你这一次。
+     条子只负责给直觉，右边的数字才是真值。 */
+  .cmp-verdict {
+    font-size: 13px; font-weight: 600; line-height: 1.6;
+    color: var(--text-secondary);
+    padding: 8px 10px; margin-bottom: 10px; border-radius: 8px;
+    background: rgba(16, 185, 129, 0.1);
+    border: 1px solid rgba(16, 185, 129, 0.28);
+    overflow-wrap: anywhere;
+  }
+  .cmp { padding: 9px 0; border-top: 1px solid rgba(255, 255, 255, 0.06); }
+  .cmp:first-child { border-top: 0; }
+  .cmp-top { display: flex; align-items: baseline; gap: 8px; justify-content: space-between; }
+  .cmp-name {
+    font-size: 13px; font-weight: 500; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .cmp-val {
+    flex: none; font-size: 12px; color: var(--text-secondary);
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  .cmp-bar {
+    position: relative; height: 8px; margin: 8px 0 7px;
+    border-radius: 4px; background: rgba(255, 255, 255, 0.06);
+  }
+  .cmp-near {
+    position: absolute; top: 0; height: 100%; border-radius: 4px;
+    background: rgba(148, 163, 184, 0.16);
+  }
+  .cmp-ideal {
+    position: absolute; top: 0; height: 100%; border-radius: 4px;
+    background: rgba(16, 185, 129, 0.72);
+    box-shadow: inset 0 0 0 1px rgba(52, 211, 153, 0.55);
+  }
+  /* 图例：三个色块说清条子上每一段是什么，不靠用户猜 */
+  .cmp-legend {
+    display: flex; flex-wrap: wrap; gap: 4px 12px;
+    align-items: center; margin: 0 0 8px;
+    font-size: 11px; color: var(--muted);
+  }
+  .cmp-legend i { display: inline-block; width: 14px; height: 6px; border-radius: 3px; margin-right: 4px; }
+  .cmp-legend .lg-ideal { background: rgba(16, 185, 129, 0.8); }
+  .cmp-legend .lg-near { background: rgba(148, 163, 184, 0.3); }
+  .cmp-legend .lg-mark {
+    width: 7px; height: 7px; border-radius: 50%; background: #e2e8f0; margin-left: 2px;
+  }
+  .cmp-mark {
+    position: absolute; top: 50%; left: 50%;
+    width: 9px; height: 9px; margin: -5px 0 0 -5px;
+    border-radius: 50%; background: #e2e8f0;
+    border: 2px solid #12202e;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.35);
+  }
+  .cmp.good .cmp-mark { background: #34d399; box-shadow: 0 0 8px rgba(52, 211, 153, 0.9); }
+  .cmp.near .cmp-mark { background: #fbbf24; box-shadow: 0 0 8px rgba(251, 191, 36, 0.9); }
+  .cmp.off .cmp-mark { background: #f87171; box-shadow: 0 0 8px rgba(248, 113, 113, 0.9); }
+  .cmp.unknown .cmp-mark { background: #64748b; }
+  .cmp-foot { display: flex; gap: 6px; align-items: baseline; }
+  .cmp-st {
+    flex: none; font-size: 11px; font-weight: 600; padding: 0 6px;
+    line-height: 16px; border-radius: 4px; color: #cbd5e1;
+    background: #243548; border: 1px solid var(--line);
+  }
+  .cmp.good .cmp-st { color: #6ee7b7; border-color: rgba(16, 185, 129, 0.45); background: rgba(16, 185, 129, 0.14); }
+  .cmp.near .cmp-st { color: #fde68a; border-color: #854d0e; background: #2a1b08; }
+  .cmp.off .cmp-st { color: #fca5a5; border-color: rgba(244, 63, 94, 0.45); background: rgba(244, 63, 94, 0.14); }
+  .cmp.unknown .cmp-st { color: #94a3b8; }
+  .cmp-adv {
+    font-size: 12px; color: var(--muted); line-height: 1.65;
+    min-width: 0; overflow-wrap: anywhere;
+  }
+  .cmp-note { margin: 10px 0 0; }
+  .cmp-note b { color: var(--text-secondary); }
+  .cmp-why { margin-top: 10px; border-top: 1px solid rgba(255, 255, 255, 0.08); }
+  .cmp-why > summary {
+    cursor: pointer; list-style: none; padding-top: 9px;
+    font-size: 11px; font-weight: 700; color: var(--muted); letter-spacing: 1px;
+  }
+  .cmp-why > summary::-webkit-details-marker { display: none; }
+  .cmp-why > summary::after { content: ' ▾'; }
+  .cmp-why[open] > summary::after { content: ' ▴'; }
+  .cmp-b {
+    font-size: 11px; color: var(--muted); line-height: 1.7;
+    margin: 8px 0 0; overflow-wrap: anywhere;
+  }
+  .cmp-b b { color: var(--text-secondary); }
+
   /* 逐帧进度条 */
   input[type=range] {
     width: 100%; margin: 6px 0; accent-color: var(--accent);
@@ -323,6 +411,26 @@
         </div>
       </div>
       <div id="conf" class="hint"></div>
+    </div>
+
+    <div class="card">
+      <h2>指标 vs 参考区间</h2>
+      <div id="cmpSummary" class="cmp-verdict">还没有分析结果。</div>
+      <div class="cmp-legend">
+        <span><i class="lg-ideal"></i>推荐区间</span>
+        <span><i class="lg-near"></i>容差范围</span>
+        <span><i class="lg-mark"></i>你的位置</span>
+      </div>
+      <div id="comparison" class="empty">—</div>
+      <p id="cmpNote" class="hint cmp-note">
+        <b>参考区间（教练经验值）</b>：区间来自公开教练检查表的条目和生物力学推理，
+        没有用选手录像做过统计标定，也不是唯一正确的打法。落在区间外只说明「和通行做法不一样」，
+        不等于这一杆一定打不进——它给你的是方向和优先级。
+      </p>
+      <details class="cmp-why">
+        <summary>每条区间的依据</summary>
+        <div id="cmpBasis"></div>
+      </details>
     </div>
 
     <div class="card">

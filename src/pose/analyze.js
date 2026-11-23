@@ -20,6 +20,7 @@ import {
   METRIC_NOISE,
   noiseRatio,
 } from './checks.js';
+import { compareAll, describeSummary, REFERENCE_NOTE, REFERENCE_DISCLAIMER } from './reference.js';
 
 // 各检查项在总分里的权重。动态项权重更高，因为它直接决定球进不进。
 export const WEIGHTS = {
@@ -377,6 +378,28 @@ function shoulderWidthOf(w) {
 // ---------------------------------------------------------------- 汇总
 
 /**
+ * 组装「指标 vs 参考区间」这一层。
+ *
+ * 只对照 7 项站姿指标：reference.js 里只有这 7 条的区间写得清依据。出杆 5 项不
+ * 进对照，否则「7 项里几项偏离」的分母会被悄悄稀释成 12，用户看到的比例就变味了。
+ *
+ * @param {Array<object>} setup evaluateSetup 的结果
+ * @returns {{note:string, disclaimer:string, items:Array<object>,
+ *            summary:{good:number, near:number, off:number, unknown:number}, verdict:string}}
+ */
+function buildComparison(setup) {
+  const { items, summary } = compareAll(setup);
+  return {
+    // 「教练经验值」这几个字必须跟着数据一路走到界面，不能只写在注释里
+    note: REFERENCE_NOTE,
+    disclaimer: REFERENCE_DISCLAIMER,
+    items,
+    summary,
+    verdict: describeSummary(summary),
+  };
+}
+
+/**
  * 把检查项汇总成一份报告。
  *
  * @param {object} params
@@ -444,6 +467,11 @@ export function summarize({ setup, stroke = [], mode, frameCount = 1, averagedFr
     checks: all,
     issues,
     unknown: all.filter((c) => c.status === 'unknown'),
+    // 新增：指标对照参考区间（偏差方向 + 一句建议）。
+    // **只能追加在最后**——report 既有字段的键集合与顺序被单测钉着
+    // （test/pose.test.js 里那条「既有字段只能追加」的回归护栏）。
+    // 既有代码全部按名字取字段，追加一个键不影响它们。
+    comparison: buildComparison(setup),
   };
 }
 
