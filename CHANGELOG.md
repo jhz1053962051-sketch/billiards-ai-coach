@@ -4,6 +4,9 @@
 
 ## 2026-11-23
 
+- perf(physics): `findFirstEvent` 加保守粗筛与外提不变量，A/B ≈ −5%，事件序列与球位逐位一致（`30529b8`，2026-11-23）
+- feat(demo): 分享局面图（全台俯视 + 局面要点），与「分享这一杆」共用出图管线（`97e36f2`，2026-11-23）
+- chore(types): `physics`/`sim`/`solver`/`constants` 加 `@ts-check`，类型覆盖补全（`c0ed94b`，2026-11-23）
 - feat(demo): 分享这一杆导出 1080 宽 PNG（台面俯视图+文字要点）（`b22d0be`，2026-11-23）
 - refactor(rules): 八球/九球主函数按开球/进球/犯规/结局拆分，行为零变化（`de93e9b`，2026-11-23）
 - fix(pose): 关键点缺失判 unknown，不再抛 TypeError（`426d4db`，2026-11-23）
