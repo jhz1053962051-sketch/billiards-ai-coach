@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * 三处调用方的单一仿真入口：solver.trialShot / safety.shoot / rules.simulateShot。
  *

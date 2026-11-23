@@ -1,3 +1,4 @@
+// @ts-check
 // 击球方案求解器：枚举「目标球 × 袋口」→ 反解瞄准线与力度 → 用真实物理核验证。
 //
 // 排序目标不是"能不能进"，而是"容错窗口有多大"——见 src/aim.js 顶部说明。
@@ -46,6 +47,79 @@ import { solveSafety } from './safety.js';
 import { ballName as snookerBallName } from './snooker.js';
 // 三处「复制球 → strike → runShot → 取首碰」合并成一个入口（src/sim.js）。
 import { simulateShot } from './sim.js';
+
+// ---------------------------------------------------------------- 类型形状
+//
+// 下面两个 typedef 都是**纯注释**：运行时对象一个字段都不会因此多出来。
+// 候选对象靠共享隐藏类吃性能，这里只描述形状，不加字段。
+
+/** 球的形状（含后置的 pocket）由 physics.js 定义，这里只引用 */
+/** @typedef {import('./physics.js').Ball} Ball */
+
+/**
+ * verifyAndTune 里「目前试出来的最好那一档」。
+ *
+ * 必须显式声明类型：`let best = null` 又在嵌套箭头函数 scanTips 里赋值，
+ * 而 TS 不会用闭包内的赋值去拓宽变量类型，于是 best 被判成 null，
+ * 后面读 best.quality 全变成 never 上的属性（TS2339 × 8）。
+ *
+ * @typedef {object} TunePick
+ * @property {number} speed
+ * @property {any} tip  杆法记录，字段随构造点不同（含 name / a / b）
+ * @property {{ok:boolean, balls:any[], firstContact?:any, cueRoute?:any}} result trialShot 的返回
+ * @property {any} positioning  assessPosition 的返回
+ * @property {number|null} quality  positionQuality 的返回值，没下一杆时是 null
+ * @property {number} effort  排序用的「总代价」
+ */
+
+/**
+ * 一个击球候选。直接球 / 组合球 / 翻袋三个构造点共用同一套核心字段，
+ * 其余（kind、viaId、bankRail、value、comfort 四件套、table）是**后置**补上的，
+ * 或者只有某一类候选才有，因此都标成可选。
+ *
+ * value / difficulty 是排序键，由 valueOf / difficultyOf 在构造之后写回；
+ * comfort 四件套由 annotateComfort 写回；table 在 solveShot 末尾挂上，
+ * 只为了让 describeCandidate 能把坐标翻译成「台面右下、距右库 12 厘米」。
+ *
+ * @typedef {object} Candidate
+ * @property {string} targetId
+ * @property {number} targetNumber
+ * @property {string} pocketId
+ * @property {string} pocketKind
+ * @property {{x:number, y:number}} ghost  假想球球心
+ * @property {{x:number, y:number}} contactNormal
+ * @property {number} throwDeg  甩球角
+ * @property {number} aimAngle
+ * @property {number} aimAngleDeg
+ * @property {number} aimOffsetDeg
+ * @property {number} cutDeg
+ * @property {number} toleranceDeg
+ * @property {number} distanceCue
+ * @property {number} distancePocket
+ * @property {number} speed
+ * @property {{name:string, speed:number, over?:boolean}} power
+ * @property {{name?:string, a?:number, b?:number}} tip
+ * @property {boolean} scratchRisk
+ * @property {any} cuePath  母球预测路线，traceRay 的形状；组合球/翻袋为 null
+ * @property {{x:number, y:number}|null} cueRest
+ * @property {{x:number, y:number}[]|null} cueRoute
+ * @property {any} nextShot  bestNextShot 的返回
+ * @property {boolean} positioningRequired
+ * @property {number|null} nextToleranceDeg
+ * @property {number|null} leaveScore
+ * @property {boolean} verified
+ * @property {number} difficulty
+ * @property {'combo'|'bank'|'break'|'direct'} [kind] 只有非直接球的构造点带
+ * @property {string} [viaId]  组合球的中间球
+ * @property {number} [viaNumber]
+ * @property {string} [bankRail]  翻袋先撞哪条库
+ * @property {number} [value]  综合价值，排序主键
+ * @property {number} [cueClearance]
+ * @property {number|null} [backBlockedBy]
+ * @property {string[]} [awkwardNotes]
+ * @property {number} [awkwardPenalty]
+ * @property {object} [table]
+ */
 
 /**
  * 目标球的叫法。
@@ -258,7 +332,8 @@ function positionQuality(positioning) {
  *
  * 返回值里带 afterBalls：这一杆打完之后整张台面的球位，用来算走位。
  *
- * @returns {{speed:number, aimAngle:number, aimOffsetDeg:number, tip:object, afterBalls:Array}|null}
+ * @returns {{speed:number, aimAngle:number, aimOffsetDeg:number, tip:any,
+ *   afterBalls:Array, positioning?:any, cueRoute?:any}|null}
  */
 function verifyAndTune(table, balls, cueId, targetId, pocketId, baseAim, tip, seedSpeed, allow, grid, allowSpin = true) {
   const tryOnce = (speed, offsetDeg, shotTip = tip) =>
@@ -310,6 +385,7 @@ function verifyAndTune(table, balls, cueId, targetId, pocketId, baseAim, tip, se
 
   // 不只拿到第一组能进的参数：仍有目标球时，要在可进球的力度/杆法里
   // 比较实际母球停位，优先留下下一杆容错更大的局面。
+  /** @type {TunePick|null} */
   let best = null;
   const scanTips = (list, speedList = speeds) => {
     for (const candidateTip of list) {
@@ -620,9 +696,12 @@ function annotateComfort(list, table, balls, cueId) {
  *
  * @param {object} table
  * @param {Array} balls 含母球（id === 'cue' 或 number === 0）
- * @param {{cueId?:string, maxCandidates?:number, verify?:boolean, allow?:number[], exhaustive?:boolean}} [opts]
+ * @param {{cueId?:string, maxCandidates?:number, verify?:boolean, allow?:number[],
+ *   exhaustive?:boolean, extras?:boolean, budgetMs?:number}} [opts]
  *   opts.allow 限定只考虑这些球号的球当目标（规则引擎用来排除对方的球）
  *   opts.exhaustive 走旧路径：每个几何候选都跑杆法×力度细扫（基准对照用，默认不走）
+ *   opts.extras 传 false 就跳过组合球/翻袋（planShot 会把它透传下来）
+ *   opts.budgetMs 组合球/翻袋的挂钟上限，默认 Infinity（见下面那段注释）
  *   环境变量 SOLVE_EXHAUSTIVE=1 等效于 opts.exhaustive（给 %TEMP% 下的基准脚本用，
  *   生产代码不读它以外的东西）
  */
@@ -632,6 +711,7 @@ export function solveShot(table, balls, opts = {}) {
   // 剪枝出口：默认新路径；显式传 exhaustive 或设环境变量才回到老路径。
   const exhaustive =
     opts.exhaustive === true ||
+    // @ts-expect-error Node 全局 process，本项目不引入 @types/node（那会多一个 devDependency），纯注释豁免比装依赖便宜
     (typeof process !== 'undefined' && process.env?.SOLVE_EXHAUSTIVE === '1');
   const R = table.ballRadius;
   const cue = balls.find((b) => b.id === cueId);
@@ -643,6 +723,7 @@ export function solveShot(table, balls, opts = {}) {
   const targets = balls.filter(
     (b) => b.id !== cueId && !b.pocketed && (!allow || allow.has(b.number))
   );
+  /** @type {Candidate[]} */
   const candidates = [];
   // 一级产物：纯几何候选，还没跑过任何仿真
   const geos = [];
@@ -806,11 +887,14 @@ export function solveShot(table, balls, opts = {}) {
  *
  * 实测（`_research/probe-combo3.mjs`）：几何种子加甩球补偿后，2/3 的布局
  * 一次就进；剩下那些差零点几度，是小范围搜索能覆盖的。
+ *
+ * @returns {Candidate[]}
  */
 function comboCandidates(table, balls, cueId, targets, opts, startedAt, budgetMs) {
   const R = table.ballRadius;
   const cue = balls.find((b) => b.id === cueId);
   if (!cue) return [];
+  /** @type {Candidate[]} */
   const out = [];
   const starters = [];
   for (const target of targets) {
@@ -906,12 +990,15 @@ function comboCandidates(table, balls, cueId, targets, opts, startedAt, budgetMs
  * 不是直接拿镜像当解——实测库边反射比镜面偏 2°–4°，带一点塞能偏到 7.6°，
  * 而袋口容错只有零点几度。镜像只用来给种子方向，真正的方向由
  * 「把目标球当单球跑仿真 + 按落点偏差修正」求出来（平均 3.19 ms 一组）。
+ *
+ * @returns {Candidate[]}
  */
 function bankCandidates(table, balls, cueId, targets, opts, startedAt, budgetMs) {
   const R = table.ballRadius;
   const cue = balls.find((b) => b.id === cueId);
   if (!cue) return [];
 
+  /** @type {Candidate[]} */
   const out = [];
   const rails = ['ymin', 'ymax', 'xmin', 'xmax'];
   // 两个上限要分开：maxBanks 数的是「成功的候选」，tries 数的是「尝试次数」。
@@ -1010,6 +1097,9 @@ function bankCandidates(table, balls, cueId, targets, opts, startedAt, budgetMs)
  * 修正用「落点到袋心的角度偏差」——不能直接用位移量，因为中途可能撞好几次库。
  */
 function solveBankDirection(table, target, pocket, seedDir) {
+  // 只是给翻袋方向解算当试验品的单球，靠 createWorld 挂 __R、靠 settlePockets 写 pocket；
+  // 按 Ball 标注才能合法读 copy.pocket（那是落袋时才出现的后置字段，见 physics.js）。
+  /** @type {Ball} */
   const single = {
     id: target.id,
     number: target.number,

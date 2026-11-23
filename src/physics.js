@@ -1,3 +1,4 @@
+// @ts-check
 // 2D 台球刚体物理：滑动/滚动双阶段 + 事件驱动接触求解。
 //
 // 设计来源与许可（本项目 MIT，下列引用均兼容）
@@ -81,8 +82,14 @@ const SLIP_EPS2 = SLIP_EPS * SLIP_EPS;
 // 要更接近真实，正确做法是按护角实际斜面做接触求解，而不是叠加一个吸力。
 
 /**
- * @typedef {object} Ball
- * @property {string} id
+ * 刚体状态核：物理核（advanceBall / slipOf / 各种 TOI）真正读写的字段。
+ *
+ * 单独拆出来，是因为求解器里有一处「只当数值试验台」的临时球
+ * （speedAfterDistance 的 probe）：它只需要这套运动学字段，不需要 id / pocketed。
+ * 让它按 BallCore 进类型，就不必为了过类型往临时对象上塞假字段——往球对象上加
+ * 运行时字段会让隐藏类退化，这个项目为此退过一版设计。
+ *
+ * @typedef {object} BallCore
  * @property {number} x
  * @property {number} y
  * @property {number} vx
@@ -90,10 +97,16 @@ const SLIP_EPS2 = SLIP_EPS * SLIP_EPS;
  * @property {number} wx  滚动轴 x 分量
  * @property {number} wy  滚动轴 y 分量
  * @property {number} wz  绕竖直轴的旋转（塞）
- * @property {boolean} pocketed
- * @property {string} [pocket]
- * @property {string} [color]
- * @property {number} [number] 球号，0 为母球
+ * @property {number} [__R] 球半径，由 createWorld 挂上（每步都要用，避免到处传 table）
+ */
+
+/**
+ * 台面上的一颗球：BallCore + 身份与落袋状态。
+ *
+ * `pocket` 是**后置**字段：只有落袋那一刻 settlePockets 才写 `b.pocket = p.id`，
+ * 没落袋的球对象上没有这个键。所以它是可选的，不是"忘了声明"。
+ *
+ * @typedef {BallCore & {id:string, pocketed:boolean, pocket?:string, color?:string, number?:number}} Ball
  */
 
 /** @returns {Ball} */
@@ -237,7 +250,7 @@ export function strike(ball, { angle, speed, tip = { a: 0, b: 0 } }) {
  * 自由运动推进 tau 秒（解析积分，不做定步长迭代）。
  * 打滑阶段摩擦沿滑移方向，滚动阶段沿速度方向，两段在函数内精确分段。
  *
- * @param {Ball} b
+ * @param {BallCore} b
  * @param {number} tau
  */
 export function advanceBall(b, tau) {
@@ -570,7 +583,9 @@ export function findFirstEvent(world, horizon, buffer = EVENT_SCRATCH) {
  *   2. 侧旋对出库角度的影响：杆头偏右时，球撞库后会向左偏转更多。
  *
  * @param {Ball} b
- * @param {Cushion} cushion
+ * @param {{axis:'x'|'y', pos:number, normal:{x:number,y:number}, id:string}} cushion
+ *   只解构 axis / pos / normal，id 仅用于事件上报；按实际用到的形状声明，
+ *   不依赖 table.js 里那个未导出的 Cushion typedef
  * @param {Array} [events]
  */
 function resolveCushion(b, cushion, events, opts = {}) {
@@ -772,6 +787,7 @@ function settlePockets(world, events) {
     // 弹回来的方向由入射角决定——贴库薄球到底是被弹回台面还是滚进袋，
     // 差的就是这一下。这里复用库边响应，只换恢复系数（袋角软得多）并关掉侧旋增益
     // （护角是粗糙实心橡皮，侧旋在那吃不住力）。
+    /** @type {{axis:'x'|'y', pos:number, normal:{x:number,y:number}}[]} */
     const rails = [];
     if (b.x < minX) rails.push({ axis: 'x', pos: 0, normal: { x: 1, y: 0 } });
     else if (b.x > maxX) rails.push({ axis: 'x', pos: table.length, normal: { x: -1, y: 0 } });
@@ -913,8 +929,12 @@ export function speedToReach(dist, residual, R) {
  * 打滑期：|u| 以 3.5μg 衰减，速度以 μg 沿 −sign(u0) 方向变化，
  *         到 |u| = 0 结束，之后转入纯滚动，减速度 μ_roll·g。
  * 这与 advanceBall 的分段完全一致，只是闭式求解，不用迭代。
+ *
+ * 形参 R 不参与任何计算：上面 u0 的推导已经把 R 约掉（R·wy = 2.5·v0·b），
+ * 滚动段的减速度 μg 也与半径无关。保留这个形参只为与 speedToReach / cueSpeedForImpact
+ * 的调用签名对齐，按 TS 约定加下划线前缀豁免 noUnusedParameters。
  */
-export function cueBallSpeedAfterTravel(v0, tipB, dist, R) {
+export function cueBallSpeedAfterTravel(v0, tipB, dist, _R) {
   const b = clamp(tipB ?? 0, -0.5, 0.5);
   const muS = PHYS.muSlide * PHYS.g;
   const muR = PHYS.muRoll * PHYS.g;
@@ -968,7 +988,8 @@ export function cueSpeedForImpact(dist, impactSpeed, tipB, R) {
 /**
  * 跑完一杆，直到全部静止或超时。
  * @param {object} world 会被原地修改
- * @param {{dt?:number,maxTime?:number,onEvent?:(e:object)=>void}} [opts]
+ * @param {{dt?:number,maxTime?:number,onEvent?:(e:object)=>void,
+ *   onStep?:(world:object, elapsed:number)=>void}} [opts]
  */
 export function runShot(world, opts = {}) {
   const dt = opts.dt ?? FIXED_DT;
