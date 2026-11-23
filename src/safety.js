@@ -136,7 +136,7 @@ function scoreSafety({ oppTol, baseTol, fouled, cueNearPocket, cueNearestBall, R
  * @returns {{ok:boolean, reason?:string, fouled?:boolean, cueSpot?:object|null,
  *            balls?:object[]|null, oppTol?:number, hitNumber?:number|null, pocketedAny?:boolean}}
  */
-function shoot(table, balls, cueId, target, aimAngle, speed) {
+function shoot(table, balls, cueId, _target, aimAngle, speed) {
   // 仿真本体（复制球 → strike → runShot → 取首碰）走 src/sim.js 那一个入口，
   // 这里只保留防守侧特有的判定：有没有碰到球、母球有没有摔袋、有没有球碰库。
   const sim = simulateShot(
