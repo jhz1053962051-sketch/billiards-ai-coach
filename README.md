@@ -123,7 +123,7 @@ demo/            浏览器演示（原生 ESM，直接 import ../src/*.js）
   save.js              存档 v2 的序列化与校验：局面 + 对局日志 + 紧凑杆史
   index.html/app.js    击球求解 + 打一局 + 手动出杆 + 存档 + 键盘
   pose.html/pose.js    动作评估
-test/            27 个文件、594 个 node:test 用例
+test/            27 个文件、604 个 node:test 用例
 tools/           静态服务器、测试启动器（test）、demo 自检、门禁判定（gate）、Chrome CDP 端到端验证
 vendor/pose/     MediaPipe Pose Landmarker（Apache-2.0）wasm + lite 模型
 ```
@@ -818,7 +818,7 @@ MediaPipe 的关键点是**回归**出来的，肢体被画面裁掉时它照样
 
 ## 测试
 
-594 个用例，覆盖（数字以 `npm test` 末行的 `ℹ tests` 为准，用例在增删时会变）：
+604 个用例，覆盖（数字以 `npm test` 末行的 `ℹ tests` 为准，用例在增删时会变）：
 
 **击球求解（145 个）**
 
@@ -982,7 +982,7 @@ POSE_STRICT=1 node tools/verify-pose.mjs   # 只对姿态页：缺素材即失�
 
 判定逻辑本身抽到了 `tools/gate.mjs` 的两个纯函数（`judgeVerifyAll` / `judgePose`），不打开浏览器就能单测——9 个用例，`test/gate.test.js`。退出码、汇总文案、跳过与失败的记账这些「说错就骗人」的东西，不该只能靠跑一遍端到端去验。
 
-单元测试的统一入口是 `tools/test.mjs`（`npm test` 就是它）：它按当前 Node 版本挑进程隔离开关，并自己列出 `test/*.test.js`，所以新增测试文件不用改任何脚本。`check:demo` 现在有 411 项静态检查（导入符号存在、DOM id 都在 HTML 里、`file-guard.js` 排在所有 module 之前、物理步长没有写死、CSP 与实际用法匹配、`demo/state.js` 的零 DOM 契约……）。
+单元测试的统一入口是 `tools/test.mjs`（`npm test` 就是它）：它按当前 Node 版本挑进程隔离开关，并自己列出 `test/*.test.js`，所以新增测试文件不用改任何脚本。`check:demo` 现在有 414 项静态检查（导入符号存在、DOM id 都在 HTML 里、`file-guard.js` 排在所有 module 之前、物理步长没有写死、CSP 与实际用法匹配、`demo/state.js` 的零 DOM 契约……）。
 
 CI 在 `.github/workflows/verify.yml`：push 到 `main` / `master`、PR、手动触发都跑，node **22** 与 **24** 两档矩阵，步骤是 `npm ci` → `npm run typecheck` → `npm test` → `npm run check:demo` → 起 `node tools/serve.mjs 4173` 后跑 `npm run verify:demo`（用 `DEMO_URL` 指过去）。**姿态页不在 CI 里**，原因很具体：它要的素材（照片、录像）在 `_research/`，那个目录是 gitignored 的，干净 clone 上必然走「跳过」分支；把 `POSE_STRICT=1` 放进 CI 就永远是红的，不放进 CI 又只是把「假绿」换个地方发生。所以姿态页留在本地门禁里，由 `verify-all.mjs` 的第四项覆盖，CI 只兜住不需要素材的那三段。
 
