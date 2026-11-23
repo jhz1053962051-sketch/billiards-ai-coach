@@ -27,11 +27,18 @@
     --text-secondary: #cbd5e1;
     --muted: #94a3b8;
 
-    /* 多彩台球色球渐变（黄、蓝、红、紫、橙、绿、酒红、曜石黑） */
-    --grad-green: linear-gradient(135deg, #10b981 0%, #059669 100%);
-    --grad-green-hover: linear-gradient(135deg, #34d399 0%, #10b981 100%);
-    --grad-blue: linear-gradient(135deg, #0ea5e9 0%, #2563eb 100%);
-    --grad-blue-hover: linear-gradient(135deg, #38bdf8 0%, #0284c7 100%);
+    /* 多彩台球色球渐变（黄、蓝、红、紫、橙、绿、酒红、曜石黑）。
+       两个主色系压深了：这俩渐变上压的是纯白字，实测对比度不够。
+       改前 --grad-green #10b981→#059669 = 2.54:1（#solve）、
+       --grad-blue #0ea5e9→#2563eb = 2.77:1（#shoot / #gSolve），
+       都低于 WCAG AA 的 4.5:1。压深后（按最亮的那一端算，最差处达标）：
+       --grad-green #047857→#065f46 = 5.48:1、--grad-blue #0369a1→#1d4ed8 = 5.93:1。
+       hover 态同样要过 4.5:1，所以只往更深处走，不再回到亮色。
+       色相没变，还是翡翠绿 / 晴空蓝，只是不再「白纸白字」。 */
+    --grad-green: linear-gradient(135deg, #047857 0%, #065f46 100%);
+    --grad-green-hover: linear-gradient(135deg, #047857 0%, #064e3b 100%);
+    --grad-blue: linear-gradient(135deg, #0369a1 0%, #1d4ed8 100%);
+    --grad-blue-hover: linear-gradient(135deg, #0369a1 0%, #1e40af 100%);
     --grad-amber: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
     --grad-amber-hover: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%);
     --grad-purple: linear-gradient(135deg, #a855f7 0%, #7c3aed 100%);
@@ -261,11 +268,15 @@
   }
   select:hover { border-color: rgba(255, 255, 255, 0.25); }
 
-  /* 卡片：不同功能模块拥有辨识度极高彩色发光边框 */
+  /* 卡片：不同功能模块拥有辨识度极高彩色发光边框。
+     卡片间距统一在这里给：之前是每张卡各自写一个行内 margin-bottom:12px，
+     十三处重复、漏一处就贴在一起。行内那一份已经清掉，只剩 .row / details
+     这种不是 .card 的容器还留着自己的行内边距。 */
   .card {
     background: var(--panel-card);
     border: 1px solid var(--line);
     border-radius: 10px; padding: 13px 14px; box-shadow: var(--shadow-card);
+    margin-bottom: 12px;
     transition: border-color .15s, box-shadow .15s, background .15s;
   }
   .card:hover {
@@ -274,7 +285,7 @@
     box-shadow: 0 8px 24px -2px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.12);
   }
   .card h2 {
-    margin: 0 0 10px; font-size: 11px; font-weight: 700;
+    margin: 0 0 10px; font-size: 12px; font-weight: 700;
     color: var(--muted); letter-spacing: 1.2px; text-transform: uppercase;
     display: flex; align-items: center; justify-content: space-between;
   }
@@ -505,7 +516,7 @@
     width: 100%;
   }
   .power-meter-title {
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 700;
     letter-spacing: 0.5px;
     color: var(--muted);
@@ -522,8 +533,9 @@
     padding: 1px 6px;
     border-radius: 6px;
     color: #fff;
-    background: #10b981;
-    box-shadow: 0 2px 8px rgba(16, 185, 129, 0.4);
+    /* 白字压 #10b981 只有 2.54:1，和 .primary 同一个坑，一起压深到 5.48:1 */
+    background: #047857;
+    box-shadow: 0 2px 8px rgba(4, 120, 87, 0.45);
     transition: background 0.2s ease, box-shadow 0.2s ease;
   }
   .power-pct-text {
@@ -533,7 +545,7 @@
     font-variant-numeric: tabular-nums;
   }
   .power-speed-text {
-    font-size: 10px;
+    font-size: 11px;
     color: var(--text-secondary);
     font-variant-numeric: tabular-nums;
   }
@@ -584,9 +596,13 @@
     justify-content: flex-end;
     align-items: center;
   }
+  /* 刻度字「爆/发/中/轻」原来 9px，是整页最小的一号字，手机上看不清。
+     提到 11px 后单个字宽 11px：轨道右边距 27px、轨道本身 22–24px，
+     标签挂在轨道左侧、不压轨道，四档在桌面 220px / 手机 104px 的轨道上
+     间距分别是 55px / 26px，11px 字也不会挤到一起。 */
   .scale-mark i {
     font-style: normal;
-    font-size: 9px;
+    font-size: 11px;
     color: rgba(255, 255, 255, 0.6);
     position: absolute;
     right: 27px;
@@ -690,10 +706,6 @@
     border: 2px solid #ffffff; box-shadow: 0 2px 8px rgba(168, 85, 247, 0.6);
   }
   .ctrl input[type=range]:disabled { opacity: .4; cursor: not-allowed; }
-
-  button:focus-visible, select:focus-visible, input[type=checkbox]:focus-visible, a:focus-visible {
-    outline: 2px solid #38bdf8; outline-offset: 2px;
-  }
   kbd {
     font: inherit; font-size: 11px; padding: 1px 6px; border-radius: 4px;
     background: linear-gradient(180deg, #283a4e 0%, #1a2736 100%);
@@ -709,7 +721,7 @@
     border-radius: 10px; box-shadow: var(--shadow-card); overflow: hidden;
   }
   details.card-collapsible summary {
-    padding: 10px 14px; font-size: 11px; font-weight: 700;
+    padding: 10px 14px; font-size: 12px; font-weight: 700;
     color: var(--muted); letter-spacing: 1.2px; text-transform: uppercase;
     cursor: pointer; list-style: none; display: flex; align-items: center; justify-content: space-between;
     user-select: none; transition: background .15s;
@@ -886,12 +898,15 @@
   .practice-day-bar.no-data { background: rgba(148, 163, 184, 0.25); }
   .practice-day-count { color: var(--text-secondary); margin-top: 3px; white-space: nowrap; }
   .practice-day-label { white-space: nowrap; }
+  /* 「记进 / 记失误」也是白字压绿/红渐变：原来 #059669→#10b981 最差 2.54:1、
+     #9f1239→#e11d48 最差 4.70:1，跟 .primary 同一套色，一起压深。
+     改后 5.48:1 / 6.28:1。 */
   button.practice-made:not(:disabled) {
-    flex: 1; background: linear-gradient(135deg, #059669, #10b981);
+    flex: 1; background: linear-gradient(135deg, #047857, #065f46);
     border-color: rgba(110, 231, 183, 0.65); font-weight: 700;
   }
   button.practice-missed:not(:disabled) {
-    flex: 1; background: linear-gradient(135deg, #9f1239, #e11d48);
+    flex: 1; background: linear-gradient(135deg, #9f1239, #be123c);
     border-color: rgba(251, 113, 133, 0.55); font-weight: 700;
   }
   button.practice-clear { font-size: 11px; padding-inline: 9px; }
@@ -905,8 +920,14 @@
     flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid var(--line);
     border-radius: 6px; background: #1b2938; color: var(--text); font: inherit; font-size: 12px;
   }
+  /* 焦点框全站只留这一处（之前 694 行还有一条 outline 2px / offset 2px 的旧规则，
+     已被这条完全覆盖，删掉）。
+     .alt 是 app.js 挂 role="button" + tabindex 的 div，不在 button 选择器里，
+     以前落回浏览器默认的 outline:auto，三行候选和全站其它焦点不是一套视觉；
+     统一到这里，一把键盘走下来看到的是同一个框。 */
   button:focus-visible, select:focus-visible, input[type=checkbox]:focus-visible,
-  input[type=range]:focus-visible, a:focus-visible, summary:focus-visible {
+  input[type=range]:focus-visible, a:focus-visible, summary:focus-visible,
+  .alt:focus-visible {
     outline: 2px solid #38bdf8; outline-offset: 3px;
   }
   .practice-details { margin-top: 8px; }
@@ -999,6 +1020,89 @@
   .share-actions { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px; font-size: 13px; }
   .share-actions a { color: #7dd3fc; font-weight: 600; text-decoration: none; padding: 4px 0; }
   .share-actions a:hover { text-decoration: underline; }
+
+  /* ===== 窄屏（手机）专项：首屏顺序、点击目标、正文可读性 =====
+     全部只在 max-width:900px 生效。桌面 1440 的层级、密度、字号一个像素不动——
+     手机上要「够大够清楚」，桌面上要「一屏塞得下」，这两件事本来就该分开做。 */
+  @media (max-width: 900px) {
+    /* 1）首屏先给「备选进球路线」。
+       390×844 实测：这块原本排在 AI 卡后面，而 header 96 + 台面 241.8 + 力度条 122
+       已经吃掉首屏 55%，备选路线只剩下 13px 露头，要滚 245.5px 才看全。
+       这里用容器上的 flex order 把它提到 AI 卡之前，**不改 DOM 顺序**：
+       桌面端「先结论、后备选」的层级是有意排的，不该为手机让路。 */
+    #practicePanel { display: flex; flex-direction: column; }
+    #practicePanel > .row { order: -2; }        /* 求解 / 演示 / 重置 仍然排第一 */
+    #practicePanel > .alts-card { order: -1; }  /* 备选路线紧跟着它 */
+
+    /* 2）点击目标 ≥44px。44px 是手指的物理下限（约 7mm）。
+       只放大盒子本身，不用 transform: scale 把视觉虚胖——
+       那样元素的 rect 还是小的，用户点到的也还是小的。 */
+    button, select, summary, .share-btn,
+    .power-chip, .power-meter-chip, .alt { min-height: 44px; }
+    /* 力度芯片 33×29.6 是整页最小的一块，宽高都得撑 */
+    .power-meter-chip { min-width: 44px; }
+    summary { display: flex; align-items: center; }
+    header nav a { min-height: 44px; display: inline-flex; align-items: center; }
+    /* 滑块本体 18px 高，撑到 44 但轨道还是 ::-webkit-slider-runnable-track 画的那条
+       5px 细轨，只是上下各多一圈可拖拽的空白，视觉密度没变。 */
+    input[type=range] { min-height: 44px; }
+
+    /* 3）复选框：视觉还是 36×19 的小开关，命中区撑到 44×44。
+       直接把 input 拉高会把开关拉成一坨胶囊，所以「胶囊」画到 ::before 上，
+       input 自己透明、只当点击区，圆点跟着重新对中。 */
+    label.switch { min-height: 44px; }
+    label.switch input[type=checkbox] {
+      width: 44px; height: 44px; border: 0; background: none; box-shadow: none;
+    }
+    label.switch input[type=checkbox]::before {
+      content: ''; position: absolute; left: 50%; top: 50%;
+      width: 36px; height: 19px; margin: -9.5px 0 0 -18px;
+      border-radius: 10px; background: #233448; border: 1px solid var(--line);
+      box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.4); transition: var(--transition);
+    }
+    label.switch input[type=checkbox]::after { top: 50%; left: 50%; margin: -6.5px 0 0 -16px; }
+    label.switch input[type=checkbox]:checked { background: none; border-color: transparent; box-shadow: none; }
+    label.switch input[type=checkbox]:checked::before {
+      background: var(--grad-blue); border-color: #38bdf8;
+      box-shadow: 0 0 10px rgba(14, 165, 233, 0.45);
+    }
+    label.switch input[type=checkbox]:checked::after { transform: translateX(17px); }
+
+    /* 4）顶部栏：控件全部 44 高了，就把内边距和行距压到最小，
+       别让「点得准」变成「首屏全给导航」。
+       实测 header 96 → 115 是「44 高的按钮 + 自己那圈 3px 内边距 + 1px 边框」叠出来的：
+       52 高的 .tabs 盒子把第一行撑到 52。把它的内边距收掉，两个页签直接吃满 44，
+       header 回到 106——省下的 9px 全给首屏内容。 */
+    header { padding: 6px 10px; gap: 6px; }
+    .tabs { padding: 0; }
+
+    /* 5）正文 14px（手机）。13px 是下限，但 390 宽的屏上 13px 仍然是「要凑近看」的量级，
+       统一到 14px：这就是浏览器默认正文大小，读起来不需要调节。 */
+    .hint, .empty, .log, .kb, .ctrl label, .cue-pad-info,
+    .miss-reason-row label, .practice-goal-header label,
+    .practice-details summary, #report, .match-stats { font-size: 14px; }
+    button, select, label, h1 { font-size: 14px; }
+    .alt .name { font-size: 14px; }
+    .alt .position { font-size: 12px; }
+    .verdict-note { font-size: 12px; }
+    .practice-buckets, .practice-day, .practice-day-rate { font-size: 11px; }
+    /* 小字再抬一档：力度条的标签/读数、芯片、快捷键字母、PRO 徽章。
+       轨道刻度（.scale-mark i）留在 11px 是有理由的：手机轨道只有 104px 高、
+       四个刻度间距 26px，12px 的「爆/发/中/轻」会把右侧边距吃穿（见该规则上方注释）。 */
+    .power-meter-title, .power-speed-text, .power-tier-badge,
+    .power-meter-chip, .power-chip, kbd, .badge-ai { font-size: 12px; }
+    header nav a { font-size: 14px; }
+    /* 页内标题与页签：它们各自有类/后代选择器（header h1、.tabs button）压着基础规则，
+       这里显式给到 14px，别让「主标题比正文还小」。 */
+    header h1 { font-size: 14px; }
+    .tabs button { font-size: 14px; }
+    /* 极密的两处例外：备选路线里那两行参数（.meta 是 nowrap，加大会横向溢出）
+       和「窄/中/宽」三档统计（三列并排，12px 就会折行）。这两处留 11–12px。 */
+    button.practice-clear, button.practice-undo,
+    .practice-backup-actions button { font-size: 12px; }
+    footer { font-size: 12px; }
+    .share-actions a { min-height: 44px; display: inline-flex; align-items: center; }
+  }
   .hidden { display: none !important; }
 </style>
 </head>
@@ -1009,13 +1113,13 @@
     <h1>台球 AI 教练 <span class="badge-ai">PRO</span></h1>
   </div>
   <div class="tabs">
-    <button id="tabPractice" class="on">练习</button>
-    <button id="tabGame">打一局</button>
+    <button type="button" id="tabPractice" class="on">练习</button>
+    <button type="button" id="tabGame">打一局</button>
   </div>
   <div class="sub-pill">
     <span class="sub" id="subtitle">拖动任意球改摆位 · 求解后给出瞄准线、容错窗口与力度</span>
   </div>
-  <select id="tablePreset" title="球台尺寸"></select>
+  <select id="tablePreset" title="球台尺寸" aria-label="球台尺寸（黑八 / 九球 / 斯诺克）"></select>
   <nav><a href="./pose.html">动作评估 ↗</a></nav>
 </header>
 
@@ -1031,13 +1135,17 @@
       <button id="autoPauseResume" type="button" style="padding:4px 10px;border-radius:999px;border:1px solid rgba(245,158,11,.7);background:rgba(245,158,11,.18);color:#fde68a;font-size:13px;cursor:pointer;white-space:nowrap;">点此继续</button>
     </div>
     <div class="stage-controls">
-      <button id="viewToggle" class="view-toggle-btn" title="切换第一人称视角 / 俯视视角 (快捷键: V)">
+      <button type="button" id="viewToggle" class="view-toggle-btn" title="切换第一人称视角 / 俯视视角 (快捷键: V)">
         <span class="vt-icon">🎥</span>
         <span id="viewToggleText">视角: 俯视</span>
         <kbd>V</kbd>
       </button>
     </div>
-    <canvas id="table"></canvas>
+    <!-- 台面是 <canvas>：屏幕阅读器原本只能拿到一个匿名的「画布」。
+         role="img" + 描述性 aria-label 告诉它这是一张什么图；
+         具体走势（瞄准线、容错窗口、力度）都另有文本输出，不指望它读像素。 -->
+    <canvas id="table" role="img"
+      aria-label="球台俯视图：从上方俯视的台面，画有全部目标球、母球、瞄准线与容错窗口。可用鼠标或手指拖动球改摆位，结果同时以文字给在右侧面板。"></canvas>
   </div>
 
   <!-- 经典游戏级垂直拉杆力度槽 (参考 8 Ball Pool / 腾讯桌球)。
@@ -1078,12 +1186,12 @@
     <!-- 练习模式 -->
     <div id="practicePanel">
       <div class="row" style="margin-bottom:12px">
-        <button id="solve" class="primary" style="flex:1">求解最佳方案</button>
-        <button id="shoot" style="background:var(--grad-blue);border-color:#38bdf8;color:#fff;font-weight:600">演示这一杆</button>
-        <button id="reset">重置</button>
+        <button type="button" id="solve" class="primary" style="flex:1">求解最佳方案</button>
+        <button type="button" id="shoot" style="background:var(--grad-blue);border-color:#38bdf8;color:#fff;font-weight:600">演示这一杆</button>
+        <button type="button" id="reset">重置</button>
       </div>
 
-      <div class="card hero" style="margin-bottom:12px">
+      <div class="card hero">
         <h2>AI 击球战术</h2>
         <div id="advice" class="empty">点「求解最佳方案」开始。</div>
         <div id="verdict"></div>
@@ -1093,14 +1201,14 @@
       <!-- 备选路线紧跟在「AI 击球战术」下面，不排在专项训练之后：这是教练给出的
            第二层价值（换一条路线怎么打），原来要往下滚才看得到，1440×900 首屏外。
            顺序调整纯属排版，卡片内容与 id 都没动。 -->
-      <div class="card alts-card" style="margin-bottom:12px">
+      <div class="card alts-card">
         <h2>备选进球路线</h2>
         <!-- 鼠标悬停有变色，触屏没有；不写一句话，手机上看着就是一列文字 -->
         <div class="hint" style="margin-bottom:6px">点某一条就换成那个方案（球杆会跟着转过去）。</div>
         <div id="alts" class="empty">—</div>
       </div>
 
-      <div class="card" style="margin-bottom:12px;border-left:3px solid #34d399">
+      <div class="card" style="border-left:3px solid #34d399">
         <h2>专项训练</h2>
         <p class="hint">选择一类球型，一键摆球；每次会轮换 6 种合法球位与目标袋方向，减少记固定答案。每 5 杆命中至少 4 杆，记为完成一组。只统计你手动记录的实战结果。</p>
         <div class="row">
@@ -1110,20 +1218,20 @@
             <option value="cut">切球</option>
             <option value="long">长台球</option>
           </select>
-          <button id="startDrill" class="primary">摆好训练球</button>
+          <button type="button" id="startDrill" class="primary">摆好训练球</button>
         </div>
         <div id="drillDescription" class="hint" style="margin-top:7px"></div>
         <div id="drillProgress" style="margin-top:6px;font-size:13px;font-weight:600" aria-live="polite"></div>
       </div>
 
-      <div class="card" style="margin-bottom:12px;border-left:3px solid #34d399">
+      <div class="card" style="border-left:3px solid #34d399">
         <h2>实战练习反馈</h2>
         <p class="hint">在真实球桌按推荐方案练完后记录结果。「演示这一杆」只运行仿真，不会计入实战统计。</p>
         <div class="row">
-          <button id="practiceMade" disabled class="practice-made">实战打进</button>
-          <button id="practiceMissed" disabled class="practice-missed">实战没进</button>
-          <button id="practiceUndo" class="practice-undo" disabled>撤销刚才那条</button>
-          <button id="clearPractice" class="practice-clear">清空记录</button>
+          <button type="button" id="practiceMade" disabled class="practice-made">实战打进</button>
+          <button type="button" id="practiceMissed" disabled class="practice-missed">实战没进</button>
+          <button type="button" id="practiceUndo" class="practice-undo" disabled>撤销刚才那条</button>
+          <button type="button" id="clearPractice" class="practice-clear">清空记录</button>
         </div>
         <div class="miss-reason-row">
           <label for="missReason">未进原因（可选）</label>
@@ -1139,11 +1247,11 @@
         </div>
         <div id="missReasonSummary" class="hint" style="margin-top:6px" aria-live="polite"></div>
         <div id="practiceFocus" class="hint" style="margin-top:7px;padding:8px;border-radius:6px;background:rgba(56,189,248,.08)" aria-live="polite"></div>
-        <button id="practiceFocusAction" hidden style="margin-top:6px">开始推荐训练</button>
-        <button id="exportPractice" disabled class="practice-export">导出实战记录 CSV</button>
+        <button type="button" id="practiceFocusAction" hidden style="margin-top:6px">开始推荐训练</button>
+        <button type="button" id="exportPractice" disabled class="practice-export">导出实战记录 CSV</button>
         <div class="practice-backup-actions">
-          <button id="backupPractice">下载完整备份</button>
-          <button id="restorePractice">从备份恢复</button>
+          <button type="button" id="backupPractice">下载完整备份</button>
+          <button type="button" id="restorePractice">从备份恢复</button>
         </div>
         <input id="practiceBackupFile" type="file" accept=".json,application/json" hidden>
         <div class="hint">备份文件包含完整记录；恢复会替换当前记录，操作前会再次确认。</div>
@@ -1181,11 +1289,11 @@
         </details>
       </div>
 
-      <div class="card tune-card" style="margin-bottom:12px">
+      <div class="card tune-card">
         <h2>手打微调出杆</h2>
         <!-- 击球点直观靶盘 -->
         <div class="cue-pad-row">
-          <div id="cueBallPad" class="cue-ball-pad" title="拖动或点击圆盘设置击球点（高低杆与左右塞）">
+          <div id="cueBallPad" class="cue-ball-pad" title="拖动或点击圆盘设置击球点（高低杆与左右塞）" role="img" aria-label="击球点示意图：圆盘上的红点表示杆头打在母球上的位置，可拖动。">
             <div class="cue-ball-crosshair-h"></div>
             <div class="cue-ball-crosshair-v"></div>
             <div id="cueBallDot" class="cue-ball-dot"></div>
@@ -1219,29 +1327,29 @@
           <input type="range" id="tipA" min="-0.5" max="0.5" step="0.05" value="0">
         </div>
         <div class="row" style="margin-top:10px">
-          <button id="useSolution" style="flex:1;background:var(--grad-indigo);border-color:#818cf8;color:#fff;font-weight:600">套用求解参数</button>
-          <button id="shootManual" class="primary" style="flex:1">按这些参数打</button>
+          <button type="button" id="useSolution" style="flex:1;background:var(--grad-indigo);border-color:#818cf8;color:#fff;font-weight:600">套用求解参数</button>
+          <button type="button" id="shootManual" class="primary" style="flex:1">按这些参数打</button>
         </div>
         <p class="hint" style="margin-top:8px">
           手动参数从当前瞄准线出发：先「求解」定方向，再用「瞄准偏移」微调。左右塞会改变母球出库角，是真实侧旋物理。
         </p>
       </div>
 
-      <div class="card rack-card" style="margin-bottom:12px">
+      <div class="card rack-card">
         <h2>台面摆球</h2>
         <div class="row" style="align-items:center">
-          <select id="ballPick" style="flex:1"></select>
-          <button id="addBall" style="background:var(--grad-purple);border-color:#c084fc;color:#fff;font-weight:600">+ 加一颗</button>
+          <select id="ballPick" style="flex:1" aria-label="选择要加上的目标球"></select>
+          <button type="button" id="addBall" style="background:var(--grad-purple);border-color:#c084fc;color:#fff;font-weight:600">+ 加一颗</button>
         </div>
         <div class="row" style="align-items:center;margin-top:8px">
-          <select id="ballRemove" style="flex:1"></select>
-          <button id="removeBall">- 拿掉</button>
-          <button id="rackUp">摆满 15 颗</button>
+          <select id="ballRemove" style="flex:1" aria-label="选择要拿掉的目标球"></select>
+          <button type="button" id="removeBall">- 拿掉</button>
+          <button type="button" id="rackUp">摆满 15 颗</button>
         </div>
         <p class="hint" style="margin-top:8px">最多 16 颗（1 颗母球 + 15 颗目标球）。加错了用「拿掉」单独移走那一颗，不用整盘重置。</p>
       </div>
 
-      <div class="card" style="margin-bottom:12px">
+      <div class="card">
         <h2>辅助显示</h2>
         <label class="switch"><input type="checkbox" id="showCone" checked> 显示容错锥（视觉放大 20×）</label>
         <label class="switch"><input type="checkbox" id="showGhost" checked> 显示假想球与进球线</label>
@@ -1282,66 +1390,68 @@
     <!-- 球局模式 -->
     <div id="gamePanel" class="hidden">
       <div class="row" style="margin-bottom:12px">
-        <button id="newGame" class="primary">新的一局</button>
-        <select id="gameKind" title="玩哪种规则">
+        <button type="button" id="newGame" class="primary">新的一局</button>
+        <select id="gameKind" title="玩哪种规则" aria-label="对局规则（黑八 / 九球 / 斯诺克）">
           <option value="eightball">黑八（15 颗三角）</option>
           <option value="nineball">九球（9 颗菱形）</option>
           <option value="snooker">斯诺克（15 红 + 6 彩）</option>
         </select>
-        <button id="gSolve" style="background:var(--grad-blue);border-color:#38bdf8;color:#fff;font-weight:600">求解</button>
-        <button id="gShoot" style="background:var(--grad-amber);border-color:#fbbf24;color:#1a0f00;font-weight:700">打这一杆</button>
-        <button id="gUndo">撤销上一杆</button>
-        <button id="gRerack" class="hidden">重摆开球</button>
+        <button type="button" id="gSolve" style="background:var(--grad-blue);border-color:#38bdf8;color:#fff;font-weight:600">求解</button>
+        <button type="button" id="gShoot" style="background:var(--grad-amber);border-color:#fbbf24;color:#1a0f00;font-weight:700">打这一杆</button>
+        <button type="button" id="gUndo">撤销上一杆</button>
+        <button type="button" id="gRerack" class="hidden">重摆开球</button>
       </div>
       <label class="switch" style="margin-bottom:10px"><input type="checkbox" id="autoOpponent" checked> 对手自动出杆（关掉就是双方都由你操作）</label>
       <label class="switch" style="margin-bottom:12px"><input type="checkbox" id="allowSafety" checked> 没有进攻机会时打防守（关掉就退回兜底直撞）</label>
 
-      <div id="gChoice" class="card hidden" style="margin-bottom:12px">
+      <div id="gChoice" class="card hidden">
         <h2>开球不达标</h2>
         <p class="hint" style="margin-bottom:8px">
           九球开球要至少三颗目标球「进袋或越过开球线」。这一杆没做到，按 WPA Regulation 16
           接手方有选择权——你可以照现在这样接着打，也可以把台面交回给开球方（对方再开球时可以推杆）。
         </p>
         <div class="row">
-          <button id="gAccept">照这样打</button>
-          <button id="gHandBack">交回给对手</button>
+          <button type="button" id="gAccept">照这样打</button>
+          <button type="button" id="gHandBack">交回给对手</button>
         </div>
       </div>
 
-      <div class="card" style="margin-bottom:12px;border-left:3px solid #38bdf8">
+      <div class="card" style="border-left:3px solid #38bdf8">
         <h2>对战记分牌</h2>
-        <div class="score" id="score"></div>
+        <!-- 轮次与比分是异步变化的（对手回合、判罚），屏幕阅读器不会主动去念。
+             aria-live 只声明「这块会变」；写什么、什么时候写仍由 app.js 决定。 -->
+        <div class="score" id="score" aria-live="polite"></div>
       </div>
 
-      <div class="card" style="margin-bottom:12px;border-left:3px solid #f43f5e">
+      <div class="card" style="border-left:3px solid #f43f5e">
         <h2>这一杆播报</h2>
         <div id="report" class="empty">点「新的一局」开始。</div>
       </div>
 
-      <div class="card hero" style="margin-bottom:12px">
+      <div class="card hero">
         <h2>AI 击球战术建议</h2>
         <div id="gAdvice" class="empty">—</div>
         <div id="gVerdict"></div>
       </div>
 
-      <div class="card" style="margin-bottom:12px">
+      <div class="card">
         <h2>对局存档</h2>
         <div class="row">
-          <button id="saveGame">保存这一局</button>
-          <button id="loadGame">读取存档</button>
-          <button id="clearSave">删掉存档</button>
+          <button type="button" id="saveGame">保存这一局</button>
+          <button type="button" id="loadGame">读取存档</button>
+          <button type="button" id="clearSave">删掉存档</button>
         </div>
         <p class="hint" id="saveInfo" style="margin-top:8px">还没有存档。存的是局面本身（球位、分组、杆数、轮到谁），刷新页面之后还能接着打。</p>
         <!-- 存档只在当前浏览器里，换台机器、换个浏览器、清了站点数据就没了。
              给一份能拿走的文件，换设备之后还能接着打这一局。 -->
         <div class="row" style="margin-top:8px">
-          <button id="exportGameSave">导出到文件</button>
-          <button id="importGameSave">从文件读取</button>
+          <button type="button" id="exportGameSave">导出到文件</button>
+          <button type="button" id="importGameSave">从文件读取</button>
         </div>
         <input id="gameSaveFile" type="file" accept=".json,application/json" hidden>
         <!-- 另一个标签页存了新档时不自动换桌——正打到关键一杆时局面自己变掉
              比丢存档更难受。但也不能只提示不给路，所以给一个按下去才生效的入口。 -->
-        <button id="takeOtherSave" class="hidden" style="margin-top:8px">读入另一个标签页存的</button>
+        <button type="button" id="takeOtherSave" class="hidden" style="margin-top:8px">读入另一个标签页存的</button>
         <p class="hint" style="margin-top:6px">导出的是一个 JSON 文件，换设备后「从文件读取」能接着打。文件里的球位会按球台尺寸校验，越界或玩法不认识就整份丢掉。</p>
       </div>
 
@@ -1365,7 +1475,7 @@
          「复盘这一局」只在局已结束时可用，禁用理由写在按钮 title 上。
          图上半是台面俯视图，下半是这份文案，方便直接发给别人；
          点图（手机长按也行）直接在新标签里看到原图。 -->
-    <div class="card" style="margin-bottom:12px">
+    <div class="card">
       <h2>导出一张图</h2>
       <div class="share-row">
         <button id="shareShot" type="button" class="share-btn">分享这一杆</button>
