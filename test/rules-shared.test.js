@@ -104,6 +104,15 @@ function assertSame(name, [a, b], allow = []) {
     if (skip.includes(f)) continue;
     assert.deepEqual(a.next[f], b.next[f], `${name}: next.${f} 两条玩法不一致`);
   }
+  // 字段集合与顺序也要一致。report 是按一个字面量拼出来的，把那段搬进
+  // buildShotReport 之后最容易出的事故就是"少一个字段"或"字段换了个位置"——
+  // deepEqual 不看 key 顺序，所以这里单独比一遍 key 序列（基线快照、界面取字段
+  // 都依赖这个顺序）。
+  assert.deepEqual(
+    Object.keys(a.report).filter((k) => !skip.includes(k)),
+    Object.keys(b.report).filter((k) => !skip.includes(k)),
+    `${name}: report 的字段集合或顺序两条玩法不一致`
+  );
   const ra = { ...a.report };
   const rb = { ...b.report };
   for (const f of skip) {
@@ -218,4 +227,87 @@ test('护栏：连续犯规的计数两边一致，只有"判不判负"按玩法
   assert.equal(cur8.phase, 'playing', '八球连犯三次不判负（WPA 3.13 排除 8-Ball）');
   assert.equal(cur9.phase, 'ended', '九球连犯三次判负');
   assert.equal(cur9.winner, 1);
+});
+
+/** 连打多杆，两条玩法始终对拍；每一步的 spec 都按球号数组生成，返回两条路径的逐步结果。 */
+function playSequence(eightNumbers, nineNumbers, specs, opts = {}) {
+  let cur8 = createGame(table, makeBalls(eightNumbers), { kind: 'eightball' });
+  let cur9 = createGame(table, makeBalls(nineNumbers), { kind: 'nineball' });
+  for (const g of [cur8, cur9]) {
+    if (opts.turn !== undefined) g.turn = opts.turn;
+    if (opts.breakShot === false) g.breakShot = false;
+  }
+  const out8 = [];
+  const out9 = [];
+  for (const s of specs) {
+    const spec8 = typeof s === 'function' ? s(eightNumbers) : s;
+    const spec9 = typeof s === 'function' ? s(nineNumbers) : s;
+    const r8 = resolveShot(cur8, makeFacts(cur8, spec8));
+    const r9 = resolveShot(cur9, makeFacts(cur9, spec9));
+    out8.push(r8);
+    out9.push(r9);
+    cur8 = r8.next;
+    cur9 = r9.next;
+  }
+  return [out8, out9];
+}
+
+test('护栏：连打五杆，每一杆的两条路径都逐字段对拍（含 report 字段顺序）', () => {
+  const specs = [
+    { pocketed: [], objectBallsToRail: [1, 2, 3, 4] }, // 合法开球：四颗碰库、没进球
+    {}, // 干净一杆：先碰最小号、有碰库、没进球 → 换人
+    { pocketed: [{ number: 0 }], cueScratched: true }, // 母球落袋 → 换人 + 全场自由球
+    {}, // 再来一杆干净球
+    // 先碰 8 / 9 号：两条路径各自的"最大号球"，犯规代码必须同为 wrong_ball_first
+    (nums) => ({ firstContact: nums[nums.length - 1], railsAfterContact: ['b1'] }),
+  ];
+  const [r8, r9] = playSequence([1, 2, 3, 8], [1, 2, 3, 9], specs);
+  assert.equal(r8.length, specs.length, '每一步都要产出一份结果');
+  // 第 5 杆是某人的第二次犯规：九球会给三犯警告（3.13），八球不判三犯、也就不发警告。
+  // 这是 foulCounter 参数唯一的实质差异，所以只在这一杆放开 players，下面单独核对差异形状。
+  const allowAt = (i) => {
+    if (i === 4) return ['firstContact', 'players'];
+    return [];
+  };
+  for (let i = 0; i < specs.length; i++) {
+    // 只有"先碰错球"那一杆的 firstContact 号码天然不同（8 vs 9），其余一律不许有差异
+    assertSame(`五杆序列第 ${i + 1} 杆`, [r8[i], r9[i]], allowAt(i));
+    const log8 = r8[i].next.log[r8[i].next.log.length - 1];
+    const log9 = r9[i].next.log[r9[i].next.log.length - 1];
+    assert.deepEqual(
+      log8.fouls,
+      log9.fouls,
+      `五杆序列第 ${i + 1} 杆：日志里记下的犯规代码两条玩法不一致`
+    );
+    assert.equal(log8.shot, log9.shot, `五杆序列第 ${i + 1} 杆：日志的杆序不一致`);
+  }
+  // 放开 players 的那一杆，差异必须只有 warned 一项
+  const stripWarned = (players) => players.map(({ warned, ...rest }) => rest);
+  assert.deepEqual(
+    stripWarned(r8[4].next.players),
+    stripWarned(r9[4].next.players),
+    '第 5 杆两条玩法的玩家状态除了 warned 之外必须完全一致'
+  );
+  assert.equal(r8[4].next.players[0].warned, false, '八球连犯两次不发三犯警告（3.13 排除 8-Ball）');
+  assert.equal(r9[4].next.players[0].warned, true, '九球第二次犯规要给三犯警告');
+  assert.equal(r8[4].next.players[0].fouls, r9[4].next.players[0].fouls, '两边的犯规计数必须一样');
+  // 一路没进球、也没分组：五杆之后两条路径的杆数、开台状态都必须还对得上
+  assert.equal(r8[4].next.shots, 5);
+  assert.equal(r9[4].next.shots, 5);
+  assert.equal(r8[4].next.open, r9[4].next.open);
+});
+
+test('护栏：pendingChoice 通道只挂在九球 report 上（extraReport 参数的行为）', () => {
+  // 开球三球过线不达标只在九球存在，八球这一杆是"合法开球但没进球"。
+  // 两边的结论不同是规则本身决定的，但"多出一个字段"这件事必须是参数控制的，
+  // 不能是某条分支顺手塞进去的。
+  const [eight, nine] = playBoth([1, 2, 8], [1, 2, 9], { pocketed: [], objectBallsToRail: [1, 2, 3, 4] });
+  assert.equal('pendingChoice' in nine.report, true, '九球 report 必须带 pendingChoice 通道');
+  assert.equal('pendingChoice' in eight.report, false, '八球 report 不该出现 pendingChoice');
+  // 两个 report 的字段集合只允许差允许清单里的那几个
+  assert.deepEqual(
+    Object.keys(nine.report).filter((k) => !BASE_ALLOW.includes(k)),
+    Object.keys(eight.report).filter((k) => !BASE_ALLOW.includes(k)),
+    '两个 report 的字段集合只允许差 BASE_ALLOW 里的字段'
+  );
 });

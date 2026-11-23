@@ -475,6 +475,15 @@ function judgeShotFouls({ next, facts, addFoul }) {
   if (facts.firstContact !== null && !railOk) addFoul(FOUL.NO_RAIL);
 }
 
+// 一杆的犯规判定。开球与普通一杆的条目不同（4.3(d) / 5.3(b) vs 3.2 / 3.3），
+// 但都往同一个 addFoul 收集器里记；调用点只关心"按哪种判"和"最后犯没犯"，
+// 所以这里只做分派并回一个布尔，收集器仍由 ctx 显式带着走（不靠闭包）。
+function judgeFouls(ctx) {
+  if (ctx.isBreak) judgeBreakFouls(ctx);
+  else judgeShotFouls(ctx);
+  return ctx.fouls.length > 0;
+}
+
 // 分组（4.4），只有黑八有。
 function assignGroups({ next, facts, me, opp, myName, isBreak, fouled, ended, pocketedObjects, notes }) {
   if (isBreak || fouled || !next.open || pocketedObjects.length === 0 || ended) return null;
@@ -562,7 +571,7 @@ function nineBallSettle(threeBallFailed) {
 // 一杆的收尾：分组 → 记犯规 → 续杆 → 交轮 → 同步球位 → 组 report → 摘要 → 记日志。
 // 原本逐字重复的 55 行就在这里，差异全在 opts 的 7 个参数上（见上面的清单）。
 function settleShot(ctx, opts) {
-  const { next, facts, me, opp, myName, oppName, isBreak, fouls, notes, pocketedObjects, fouled, spotted } = ctx;
+  const { next, facts, me, myName, oppName, spotted } = ctx;
   let ended = ctx.ended;
   let winner = ctx.winner;
 
@@ -570,17 +579,44 @@ function settleShot(ctx, opts) {
   const groupAssigned = opts.groupLogic ? opts.groupLogic(ctx) : null;
 
   // ---- 连续犯规（3.13）----
-  // endedFirst 为真 = 结局判定排在记账之前，已判结局就不再记账（九球三犯判负的顺序约束）
-  if (!(opts.endedFirst && ended)) {
-    const counted = FOUL_COUNTERS[opts.foulCounter]({ ...ctx, ended, winner });
-    ended = counted.ended;
-    winner = counted.winner;
-  }
+  const counted = countFouls(ctx, opts, { ended, winner });
+  ended = counted.ended;
+  winner = counted.winner;
 
   // ---- 续杆判定 ----
   const continuing = opts.continuing({ ...ctx, ended });
 
   // ---- 状态推进 ----
+  const pendingChoice = advanceTurn(ctx, opts, { ended, winner, continuing });
+  if (opts.extraReport) next.pendingChoice = pendingChoice;
+
+  next.breakShot = false;
+  next.shots += 1;
+
+  syncBallsAfterShot(next, facts, spotted);
+
+  const report = buildShotReport(ctx, opts, { continuing, groupAssigned, pendingChoice, ended, winner });
+  report.summary = summarizeReport(report, next, myName, oppName);
+
+  next.log.push({ shot: next.shots, shooter: me, summary: report.summary, fouls: report.fouls.map((f) => f.code) });
+  return { next, report };
+}
+
+/**
+ * 连续犯规计数（3.13）。endedFirst 为真 = 结局判定排在记账之前，
+ * 已判结局就不再记账（九球三犯判负的顺序约束）。
+ */
+function countFouls(ctx, opts, { ended, winner }) {
+  if (opts.endedFirst && ended) return { ended, winner };
+  return FOUL_COUNTERS[opts.foulCounter]({ ...ctx, ended, winner });
+}
+
+/**
+ * 球权推进：重摆 / 犯规持球 / 三球过线的待决 / 续杆 / 或收局。
+ * 返回九球 report 独有的 pendingChoice（八球的 report 没有这个字段，由 extraReport 决定写不写）。
+ */
+function advanceTurn(ctx, opts, { ended, winner, continuing }) {
+  const { next, me, opp, isBreak, fouls, fouled } = ctx;
   let pendingChoice = null;
   if (!ended) {
     if (opts.illegalBreak.onFoul === 'rerack' && fouls.includes(FOUL.ILLEGAL_BREAK)) {
@@ -609,12 +645,11 @@ function settleShot(ctx, opts) {
     next.winner = winner;
     next.ballInHand = null;
   }
-  if (opts.extraReport) next.pendingChoice = pendingChoice;
+  return pendingChoice;
+}
 
-  next.breakShot = false;
-  next.shots += 1;
-
-  // 球的位置以物理结果为准（重摆回去的球除外：黑八的 8 号、九球的 9 号）
+/** 球的位置以物理结果为准（重摆回去的球除外：黑八的 8 号、九球的 9 号）。 */
+function syncBallsAfterShot(next, facts, spotted) {
   for (const b of next.balls) {
     const after = facts.ballsAfter.find((x) => x.id === b.id);
     if (!after) continue;
@@ -625,8 +660,12 @@ function settleShot(ctx, opts) {
     b.pocket = after.pocket;
     b.vx = b.vy = b.wx = b.wy = b.wz = 0;
   }
+}
 
-  const report = {
+/** 组一杆的 report。字段顺序保持原样：界面与快照测试都按这个顺序看过。 */
+function buildShotReport(ctx, opts, { continuing, groupAssigned, pendingChoice, ended, winner }) {
+  const { next, facts, me, isBreak, fouls, fouled, pocketedObjects, spotted, notes } = ctx;
+  return {
     kind: isBreak ? 'break' : 'shot',
     shooter: me,
     fouls: fouls.map((code) => ({ code, text: FOUL_TEXT[code] })),
@@ -652,61 +691,63 @@ function settleShot(ctx, opts) {
     unsettled: facts.settled === false,
     summary: '',
   };
-  report.summary = summarizeReport(report, next, myName, oppName);
-
-  next.log.push({ shot: next.shots, shooter: me, summary: report.summary, fouls: report.fouls.map((f) => f.code) });
-  return { next, report };
 }
 
+/**
+ * 八球回合结算：只做「前奏 → 犯规 → 8 号球结局 → 收尾」四步的组装，
+ * 每一步都是一个具名函数，判定顺序与拆分前逐行对应。
+ */
 function resolveEightBall(game, facts) {
   const c = beginShot(game, facts);
-  const { next, me, opp, myName, isBreak, fouls, notes, pocketedObjects } = c;
+  // 开球：母球摔袋 + 四球碰库（4.3d）；普通一杆：3.2 / 3.3
+  const fouled = judgeFouls(c);
+  const outcome = judgeEightBallPocket({ ...c, fouled });
+  // 分组、记犯规、续杆、交轮、组 report 都在 settleShot 里，差异见 EIGHT_BALL_SETTLE
+  return settleShot({ ...c, fouled, ...outcome }, EIGHT_BALL_SETTLE);
+}
+
+/**
+ * 8 号球进袋之后的三种去向（4.3(e)(f) / 4.8）：开球进 8 号只是重摆，
+ * 清完本组后合法进 8 号算赢，其余（没清完、或同一杆犯规）判负。
+ * 只读 facts 与分组，写 notes 与球位（重摆），返回 { ended, winner, spotted }。
+ */
+function judgeEightBallPocket({ next, facts, me, opp, myName, isBreak, fouled, pocketedObjects, notes }) {
   const hasEight = next.balls.some((b) => b.number === 8);
   const eightPocketed = pocketedObjects.some((p) => p.number === 8);
-
-  // ---- 开球 ----
-  if (isBreak) judgeBreakFouls(c);
-  // ---- 普通一杆 ----
-  else judgeShotFouls(c);
-
-  const fouled = fouls.length > 0;
-
-  // ---- 8 号球 ----
   let ended = false;
   let winner = null;
   let spotted = null;
 
-  if (eightPocketed && hasEight) {
-    if (isBreak) {
-      // 4.3(e)(f)：开球进 8 号不算犯规，重摆回 8 号点；犯规时对手在开球线后持球
-      if (spotEight(next)) {
-        spotted = 8;
-        notes.push('开球进 8 号球：按 4.3(e) 重摆回 8 号点，局面保持。');
-      }
-      // 8 号球重摆后就不算落袋，也不触发胜负
-    } else {
-      const myGroup = next.players[me].group;
-      const clearedBefore = myGroup
-        ? facts.onTableBefore.filter((n) => n !== 8).every((n) => groupOf(n) !== myGroup)
-        : false;
-      if (clearedBefore && !fouled) {
-        ended = true;
-        winner = me;
-        notes.push(`${myName} 清完本组后合法打进 8 号球，赢下这一局。`);
-      } else {
-        ended = true;
-        winner = opp;
-        notes.push(
-          clearedBefore
-            ? `${myName} 打进 8 号球，但这一杆犯规（WPA 4.8），判负。`
-            : `${myName} 本组球还没清完就打进 8 号球（WPA 4.8），判负。`
-        );
-      }
+  if (!(eightPocketed && hasEight)) return { ended, winner, spotted };
+
+  if (isBreak) {
+    // 4.3(e)(f)：开球进 8 号不算犯规，重摆回 8 号点；犯规时对手在开球线后持球
+    if (spotEight(next)) {
+      spotted = 8;
+      notes.push('开球进 8 号球：按 4.3(e) 重摆回 8 号点，局面保持。');
     }
+    // 8 号球重摆后就不算落袋，也不触发胜负
+    return { ended, winner, spotted };
   }
 
-  // 分组、记犯规、续杆、交轮、组 report 都在 settleShot 里，差异见 EIGHT_BALL_SETTLE
-  return settleShot({ ...c, fouled, ended, winner, spotted }, EIGHT_BALL_SETTLE);
+  const myGroup = next.players[me].group;
+  const clearedBefore = myGroup
+    ? facts.onTableBefore.filter((n) => n !== 8).every((n) => groupOf(n) !== myGroup)
+    : false;
+  if (clearedBefore && !fouled) {
+    ended = true;
+    winner = me;
+    notes.push(`${myName} 清完本组后合法打进 8 号球，赢下这一局。`);
+  } else {
+    ended = true;
+    winner = opp;
+    notes.push(
+      clearedBefore
+        ? `${myName} 打进 8 号球，但这一杆犯规（WPA 4.8），判负。`
+        : `${myName} 本组球还没清完就打进 8 号球（WPA 4.8），判负。`
+    );
+  }
+  return { ended, winner, spotted };
 }
 
 /**
@@ -722,75 +763,74 @@ function resolveEightBall(game, facts) {
  */
 function resolveNineBall(game, facts) {
   const c = beginShot(game, facts);
-  const { next, me, myName, isBreak, fouls, notes, pocketedObjects } = c;
-  // 注：这里原本还解构了 opp（对手下标），但本函数从头到尾没读过它——
-  // 九球的交轮、三犯判负、续杆都在 nineBallSettle / settleShot 里按 ctx.opp 处理，
-  // 本函数只判「9 号进袋是否算赢」。需要时再从 c 里取（ctx 仍然带 opp）。
+  // 开球：四球碰库是犯规（5.3b），三球过线不是犯规（Reg.16），两件事分开判
+  const { fouled, threeBallFailed } = judgeNineBallOpening(c);
+  const outcome = judgeNineBallPocket({ ...c, fouled, threeBallFailed });
+  // 三犯判负、续杆、交轮、组 report 都在 settleShot 里，差异见 nineBallSettle
+  return settleShot({ ...c, fouled, ...outcome }, nineBallSettle(threeBallFailed));
+}
+
+/**
+ * 九球一杆的犯规与开球门槛。开球多一条 Reg.16 的三球过线，它**不是犯规**：
+ * 只把 threeBallFailed 交给 nineBallSettle，由那边决定「交球权 + 待决」而不是给自由球。
+ */
+function judgeNineBallOpening(ctx) {
+  const fouled = judgeFouls(ctx);
+  if (!ctx.isBreak) return { fouled, threeBallFailed: false };
+  return { fouled, threeBallFailed: judgeThreeBallRule(ctx) };
+}
+
+/**
+ * Reg.16(1) 的三球过线：至少三颗目标球「进袋或过开球线」，两者可以相加。
+ * Reg.16(1) 原文："a minimum of three object-balls must either be pocketed,
+ * or cross the Head String line, or a combination of both"——注意这里有
+ * "a combination of both"，所以**不能**只在「一颗都没进」时才检查，
+ * 也不能只数过线的球。5.3(c) 那句 "if no ball is pocketed" 是 Reg.16(1)
+ * 的一个特例，Reg.16 才是可操作的判定口径。
+ * 另外「cross the Head String line」被 Reg.16 定义为
+ * "the center (or resting point) of the object-ball must go beyond the line"，
+ * 所以用停下来的位置判定是符合条文的，不需要逐帧追踪。
+ */
+function judgeThreeBallRule({ next, facts, pocketedObjects, notes }) {
+  const line = headStringX(next.table);
+  const crossed = facts.ballsAfter.filter((b) => b.number !== 0 && !b.pocketed && b.x < line).length;
+  const threeBallCount = pocketedObjects.length + crossed;
+  if (threeBallCount >= 3) return false;
+  notes.push(
+    `开球只做到 ${threeBallCount} 颗目标球「进袋或越过开球线」` +
+      `（进 ${pocketedObjects.length} 颗、过线 ${crossed} 颗，要求 3 颗）——` +
+      '按 Regulation 16 属于「非法开球」，不是犯规；接手方可以选择照打或让原开球方再打一杆。'
+  );
+  return true;
+}
+
+/** 9 号球进袋之后的三种去向（5.5 / 5.6 / Reg.16(5)）：合法即赢，犯规或开球不达标就回位。 */
+function judgeNineBallPocket({ next, me, myName, fouled, threeBallFailed, pocketedObjects, notes }) {
   const ninePocketed = pocketedObjects.some((p) => p.number === 9);
-
-  // ---- 开球：两条门槛，性质不同 ----
-  let threeBallFailed = false;
-  if (isBreak) {
-    // 5.3(b)：不进球且不足四颗目标球碰库 → 犯规
-    judgeBreakFouls(c);
-    // 5.3(c) + Reg.16(1)：至少三颗目标球「进袋或过开球线」，两者可以相加。
-    // Reg.16(1) 原文："a minimum of three object-balls must either be pocketed,
-    // or cross the Head String line, or a combination of both"——注意这里有
-    // "a combination of both"，所以**不能**只在「一颗都没进」时才检查，
-    // 也不能只数过线的球。5.3(c) 那句 "if no ball is pocketed" 是 Reg.16(1)
-    // 的一个特例，Reg.16 才是可操作的判定口径。
-    // 另外「cross the Head String line」被 Reg.16 定义为
-    // "the center (or resting point) of the object-ball must go beyond the line"，
-    // 所以用停下来的位置判定是符合条文的，不需要逐帧追踪。
-    {
-      const line = headStringX(next.table);
-      const crossed = facts.ballsAfter.filter(
-        (b) => b.number !== 0 && !b.pocketed && b.x < line
-      ).length;
-      const threeBallCount = pocketedObjects.length + crossed;
-      if (threeBallCount < 3) {
-        threeBallFailed = true;
-        notes.push(
-          `开球只做到 ${threeBallCount} 颗目标球「进袋或越过开球线」` +
-            `（进 ${pocketedObjects.length} 颗、过线 ${crossed} 颗，要求 3 颗）——` +
-            '按 Regulation 16 属于「非法开球」，不是犯规；接手方可以选择照打或让原开球方再打一杆。'
-        );
-      }
-    }
-  } else {
-    // ---- 普通一杆 ----
-    judgeShotFouls(c);
-  }
-
-  const fouled = fouls.length > 0;
-
-  // ---- 9 号球 ----
   let ended = false;
   let winner = null;
   let spotted = null;
 
-  if (ninePocketed) {
-    if (fouled) {
-      // 5.6：犯规进的 9 号要回位，不回位就等于"犯规赢局"，那是错的
-      if (spotBall(next, 9)) {
-        spotted = 9;
-        notes.push('犯规时打进了 9 号球：按 WPA 5.6 把 9 号球摆回底点，局面继续。');
-      }
-    } else if (threeBallFailed) {
-      // Reg.16(5)：三球过线没达标但其余合法且进了 9 号 → 9 号回位，不算赢
-      if (spotBall(next, 9)) {
-        spotted = 9;
-        notes.push('开球没达到三球过线的要求却打进了 9 号球：按 Regulation 16(5) 摆回底点，不算赢局。');
-      }
-    } else {
-      ended = true;
-      winner = me;
-      notes.push(`${myName} 合法打进 9 号球，赢下这一局（WPA 5.5）。`);
-    }
-  }
+  if (!ninePocketed) return { ended, winner, spotted };
 
-  // 三犯判负、续杆、交轮、组 report 都在 settleShot 里，差异见 nineBallSettle
-  return settleShot({ ...c, fouled, ended, winner, spotted }, nineBallSettle(threeBallFailed));
+  if (fouled) {
+    // 5.6：犯规进的 9 号要回位，不回位就等于"犯规赢局"，那是错的
+    if (spotBall(next, 9)) {
+      spotted = 9;
+      notes.push('犯规时打进了 9 号球：按 WPA 5.6 把 9 号球摆回底点，局面继续。');
+    }
+  } else if (threeBallFailed) {
+    // Reg.16(5)：三球过线没达标但其余合法且进了 9 号 → 9 号回位，不算赢
+    if (spotBall(next, 9)) {
+      spotted = 9;
+      notes.push('开球没达到三球过线的要求却打进了 9 号球：按 Regulation 16(5) 摆回底点，不算赢局。');
+    }
+  } else {
+    ended = true;
+    winner = me;
+    notes.push(`${myName} 合法打进 9 号球，赢下这一局（WPA 5.5）。`);
+  }
+  return { ended, winner, spotted };
 }
 
 /** 把指定号码的球摆回底点（九球只摆 9 号）。 */
