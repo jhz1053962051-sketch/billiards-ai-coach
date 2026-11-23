@@ -986,7 +986,15 @@
     }
     .power-meter-header { width: auto; flex: none; align-items: flex-start; gap: 2px; }
     .power-meter-body { flex: 1 1 auto; width: auto; padding: 0; }
-    .power-track { width: 22px; height: 104px; }
+    /* 轨道本体 22 → 44：手指下限 44px，而这里一直只有 22px（既有问题，非回退）。
+       没有用 ::before 撑透明命中区——伪元素只改命中不改几何，
+       getBoundingClientRect 仍是 22×104，可访问性审计和探针照旧判不达标；
+       直接加宽盒子才是诚实的。app.js 的换算只有
+       ratio = 1 - (clientY - rect.top) / rect.height，与宽度无关，数值不受影响。 */
+    .power-track { width: 44px; height: 104px; }
+    /* 刻度字「爆/发/中/轻」原本靠 right:27px 挂在轨道左外侧 3px；
+       轨道加宽 22px 后同一偏移会把字压进轨道里，所以补上这 22px。 */
+    .scale-mark i { right: 49px; }
     /* 渐变原本按 220px 写死，轨道压短后不跟着缩就只剩最底下那段绿色 */
     .power-fill { background-size: 100% 100%; }
     .power-meter-presets { width: auto; flex: none; margin-top: 0; }
