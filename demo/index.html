@@ -379,19 +379,28 @@
     color: var(--text-secondary); cursor: pointer; user-select: none;
     padding: 3px 0;
   }
+  /* 开关：命中区 36×24，胶囊本体仍是 36×19。桌面指针下限是 24×24，
+     19 高的 input 直接撑高会把胶囊拉成一坨，所以胶囊画到 ::before 上、
+     垂直居中，input 自己只当点击框（窄屏那段再把它放大到 44×44）。 */
   label.switch input[type=checkbox] {
     appearance: none; -webkit-appearance: none;
-    width: 36px; height: 19px; border-radius: 10px;
-    background: #233448; border: 1px solid var(--line);
+    width: 36px; height: 24px; border-radius: 10px;
+    background: none; border: 0;
     position: relative; cursor: pointer; transition: var(--transition);
-    flex-shrink: 0; box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.4);
+    flex-shrink: 0;
+  }
+  label.switch input[type=checkbox]::before {
+    content: ''; position: absolute; left: 0; top: 50%;
+    width: 36px; height: 19px; margin-top: -9.5px;
+    border-radius: 10px; background: #233448; border: 1px solid var(--line);
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.4); transition: var(--transition);
   }
   label.switch input[type=checkbox]::after {
-    content: ''; position: absolute; top: 2px; left: 2px;
+    content: ''; position: absolute; top: 50%; left: 2px; margin-top: -6.5px;
     width: 13px; height: 13px; border-radius: 50%;
     background: #94a3b8; transition: var(--transition);
   }
-  label.switch input[type=checkbox]:checked {
+  label.switch input[type=checkbox]:checked::before {
     background: var(--grad-blue);
     border-color: #38bdf8;
     box-shadow: 0 0 10px rgba(14, 165, 233, 0.45);
@@ -444,7 +453,10 @@
     border: 1px solid var(--line);
   }
   .ctrl input[type=range] {
-    width: 100%; margin: 0; height: 18px; background: transparent; cursor: pointer;
+    /* 18 → 24：滑块本体就是命中区，18 高过不了 24×24。
+       轨道仍是 ::-webkit-slider-runnable-track 画的 5px，只是上下各多 3px
+       可拖拽空白，视觉密度不变（窄屏下再统一到 44）。 */
+    width: 100%; margin: 0; height: 24px; background: transparent; cursor: pointer;
     -webkit-appearance: none; appearance: none;
   }
   .ctrl input[type=range]::-webkit-slider-runnable-track {
@@ -487,7 +499,10 @@
     top: 50%;
     transform: translateY(-50%);
     z-index: 25;
-    width: 66px;
+    /* 66 → 72：预设芯片是 2 列 1fr（gap 4），内容宽 = 72-18 = 54，
+       每列 25px 才够 WCAG 2.2 的 24×24 下限；66 时每列只有 22。
+       顺带把 header 里那 3px 的文字溢出也吃掉了（原先 content 48 装不下 51）。 */
+    width: 72px;
     background: linear-gradient(180deg, rgba(20, 30, 44, 0.94) 0%, rgba(12, 18, 26, 0.94) 100%);
     border: 1px solid rgba(255, 255, 255, 0.16);
     border-radius: 18px;
@@ -657,6 +672,10 @@
   }
   .power-meter-chip {
     padding: 3px 0;
+    /* 桌面指针下限 24×24（WCAG 2.2 SC 2.5.8）：22×24 的芯片宽度差 2px，
+       高度本来是 padding+10px 字撑出来的 24，显式钉住免得字重变化再掉下去。 */
+    min-width: 24px;
+    min-height: 24px;
     font-size: 10px;
     font-weight: 700;
     border-radius: 5px;
@@ -929,9 +948,19 @@
   input[type=range]:focus-visible, a:focus-visible, summary:focus-visible,
   .alt:focus-visible {
     outline: 2px solid #38bdf8; outline-offset: 3px;
+    /* 上面那些元素带 `transition: all .2s`，outline 的宽/色/offset 也会被插值：
+       Tab 过去的第一帧其实是「solid 3px 近白、offset 0」，0.2s 后才落到 2px/3px/天蓝。
+       快照式审计正好抓到这一帧，于是把 .alt 记成了「浏览器默认焦点框」。
+       焦点态直接关掉过渡，按 Tab 的第一帧就是同一个框。 */
+    transition: none;
   }
   .practice-details { margin-top: 8px; }
-  .practice-details summary { color: var(--text-secondary); font-size: 12px; cursor: pointer; }
+  /* 这两条 summary 只有文字高（19.19px），比 24 小；给 2px 上下内边距 + 24 下限，
+     list-item 的三角标记照旧，不改 display 也就不用动 ::marker。 */
+  .practice-details summary {
+    color: var(--text-secondary); font-size: 12px; cursor: pointer;
+    min-height: 24px; padding: 2px 0;
+  }
   .practice-details .hint { margin-top: 6px; }
 
   @media (max-width: 900px) {
@@ -1039,6 +1068,9 @@
        那样元素的 rect 还是小的，用户点到的也还是小的。 */
     button, select, summary, .share-btn,
     .power-chip, .power-meter-chip, .alt { min-height: 44px; }
+    /* 桌面给 .practice-details summary 定的 24 下限（选择器带类，比这里的
+       `summary` 更具体）会盖掉上面这条，所以窄屏要显式抬回 44。 */
+    .practice-details summary { min-height: 44px; padding: 0; }
     /* 力度芯片 33×29.6 是整页最小的一块，宽高都得撑 */
     .power-meter-chip { min-width: 44px; }
     summary { display: flex; align-items: center; }
