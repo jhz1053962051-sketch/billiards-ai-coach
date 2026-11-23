@@ -15,6 +15,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -56,6 +57,102 @@ const text = (res, code, body) => {
   res.end(body);
 };
 
+// ── 响应压缩 ─────────────────────────────────────────────────────────────────
+//
+// 首屏那批 ES module 是未压缩的纯文本（约 589 KB），传输时压一遍收益极大。
+// node:zlib 自带 gzip/brotli，仍然零依赖。
+
+// 小于这个字节数就原样返回：压缩头 + 字典本身的开销会让小文件反而变大。
+const MIN_COMPRESS_BYTES = 1024;
+
+// 只压文本类。png/jpg/wasm/mp4/task 已经是压缩格式，再压既浪费时间又会让
+// 体积略微变大。
+const COMPRESSIBLE_TYPES = new Set([
+  'application/javascript',
+  'application/json',
+  'image/svg+xml',
+]);
+
+// 压缩结果缓存上限：条数 64、解压后总量 32 MB，两者任一超限就从最久未用的一端
+// 淘汰。按「路径 + mtime + 大小 + 编码」做键，文件一改就自然落不到旧条目上。
+const CACHE_MAX_ENTRIES = 64;
+const CACHE_MAX_BYTES = 32 * 1024 * 1024;
+
+/** @type {Map<string, Buffer>} 插入顺序即 LRU 顺序（命中后重新 set 到尾部）。 */
+const compressCache = new Map();
+let compressCacheBytes = 0;
+
+/** 该 MIME 是否值得压缩。 */
+function isCompressible(contentType) {
+  const base = contentType.split(';')[0].trim().toLowerCase();
+  if (base.startsWith('text/')) return true;
+  if (COMPRESSIBLE_TYPES.has(base)) return true;
+  // application/*+json、application/*+xml 这类结构化文本同样可压
+  return /[+/](json|xml)$/.test(base);
+}
+
+/**
+ * 按 Accept-Encoding 选编码：br 优先，其次 gzip，都不接受就返回 null（原样返回）。
+ * 认 q 值（包括 q=0 表示明确不接受），也认 `*` 通配。
+ */
+function pickEncoding(header) {
+  if (!header) return null;
+  const prefs = new Map();
+  for (const part of String(header).split(',')) {
+    const [rawName, ...params] = part.split(';');
+    const name = rawName.trim().toLowerCase();
+    if (!name) continue;
+    let q = 1;
+    for (const p of params) {
+      const m = /^\s*q\s*=\s*([0-9.]+)\s*$/i.exec(p);
+      if (m) q = Number(m[1]);
+    }
+    prefs.set(name, Number.isFinite(q) ? q : 0);
+  }
+  const score = (name) => (prefs.has(name) ? prefs.get(name) : (prefs.get('*') ?? 0));
+  const br = score('br');
+  const gzip = score('gzip');
+  if (br > 0 && br >= gzip) return 'br';
+  if (gzip > 0) return 'gzip';
+  return null;
+}
+
+function compressBody(encoding, body) {
+  if (encoding === 'br') {
+    return zlib.brotliCompressSync(body, {
+      params: {
+        // 质量 9 + size hint：比 11 快一个量级、体积只差几个百分点，配合缓存更划算
+        [zlib.constants.BROTLI_PARAM_QUALITY]: 9,
+        [zlib.constants.BROTLI_PARAM_SIZE_HINT]: body.length,
+      },
+    });
+  }
+  return zlib.gzipSync(body, { level: 9 });
+}
+
+/**
+ * 取（并缓存）压缩结果；压完不比原文件小就返回 null，让调用方走原样返回。
+ */
+function compressedFor(filePath, stat, encoding, body) {
+  const key = `${filePath}\u0000${encoding}\u0000${stat.size}\u0000${stat.mtimeMs}`;
+  const hit = compressCache.get(key);
+  if (hit) {
+    compressCache.delete(key);
+    compressCache.set(key, hit);
+    return hit;
+  }
+  const out = compressBody(encoding, body);
+  if (out.length >= body.length) return null;
+  compressCache.set(key, out);
+  compressCacheBytes += out.length;
+  while (compressCache.size > CACHE_MAX_ENTRIES || compressCacheBytes > CACHE_MAX_BYTES) {
+    const [oldKey, oldValue] = compressCache.entries().next().value;
+    compressCache.delete(oldKey);
+    compressCacheBytes -= oldValue.length;
+  }
+  return out;
+}
+
 /** Host 头是否在白名单里（允许带端口，也允许 IPv6 方括号写法）。 */
 function hostAllowed(hostHeader) {
   if (!hostHeader) return false;
@@ -94,7 +191,7 @@ function resolvePath(pathname) {
   return { filePath };
 }
 
-function handle(req, res) {
+async function handle(req, res) {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     return text(res, 405, '405 只接受 GET / HEAD');
   }
@@ -138,16 +235,43 @@ function handle(req, res) {
   const resolved = resolvePath(pathname);
   if (resolved.code) return text(res, resolved.code, resolved.message);
 
-  fs.readFile(resolved.filePath, (err, data) => {
-    if (err) return text(res, 404, '404 找不到 ' + pathname);
-    res.writeHead(200, {
-      'content-type': MIME[path.extname(resolved.filePath)] ?? 'application/octet-stream',
-      'cache-control': 'no-cache',
-      // 只给本机开发用，明确告诉浏览器别把它当同源接口随便 fetch
-      'x-content-type-options': 'nosniff',
-    });
-    res.end(data);
-  });
+  let stat;
+  let body;
+  try {
+    stat = await fs.promises.stat(resolved.filePath);
+    body = await fs.promises.readFile(resolved.filePath);
+  } catch {
+    return text(res, 404, '404 找不到 ' + pathname);
+  }
+
+  const contentType = MIME[path.extname(resolved.filePath)] ?? 'application/octet-stream';
+  const headers = {
+    'content-type': contentType,
+    'cache-control': 'no-cache',
+    // 只给本机开发用，明确告诉浏览器别把它当同源接口随便 fetch
+    'x-content-type-options': 'nosniff',
+  };
+
+  const compressible = isCompressible(contentType);
+  if (compressible) {
+    // 是否压缩取决于请求头，缓存与代理必须按这个维度分桶
+    headers.vary = 'Accept-Encoding';
+    if (body.length >= MIN_COMPRESS_BYTES) {
+      const encoding = pickEncoding(req.headers['accept-encoding']);
+      const encoded = encoding ? compressedFor(resolved.filePath, stat, encoding, body) : null;
+      if (encoded) {
+        headers['content-encoding'] = encoding;
+        headers['content-length'] = String(encoded.length);
+        res.writeHead(200, headers);
+        // HEAD 请求由 Node 自己丢掉 body，Content-Length 仍是压缩后的真实字节数
+        return res.end(encoded);
+      }
+    }
+  }
+
+  headers['content-length'] = String(body.length);
+  res.writeHead(200, headers);
+  return res.end(body);
 }
 
 /**
@@ -156,13 +280,18 @@ function handle(req, res) {
  */
 export function createStaticServer() {
   return http.createServer((req, res) => {
-    // 兜底：任何一处没预料到的同步异常都只影响这一个请求，
-    // 不能让一个请求把整个静态服务带走。
-    try {
-      handle(req, res);
-    } catch (err) {
+    // 兜底：任何一处没预料到的异常都只影响这一个请求，
+    // 不能让一个请求把整个静态服务带走。handle 现在是 async，
+    // 同步段之外的拒绝也要接住。
+    const fail = (err) => {
       if (!res.headersSent) text(res, 500, '500 ' + (err?.message ?? '未知错误'));
       else res.end();
+    };
+    try {
+      const ret = handle(req, res);
+      if (ret && typeof ret.then === 'function') ret.then(undefined, fail);
+    } catch (err) {
+      fail(err);
     }
   });
 }
