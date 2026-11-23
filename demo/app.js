@@ -58,6 +58,7 @@ import {
 // 这里只留「读什么状态、画什么、什么时候拦下来」。
 import {
   autoPauseHint,
+  buildMatchSummary,
   buildShareSummary,
   buildTableSummary,
   clamp,
@@ -192,6 +193,11 @@ const state = {
   otherSaveShots: null,
   // 撤销用：每一杆结算前的局面快照。只存球局，练习模式的「重置」已经是退路。
   history: [],
+  // 每一杆求解时算出来的容错角度：`{shot, targetNumber, pocketId, toleranceDeg}`。
+  // 「复盘这一局」的「最大容错杆」只能从这里来——g.log 里只有文字摘要，
+  // 角度是求解器的产物，事后解析 summary 是解析不出来的。
+  // 只活在内存里：它不影响规则也不影响胜负，没必要塞进存档（读档后这条会缺，图上就不印）。
+  shotLog: [],
   // 撤销 / 读档之后先停住自动出杆。真机实测：默认开着「对手自动出杆」时，
   // 撤销或读档后 1–2 秒对手自己又打了一杆，球位立刻变掉，看着像读档失败。
   // 转移规则在 state.js 的 reduceAutoPause 里（纯函数，能单测）。
@@ -1341,6 +1347,8 @@ function newGame() {
   state.animating = false;
   state.opponentThinking = false;
   state.history = [];
+  // 上一局的容错记录不能留到新局：杆号会从头数，留着就是一份错位的「关键杆」
+  state.shotLog = [];
   // 新的一局不该带着上一局留下的暂停：这是用户主动重开，算 'new-game'。
   Object.assign(state, reduceAutoPause(state, 'new-game'));
   state.historyNote = null;
@@ -1559,6 +1567,8 @@ function updateMatchStats() {
     );
   }
   box.innerHTML = parts.join('');
+  // 这一局刚打完（或刚被撤销 / 读档）时，「复盘这一局」的可用性要跟着变
+  updateShareMatchButton();
 }
 
 /**
@@ -1697,6 +1707,7 @@ function gameShoot() {
     if (gen !== state.generation) return;
     state.game = next;
     state.gSolution = null;
+    recordTolerance(next.shots, best);
     state.placing = Boolean(next.ballInHand);
     canvas.classList.toggle('placing', state.placing);
 
@@ -1732,6 +1743,37 @@ function gameShoot() {
  * 必须在「结算前」记：resolveShot 不改入参（它返回新的 next），所以传进来的是
  * 打完这一杆之前的局面，正是撤销要回到的状态。
  */
+/**
+ * 记下这一杆求解时的容错角度，给「复盘这一局」挑「最大容错杆」用。
+ *
+ * 数据只来自求解器：`best.toleranceDeg` 是「这一杆能偏多少度还进」，
+ * g.log 里的 summary 只有"进了/没进"的文字，解析不出角度。
+ *
+ * 手打（shootGameWith）与对手出杆都拿不到「按哪个袋算的容错」，那就干脆不记——
+ * 宁可图上少一条，也不要拿一个猜出来的角度去冒充实测值。
+ *
+ * @param {number} shotNumber 这一杆的杆号（结算后 next.shots）
+ * @param {object|null} candidate 求解器给的方案（plan / best）
+ */
+function recordTolerance(shotNumber, candidate) {
+  if (!candidate || typeof candidate !== 'object') return;
+  const shot = Math.floor(Number(shotNumber));
+  const deg = Number(candidate.toleranceDeg);
+  if (!Number.isFinite(shot) || shot <= 0) return;
+  if (!Number.isFinite(deg) || deg <= 0) return;
+  const entry = {
+    shot,
+    targetNumber: Number.isFinite(Number(candidate.targetNumber)) ? Number(candidate.targetNumber) : null,
+    pocketId: typeof candidate.pocketId === 'string' ? candidate.pocketId : '',
+    toleranceDeg: deg,
+  };
+  // 同一杆重复记（重打、回放回调跑两遍）只留最新的一份
+  state.shotLog = state.shotLog.filter((e) => e && e.shot !== shot);
+  state.shotLog.push(entry);
+  // 长局不无限攒：最多留最近 200 杆，挑一条最大的够用了
+  if (state.shotLog.length > 200) state.shotLog = state.shotLog.slice(-200);
+}
+
 function pushHistory(game) {
   pushHistoryEntry(state.history, game);
   updateUndoButton();
@@ -1761,6 +1803,11 @@ function undoGame() {
     return;
   }
   state.game = prev;
+  // 撤销 = 退回到第 prev.shots 杆的局面，比它更晚的容错记录已经不存在了
+  if (Array.isArray(state.shotLog)) {
+    const keep = Number(prev.shots) || 0;
+    state.shotLog = state.shotLog.filter((e) => e && e.shot <= keep);
+  }
   // 撤销是把局面整个换掉，和换局一样要让在途的回放/续杆定时器作废。
   state.generation += 1;
   state.gSolution = null;
@@ -1855,6 +1902,7 @@ function runOpponentTurn(gen = state.generation) {
   replay(r.facts.frames, r.facts.dt, () => {
     if (gen !== state.generation) return;
     state.game = r.next;
+    recordTolerance(r.next.shots, r.plan);
     state.opponentThinking = false;
     state.placing = Boolean(r.next.ballInHand) && r.next.turn === 0;
     canvas.classList.toggle('placing', state.placing);
@@ -2331,6 +2379,9 @@ function applyLoadedGame(saved) {
   // 老存档没有 history 字段：unpackHistory 返回空，走下面的 missing 分支给提示。
   const decoded = unpackHistory(saved.history, g);
   state.history = decoded.entries;
+  // 容错角度不随存档走（见 state.shotLog 的注释）：读档后杆号是别人的历史，
+  // 留着上一份记录只会让「第 N 杆」指向另一杆，直接清空。
+  state.shotLog = [];
   // 存档只带最近几步，更早的是真丢了：d 是存档自己记的（超预算裁掉的），
   // shots - 读到的步数 补上「存档里压根没装」的那部分，两个取大。
   const missing = Math.max(decoded.dropped, saved.shots - decoded.entries.length);
@@ -2443,6 +2494,19 @@ const SHARE_BG = '#0b1219';
 const SHARE_TEXT = '#e8f0f7';
 const SHARE_MUTED = '#93a4b5';
 
+// 整局复盘图里那条比分走势。和台面图一样，只在这里定尺寸与颜色：
+// state.js 的 buildMatchSummary 给的是 `[{x, y1, y2}]` 纯数据，连颜色都不知道。
+const SHARE_CHART_H = 300;
+const SHARE_CHART_GAP = 34;
+const SHARE_CHART_BG = 'rgba(148, 163, 184, 0.08)';
+const SHARE_CHART_GRID = 'rgba(147, 164, 181, 0.28)';
+const SHARE_CHART_FONT = `500 24px ${SHARE_FONT}`;
+const SHARE_CHART_TICK_FONT = `500 22px ${SHARE_FONT}`;
+const SHARE_CHART_SERIES = [
+  { key: 'y1', label: '我', color: '#38bdf8' },
+  { key: 'y2', label: '对手', color: '#f59e0b' },
+];
+
 /** 已经生成过的那张图：blob URL 得自己撤销，否则连点几次会一直占着内存。 */
 const shareState = { url: '', filename: '' };
 
@@ -2494,6 +2558,107 @@ function wrapShareText(ctx, text, maxWidth) {
 }
 
 /**
+ * 画比分走势：两条累计进球折线，横轴杆号、纵轴进球数。
+ *
+ * 数据是 buildMatchSummary 给的 `[{x, y1, y2}]`，这里只负责坐标与颜色。
+ * 背景与网格用低对比度，别把台面图和下面的文字压住。
+ *
+ * @param {CanvasRenderingContext2D} ctx
+ * @param {Array<{x:number, y1:number, y2:number}>} chart 至少两个点
+ * @param {number} x 左上角
+ * @param {number} y 左上角
+ * @param {number} width
+ * @param {number} height
+ */
+function drawShareChart(ctx, chart, x, y, width, height) {
+  ctx.save();
+  ctx.textBaseline = 'top';
+
+  ctx.fillStyle = SHARE_CHART_BG;
+  ctx.fillRect(x, y, width, height);
+
+  // 标题 + 图例（右对齐，从右往左排）
+  ctx.font = SHARE_CHART_FONT;
+  ctx.fillStyle = SHARE_MUTED;
+  ctx.textAlign = 'left';
+  ctx.fillText('比分走势（累计进球）', x + 24, y + 18);
+  let legendRight = x + width - 24;
+  for (const s of [...SHARE_CHART_SERIES].reverse()) {
+    ctx.textAlign = 'right';
+    ctx.fillStyle = SHARE_MUTED;
+    ctx.fillText(s.label, legendRight, y + 19);
+    const labelW = ctx.measureText(s.label).width;
+    ctx.fillStyle = s.color;
+    ctx.fillRect(legendRight - labelW - 22, y + 23, 14, 14);
+    legendRight -= labelW + 44;
+  }
+
+  const plotX = x + 64;
+  const plotY = y + 64;
+  const plotW = width - 64 - 28;
+  const plotH = height - 64 - 42;
+  let maxY = 1;
+  for (const p of chart) maxY = Math.max(maxY, p.y1, p.y2);
+  maxY = Math.ceil(maxY);
+  const minX = chart[0].x;
+  const maxX = chart[chart.length - 1].x;
+  const spanX = Math.max(1, maxX - minX);
+  const px = (v) => plotX + ((v - minX) / spanX) * plotW;
+  const py = (v) => plotY + plotH - (v / maxY) * plotH;
+
+  // 横向网格：小比分时每分一条（0/1/2…），大比分时只留 0 / 中点 / 满格。
+  // 一律标整数——之前用 maxY/2 取整，1 分的局会印出「1、1、0」两条一样的刻度。
+  ctx.font = SHARE_CHART_TICK_FONT;
+  ctx.strokeStyle = SHARE_CHART_GRID;
+  ctx.lineWidth = 1;
+  const ticks = maxY <= 4 ? Array.from({ length: maxY + 1 }, (_, i) => i) : [0, Math.round(maxY / 2), maxY];
+  for (const t of ticks) {
+    const ty = Math.round(py(t)) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(plotX, ty);
+    ctx.lineTo(plotX + plotW, ty);
+    ctx.stroke();
+    ctx.fillStyle = SHARE_MUTED;
+    ctx.textAlign = 'right';
+    ctx.fillText(String(t), plotX - 14, ty - 12);
+  }
+
+  // 横轴：只标首尾两个杆号，中间留白（60 个点全标会糊）
+  ctx.textAlign = 'left';
+  ctx.fillStyle = SHARE_MUTED;
+  ctx.fillText(`第 ${minX} 杆`, plotX, plotY + plotH + 12);
+  ctx.textAlign = 'right';
+  ctx.fillText(`第 ${maxX} 杆`, plotX + plotW, plotY + plotH + 12);
+
+  // 两条折线
+  for (const s of SHARE_CHART_SERIES) {
+    ctx.strokeStyle = s.color;
+    ctx.lineWidth = 4;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    chart.forEach((p, i) => {
+      const cx = px(p.x);
+      const cy = py(p[s.key]);
+      if (i === 0) ctx.moveTo(cx, cy);
+      else ctx.lineTo(cx, cy);
+    });
+    ctx.stroke();
+    // 点少的时候补圆点，读得出「哪一杆进的」
+    if (chart.length <= 20) {
+      ctx.fillStyle = s.color;
+      for (const p of chart) {
+        ctx.beginPath();
+        ctx.arc(px(p.x), py(p[s.key]), 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  ctx.restore();
+}
+
+/**
  * 合成成品图：标题 + 小字 + 台面图 + 若干「字段 / 值」行 + 页脚。
  *
  * 「分享这一杆」和「分享局面」**只共用这一份排版**：两者只有 summary 的来源不同，
@@ -2501,9 +2666,12 @@ function wrapShareText(ctx, text, maxWidth) {
  * 高度由文案行数决定——先量后画，两遍用的是同一套字体常量，
  * 所以量出来的结论和画出来的位置一致。
  *
- * @param {{scene:object|null, summary:{title:string, lines:Array<{label:string, value:string}>}, meta:string}} input
+ * 第三个使用者是「复盘这一局」：它多带一个 chart（纯数据），这里多画一块折线。
+ * 三段仍然共用同一份排版，不许另起一套。
+ *
+ * @param {{scene:object|null, summary:{title:string, lines:Array<{label:string, value:string}>, chart?:Array<{x:number,y1:number,y2:number}>}, meta:string}} input
  *   scene    createShareScene() 的结果；null 就只出文案（不留白）
- *   summary  文案：标题 + 若干行（行数、长短都不限）
+ *   summary  文案：标题 + 若干行（行数、长短都不限）；chart 有就多画一块走势
  *   meta     标题下面那行小字：球台 + 时间
  * @returns {HTMLCanvasElement} 1080 宽、高度自适应的成品 canvas
  */
@@ -2516,6 +2684,10 @@ function buildShareSheet({ scene, summary, meta }) {
   });
   const rowsH = rows.reduce((sum, r) => sum + r.chunks.length * SHARE_LINE_H + SHARE_ROW_GAP, 0);
   const sceneH = scene ? scene.height : 0;
+  const chart = Array.isArray(summary.chart)
+    ? summary.chart.filter((p) => p && typeof p === 'object')
+    : [];
+  const chartH = chart.length >= 2 ? SHARE_CHART_H : 0;
   const height = Math.round(
     SHARE_PAD +
       SHARE_TITLE_H +
@@ -2523,6 +2695,8 @@ function buildShareSheet({ scene, summary, meta }) {
       18 +
       sceneH +
       (scene ? 34 : 0) +
+      chartH +
+      (chartH ? SHARE_CHART_GAP : 0) +
       rowsH +
       40 +
       SHARE_PAD,
@@ -2561,6 +2735,11 @@ function buildShareSheet({ scene, summary, meta }) {
       sceneH,
     );
     y += sceneH + 34;
+  }
+
+  if (chartH) {
+    drawShareChart(ctx, chart, SHARE_PAD, y, SHARE_WIDTH - SHARE_PAD * 2, chartH);
+    y += chartH + SHARE_CHART_GAP;
   }
 
   for (const row of rows) {
@@ -2639,6 +2818,32 @@ function buildTableSheet() {
     title: summary.title,
     alt: `局面：${summary.title}`,
     prefix: 'table',
+  };
+}
+
+/**
+ * 「复盘这一局」那张图：终局台面 + 比分走势 + 关键杆与统计。
+ *
+ * 管线一步都没另起：台面图还是 createShareScene，排版还是 buildShareSheet，
+ * 出图收尾还是 publishShare / exportShare。和另外两张唯一的不同是 summary 里
+ * 多一个 `chart`（纯数据，`[{x, y1, y2}]`），由 buildShareSheet 多画一块折线。
+ *
+ * 局没结束（buildMatchSummary 返回 null）就返回 null，按钮那边会提前禁用，
+ * 不会出现一张「0 : 0 的复盘」。
+ */
+function buildMatchSheet() {
+  const game = state.mode === 'game' ? state.game : null;
+  if (!game) return null;
+  const summary = currentMatchSummary();
+  if (!summary) return null;
+  const list = Array.isArray(game.balls) ? game.balls.filter((b) => b && typeof b === 'object') : [];
+  if (!list.length) return null;
+  const scene = createShareScene({ table, balls: list, maxWidth: SHARE_WIDTH - SHARE_PAD * 2 });
+  return {
+    canvas: buildShareSheet({ scene, summary, meta: shareMetaText() }),
+    title: summary.title,
+    alt: `复盘：${summary.title}`,
+    prefix: 'match',
   };
 }
 
@@ -2748,6 +2953,57 @@ async function shareTable() {
     blockedHint: '台面上还没有球，先摆球或开一局。',
     build: buildTableSheet,
   });
+}
+
+/**
+ * 「复盘这一局」：只在局已结束、且 buildMatchSummary 真能给出复盘时可用。
+ *
+ * 禁用理由要写在按钮 title 上，别只把按钮灰掉——灰按钮不解释，用户会以为功能坏了。
+ */
+function currentMatchSummary() {
+  const game = state.mode === 'game' ? state.game : null;
+  if (!game) return null;
+  const log = Array.isArray(game.log) ? game.log : [];
+  return buildMatchSummary({
+    game,
+    log,
+    // 和页面上那块复盘面板吃同一份统计，图上与界面上不会各说各话
+    stats: computeMatchStats({
+      log,
+      kind: game.kind,
+      winner: game.phase === 'ended' ? game.winner : null,
+      myself: 0,
+    }),
+    table,
+    // 每杆求解时记下的容错角度（只在内存里），没有就不印「最大容错杆」
+    shots: state.shotLog,
+  });
+}
+
+function matchShareBlockedReason() {
+  const game = state.mode === 'game' ? state.game : null;
+  if (!game) return '先开一局球，打完才能复盘。';
+  if (game.phase !== 'ended') return '本局还没结束，打完这一局才能导出复盘。';
+  return '';
+}
+
+/** 按钮可用性跟着局面走：每次结算、换局、换模式、读档之后都刷一遍。 */
+function updateShareMatchButton() {
+  const btn = $('shareMatch');
+  if (!btn) return;
+  // 能不能出图由纯函数说了算，按钮不自己另判一遍：否则「按钮亮着、点了没图」迟早发生。
+  const why = matchShareBlockedReason() || (currentMatchSummary() ? '' : '这一局没有可复盘的内容。');
+  btn.disabled = Boolean(why);
+  btn.title = why || '把这一局的终局台面、比分走势和关键杆导成一张图';
+}
+
+async function shareMatch() {
+  return exportShare({
+    buttonId: 'shareMatch',
+    blockedReason: 'no-match',
+    blockedHint: matchShareBlockedReason() || '这一局还没有可以复盘的内容。',
+    build: buildMatchSheet,
+  }).finally(updateShareMatchButton);
 }
 
 function exportGameSave() {
@@ -2929,6 +3185,8 @@ function setMode(mode) {
       ? '拖动任意球改摆位 · 求解后给出瞄准线、容错窗口与力度'
       : '标准黑八 15 颗 + 母球 · 按 WPA 规则判分组、犯规与胜负';
   if (mode === 'game' && !state.game) newGame();
+  // 复盘按钮的可用性跟模式走：练习模式里没有「这一局」，必须先灰掉
+  updateShareMatchButton();
   render();
   updateAutoPauseBar();
   if (mode === 'game') maybeOpponentTurn();
@@ -2943,6 +3201,7 @@ $('reset').addEventListener('click', resetLayout);
 // 出图要等解码，所以这里不 await：按钮自己会在 finally 里解禁
 $('shareShot').addEventListener('click', () => { if (!state.animating) shareShot(); });
 $('shareTable').addEventListener('click', () => { if (!state.animating) shareTable(); });
+$('shareMatch').addEventListener('click', () => { if (!state.animating) shareMatch(); });
 $('addBall').addEventListener('click', addBall);
 $('rackUp').addEventListener('click', rackUp);
 $('newGame').addEventListener('click', newGame);
@@ -3406,6 +3665,9 @@ window.__app = {
   shareShot,
   // 分享局面：同上，另外要能拿它的返回值跟页面上的比分/剩余球数对一遍
   shareTable,
+  // 复盘这一局：E2E 要核「图上的比分/命中率」与页面统计面板是不是同一份
+  shareMatch,
+  buildMatchSummary,
   // 端到端脚本要用同一份文案去核「图上说的」和「记分牌上说的」是不是一回事
   buildTableSummary,
   refreshSaveInfo,

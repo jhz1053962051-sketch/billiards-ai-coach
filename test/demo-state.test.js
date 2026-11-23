@@ -21,6 +21,7 @@ import {
   HISTORY_LIMIT,
   NEXT_SHOT_SLOW_MS,
   autoPauseHint,
+  buildMatchSummary,
   buildShareSummary,
   buildTableSummary,
   captureBallFrame,
@@ -2202,4 +2203,250 @@ test('buildTableSummary：没有对局时按「练习摆球」说，照样给出
   assert.equal(out.lines[0].value, '练习摆球（还没开局）');
   assert.equal(out.lines[1].value, '2 颗目标球 · 母球在台上');
   assert.deepEqual(out.mark.numbers, [], '练习模式不分组，一颗都不圈');
+});
+
+// ---------------------------------------------------------------- 整局复盘图
+//
+// buildMatchSummary 决定「复盘这一局」那张图印什么：标题（比分）、比分走势
+// （纯数据折线，绘制在 app.js 里）、最多三条关键杆、统计块。局没结束就返回 null，
+// 调用方据此把按钮禁掉——所以「什么算没结束」也要一条条钉住。
+//
+// 下面每一条 summary 都照 src/rules.js:878-891 与 src/snooker.js:418-431 的真实
+// 播报逐字抄；折线期望值全部手算，不从实现里反推。
+
+/** 一局收尾时的对局对象；只带复盘要读的字段。 */
+function matchGame(over = {}) {
+  return {
+    phase: 'ended',
+    winner: 0,
+    kind: 'eightball',
+    players: [{ name: '你' }, { name: '对手' }],
+    log: [],
+    ...over,
+  };
+}
+
+test('buildMatchSummary：完整黑八局印比分 / 三条关键杆 / 统计，走势按杆累计', () => {
+  // 1 开球进 1、2 号 → 2 续杆进 3 号 → 3 空杆换手 → 4 对手进 5 号 → 5 对手犯规 → 6 收官
+  const log = [
+    entry(1, 0, '开球 · 进 1、2 号 · 你 继续'),
+    entry(2, 0, '进 3 号 · 你 继续'),
+    entry(3, 0, '没有球进袋 · 换 对手'),
+    entry(4, 1, '进 5 号 · 换 你'),
+    entry(5, 1, '没有球进袋 · 犯规：母球落袋（WPA 3.1） · 换 你', ['scratch']),
+    entry(6, 0, '你 与 对手 的这一局结束：你 获胜。'),
+  ];
+  const out = buildMatchSummary({ game: matchGame({ log }) });
+
+  // 手算：我进 1、2 号那一杆算 1 杆；3 号算 1 杆；收官算 1 杆 → 3。对手进 5 号 → 1。
+  assert.equal(out.title, '八球 · 我 3 : 1 对手');
+  // 手算累计：0 → 我+1 → 我+1 → 不变 → 对手+1 → 不变 → 我+1（收官那杆）
+  assert.deepEqual(out.chart, [
+    { x: 0, y1: 0, y2: 0 },
+    { x: 1, y1: 1, y2: 0 },
+    { x: 2, y1: 2, y2: 0 },
+    { x: 3, y1: 2, y2: 0 },
+    { x: 4, y1: 2, y2: 1 },
+    { x: 5, y1: 2, y2: 1 },
+    { x: 6, y1: 3, y2: 1 },
+  ]);
+  assert.deepEqual(
+    out.lines.map((l) => l.label),
+    ['关键杆 1', '关键杆 2', '关键杆 3', '杆数', '命中率', '最长连击', '犯规'],
+  );
+  const value = (label) => out.lines.find((l) => l.label === label).value;
+  assert.equal(value('关键杆 1'), '最长连击 2 杆（第 1–2 杆）');
+  // 没传每一杆的求解候选，就不许编一个角度出来
+  assert.equal(value('关键杆 2'), '犯规 1 次（母球落袋 ×1）');
+  assert.equal(value('关键杆 3'), '收官一杆 第 6 杆 · 你 赢下这一局');
+  // 4 杆进球 / 6 杆 = 66.7% → 67%
+  assert.equal(value('杆数'), '6 杆');
+  assert.equal(value('命中率'), '67%');
+  assert.equal(value('最长连击'), '2 杆');
+  assert.equal(value('犯规'), '1 次');
+});
+
+test('buildMatchSummary：九球用「进 9 号」判进球，比分记在对手头上', () => {
+  const log = [
+    entry(1, 0, '开球 · 没有球进袋 · 换 对手'),
+    entry(2, 1, '进 9 号 · 对手 继续'),
+    entry(3, 1, '你 与 对手 的这一局结束：对手 获胜。'),
+  ];
+  const out = buildMatchSummary({ game: matchGame({ kind: 'nineball', winner: 1, log }) });
+
+  assert.equal(out.title, '九球 · 我 0 : 2 对手');
+  assert.deepEqual(out.chart, [
+    { x: 0, y1: 0, y2: 0 },
+    { x: 1, y1: 0, y2: 0 },
+    { x: 2, y1: 0, y2: 1 },
+    { x: 3, y1: 0, y2: 2 },
+  ]);
+  const value = (label) => out.lines.find((l) => l.label === label).value;
+  assert.equal(value('关键杆 1'), '最长连击 2 杆（第 2–3 杆）');
+  assert.equal(value('命中率'), '67%', '3 杆里进了 2 杆');
+});
+
+test('buildMatchSummary：斯诺克标题用比分而不是进球杆数，走势按「得 N 分」累计', () => {
+  const log = [
+    entry(1, 0, '得 12 分 · 12 : 0 · 该打彩球 · 你 继续'),
+    entry(2, 0, '犯规：母球落袋，罚 4 分 · 12 : 4 · 该打红球 · 换 对手', ['scratch']),
+    entry(3, 1, '得 8 分 · 12 : 12 · 该打红球 · 对手 继续'),
+    entry(4, 0, '得 7 分 · 19 : 12 · 该打红球 · 你 继续'),
+    entry(5, 0, '你 与 对手 的这一局结束：你 获胜（19 : 12）。'),
+  ];
+  const out = buildMatchSummary({
+    game: matchGame({ kind: 'snooker', log, snooker: { scores: [19, 12] } }),
+  });
+
+  // 进球杆数是 3:1，但斯诺克看分：标题必须是 19 : 12
+  assert.equal(out.title, '斯诺克 · 我 19 : 12 对手');
+  assert.deepEqual(out.chart, [
+    { x: 0, y1: 0, y2: 0 },
+    { x: 1, y1: 1, y2: 0 },
+    { x: 2, y1: 1, y2: 0 },
+    { x: 3, y1: 1, y2: 1 },
+    { x: 4, y1: 2, y2: 1 },
+    { x: 5, y1: 3, y2: 1 },
+  ]);
+  assert.equal(out.lines.find((l) => l.label === '犯规').value, '1 次');
+});
+
+test('buildMatchSummary：局没结束一律返回 null，绝不编一份 0:0 的复盘', () => {
+  const log = [entry(1, 0, '进 1 号 · 你 继续')];
+  const cases = [
+    { game: matchGame({ phase: 'playing', log }), why: '还在打' },
+    { game: matchGame({ phase: 'ended', winner: null, log }), why: '结束了却不知道谁赢' },
+    { game: matchGame({ phase: 'ended', winner: 2, log }), why: '胜者下标是脏值' },
+    { game: matchGame({ phase: '', log }), why: 'phase 缺失' },
+  ];
+  for (const c of cases) {
+    assert.equal(buildMatchSummary({ game: c.game }), null, c.why);
+  }
+});
+
+test('buildMatchSummary：log 为空 / 不是数组 / 一条能用的记录都没有，都返回 null', () => {
+  assert.equal(buildMatchSummary({ game: matchGame({ log: [] }) }), null);
+  assert.equal(buildMatchSummary({ game: matchGame({ log: 'nope' }) }), null);
+  assert.equal(
+    buildMatchSummary({ game: matchGame({ log: [null, 3, 'x', {}] }) }),
+    null,
+    '形状不对的条目退化成空杆，凑不出一条有效流水',
+  );
+  assert.equal(buildMatchSummary({ game: matchGame({ log: null }) }), null);
+});
+
+test('buildMatchSummary：长局按等间距抽点，首尾保留并在文案里说明', () => {
+  const log = [];
+  for (let shot = 1; shot <= 79; shot += 1) log.push(entry(shot, 0, '进 1 号 · 你 继续'));
+  log.push(entry(80, 0, '你 与 对手 的这一局结束：你 获胜。'));
+  const out = buildMatchSummary({ game: matchGame({ log }) });
+
+  assert.equal(out.chart.length, 60, '80 杆不能画成 81 个点，会糊成一条带');
+  assert.equal(out.chart[0].x, 0);
+  assert.equal(out.chart[out.chart.length - 1].x, 80, '折线必须收在终局那一杆');
+  assert.equal(out.chart[out.chart.length - 1].y1, 80);
+  // 降采样不许把累计值改小：x 递增、y 单调不减
+  for (let i = 1; i < out.chart.length; i += 1) {
+    assert.ok(out.chart[i].x > out.chart[i - 1].x, `第 ${i} 点的 x 必须严格变大`);
+    assert.ok(out.chart[i].y1 >= out.chart[i - 1].y1);
+  }
+  assert.equal(
+    out.lines.find((l) => l.label === '走势').value,
+    '共 80 杆，折线降采样到 60 点',
+  );
+});
+
+test('buildMatchSummary：最大容错杆取整局最大的那个，非法候选直接忽略', () => {
+  const log = [
+    entry(1, 0, '进 1 号 · 你 继续'),
+    entry(2, 1, '没有球进袋 · 换 你'),
+    entry(3, 0, '你 与 对手 的这一局结束：你 获胜。'),
+  ];
+  const shots = [
+    { shot: 1, targetNumber: 1, pocketId: 'c-br', toleranceDeg: 0.57 },
+    { shot: 1, targetNumber: 1, pocketId: 'c-br', toleranceDeg: 0.4 },
+    { shot: 2, targetNumber: 8, pocketId: 'm-b', toleranceDeg: 1.4 },
+    { shot: 3, targetNumber: 3, pocketId: 'c-tr', toleranceDeg: 'x' },
+    { shot: 4, targetNumber: 4, pocketId: 'c-tl', toleranceDeg: -1 },
+  ];
+  const out = buildMatchSummary({ game: matchGame({ log }), shots });
+  const lines = out.lines.filter((l) => l.label.startsWith('关键杆')).map((l) => l.value);
+  assert.equal(lines[0], '最大容错杆 8 号球 → 下中袋 ±1.40°');
+  assert.ok(!lines.some((v) => v.includes('NaN')), '非法容错角不许变成 NaN°');
+
+  // 没有候选就一条都不印，而不是印个 ±0.00°
+  const bare = buildMatchSummary({ game: matchGame({ log }) });
+  assert.ok(!bare.lines.some((l) => l.value.includes('最大容错杆')));
+});
+
+test('buildMatchSummary：stats 传进来就用，越界值收敛而不是照抄', () => {
+  const log = [
+    entry(1, 0, '进 1 号 · 你 继续'),
+    entry(2, 0, '你 与 对手 的这一局结束：你 获胜。'),
+  ];
+  const out = buildMatchSummary({
+    game: matchGame({ log }),
+    stats: { shots: 12, potRate: -0.5, longestRun: 4, fouls: 0 },
+  });
+  const value = (label) => out.lines.find((l) => l.label === label).value;
+  assert.equal(value('杆数'), '12 杆', '面板统计优先');
+  assert.equal(value('命中率'), '0%', '比例越界要夹到 0–1，不能印 -50%');
+  assert.equal(value('最长连击'), '4 杆');
+
+  const fallback = buildMatchSummary({
+    game: matchGame({ log }),
+    stats: { shots: NaN, potRate: 'x', longestRun: -2, fouls: Infinity },
+  });
+  const v2 = (label) => fallback.lines.find((l) => l.label === label).value;
+  assert.equal(v2('杆数'), '2 杆', '坏值退回按 log 算出来的那份');
+  assert.equal(v2('最长连击'), '2 杆');
+});
+
+test('buildMatchSummary：异常输入一律退化，不抛也不出 undefined', () => {
+  const cases = [
+    null,
+    undefined,
+    {},
+    { game: null },
+    { game: 'x' },
+    { game: {} },
+    { game: matchGame({ log: [] }), stats: null, shots: null },
+    { game: matchGame({ log: [entry(1, 0, '进 1 号 · 你 继续'), entry(2, 0, '你 与 对手 的这一局结束：你 获胜。')] }), shots: 'oops', table: null },
+  ];
+  for (const input of cases) {
+    const out = buildMatchSummary(input);
+    if (out === null) continue;
+    assert.equal(typeof out.title, 'string');
+    assert.ok(out.title.length > 0);
+    assert.ok(Array.isArray(out.lines));
+    for (const line of out.lines) {
+      assert.equal(typeof line.label, 'string');
+      assert.equal(typeof line.value, 'string');
+      assert.ok(!line.value.includes('undefined') && !line.value.includes('NaN'), line.value);
+    }
+    assert.ok(Array.isArray(out.chart));
+    for (const p of out.chart) {
+      for (const k of ['x', 'y1', 'y2']) assert.equal(typeof p[k], 'number');
+    }
+  }
+});
+
+// 回归护栏：新增第三种导出不许动前两种的形状。字段名 / 顺序 / 每行的 label
+// 都被这里钉死，buildMatchSummary 的改动只要漏到它们身上就会红。
+test('回归护栏：buildShareSummary / buildTableSummary 的字段与顺序不变', () => {
+  const shot = buildShareSummary({
+    shot: { found: true, best: shareCandidate() },
+    table,
+    balls: [{ number: 0, x: 0.6, y: 0.6, pocketed: false }],
+  });
+  assert.deepEqual(Object.keys(shot), ['title', 'lines']);
+  assert.deepEqual(
+    shot.lines.map((l) => l.label),
+    ['目标球', '袋口', '杆法', '力度', '切角', '容错', '母球落点'],
+  );
+
+  const game = createGame(table, makeBalls([1, 2, 3]), { names: ['你', '对手'], kind: 'eightball' });
+  const tableOut = buildTableSummary({ game, balls: game.balls });
+  assert.deepEqual(Object.keys(tableOut), ['title', 'lines', 'mark']);
+  assert.deepEqual(Object.keys(tableOut.mark), ['numbers', 'label']);
 });

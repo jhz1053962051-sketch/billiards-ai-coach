@@ -1082,6 +1082,22 @@ function readLogEntry(raw, kind) {
 }
 
 /**
+ * 这一杆算不算「进球」。
+ *
+ * 普通一杆直接看 readLogEntry 的 potted；收官那一条的播报被整句换成了
+ * 「这一局结束：X 获胜」，进袋信息丢了。但它同时说明了一件事：这一杆的击球者
+ * 就是胜者、而且没有犯规——能以一杆结束本局的只有「打进最后的球」（黑八打进
+ * 8 号、九球打进 9 号、斯诺克清完最后一颗）；反过来，犯规收场（只剩黑球时犯规）
+ * 或提前把 8 号打进导致输局，击球者都不是胜者，或者 fouls 非空，都不会被算成进球。
+ *
+ * @param {{potted:boolean, end:boolean, foul:boolean, shooter:number|null}} entry
+ * @param {number|null} winner
+ */
+function isPotted(entry, winner) {
+  return entry.potted || (entry.end && !entry.foul && winner !== null && entry.shooter === winner);
+}
+
+/**
  * 本局统计。
  *
  * @param {{log?:unknown[], balls?:unknown[], kind?:string, winner?:number|null, myself?:number}} [input]
@@ -1099,18 +1115,12 @@ export function computeMatchStats(input) {
 
   // 同一条杆号出现两次 = 那不是一杆。开球不达标、接手方选择交回时，规则引擎会
   // 往 log 里补一条「决定」，杆号与刚打完的那一杆相同（src/rules.js:829-834），
-  // 它既不增加杆数也不该被当成一杆来算进球。
-  const entries = [];
-  const seen = new Set();
+  // 它既不增加杆数也不该被当成一杆来算进球。readMatchLog 把这条规则收成一份，
+  // 复盘图（buildMatchSummary）用的是同一份，免得两处数出来的杆数不一样。
+  const entries = readMatchLog(log, kind);
   let highestShot = 0;
-  for (const raw of log) {
-    const entry = readLogEntry(raw, kind);
-    if (entry.shot !== null) {
-      if (seen.has(entry.shot)) continue;
-      seen.add(entry.shot);
-      if (entry.shot > highestShot) highestShot = entry.shot;
-    }
-    entries.push(entry);
+  for (const entry of entries) {
+    if (entry.shot !== null && entry.shot > highestShot) highestShot = entry.shot;
   }
   // 杆号是 1..N 连续发的（src/rules.js 用 next.shots 当杆号），所以最大杆号就是
   // 总杆数；整份 log 都没有杆号（手写记录）时退回数条目。
@@ -1128,13 +1138,8 @@ export function computeMatchStats(input) {
   let lastShooter = null;
   for (const entry of entries) {
     if (entry.foul) fouls += 1;
-    // 收官那一条的播报被整句换成了「这一局结束：X 获胜」，进袋信息丢了。
-    // 但它同时说明了一件事：这一杆的击球者就是胜者、而且没有犯规——能以一杆
-    // 结束本局的只有「打进最后的球」（黑八打进 8 号、九球打进 9 号、斯诺克清完
-    // 最后一颗）；反过来，犯规收场（只剩黑球时犯规）或提前把 8 号打进导致输局，
-    // 击球者都不是胜者，或者 fouls 非空，都不会被算成进球。
-    const potted =
-      entry.potted || (entry.end && !entry.foul && winner !== null && entry.shooter === winner);
+    // 收官那一杆算不算进球，见 isPotted()。
+    const potted = isPotted(entry, winner);
     if (potted) {
       pots += 1;
       // 连着进球：同一个人、中间没有空杆也没有犯规。换手后从 1 重新数。
@@ -1581,4 +1586,319 @@ function tableNextShotText(shot) {
   const how = [tip, power ? `${power}力` : ''].filter(Boolean).join(' · ');
   const main = pocket ? `${ball} → ${pocket}` : `${ball}（不指定袋口）`;
   return how ? `${main}，${how}` : main;
+}
+
+// ---------------------------------------------------------------- 整局复盘图
+//
+// 第三种导出：终局台面 + 比分走势 + 关键杆与统计。它和另外两张**共用同一条管线**：
+//   state.js 只决定「说什么」（标题、字段顺序、每个值的措辞、折线给哪些点），
+//   app.js 的 buildShareSheet 决定「怎么排」，render.js 只画台面。
+// 所以这里没有一行 DOM / canvas：chart 是纯数据，连颜色都不给——那是绘图层的事。
+//
+// 未结束的局返回 null。**绝不**编一份「0:0 的复盘」：一张看起来像复盘、实际
+// 什么也没发生的图，比没有图更误导人。调用方拿到 null 就把按钮禁掉并说清原因。
+
+/** 折线最多这么多点；再长就按等间距抽点，否则 100 杆的局会糊成一条实心带。 */
+const MATCH_CHART_LIMIT = 60;
+/** 关键杆最多印这么多条，多了会和下面的统计块抢注意力。 */
+const MATCH_KEY_LIMIT = 3;
+
+/** 犯规代码的人话。src/rules.js 与 src/snooker.js 用的是同一套 id。 */
+const FOUL_CODE_TEXT = {
+  illegal_break: '开球不合法',
+  scratch: '母球落袋',
+  no_contact: '母球没碰到球',
+  wrong_ball_first: '先碰错球',
+  no_rail: '无球碰库',
+  wrong_ball_potted: '打进不该进的球',
+};
+
+/**
+ * 把 log 读成去重后的杆列表（同一杆号只算一次，开球不达标那条「决定」不算一杆）。
+ *
+ * 从 computeMatchStats 里抽出来的，两处共用同一份解析与去重规则——统计面板和
+ * 复盘图如果各解析一遍，迟早会出现「页面说 12 杆、图上画 13 杆」。
+ *
+ * @param {unknown[]} log
+ * @param {string} kind
+ * @returns {Array<ReturnType<typeof readLogEntry> & {raw:unknown}>}
+ */
+function readMatchLog(log, kind) {
+  const entries = [];
+  const seen = new Set();
+  for (const raw of log) {
+    const entry = readLogEntry(raw, kind);
+    if (entry.shot !== null) {
+      if (seen.has(entry.shot)) continue;
+      seen.add(entry.shot);
+    }
+    entries.push({ ...entry, raw });
+  }
+  return entries;
+}
+
+/** 胜者下标；没结束、或者存档里是脏值都给 null。 */
+function matchWinnerOf(game) {
+  const w = game.winner;
+  if (w === 0 || w === 1) return w;
+  if (w === '0') return 0;
+  if (w === '1') return 1;
+  return null;
+}
+
+/** 玩家名；缺字段时退回「你 / 对手」，和 newGame 的默认名一致。 */
+function matchPlayerName(game, i) {
+  const players = Array.isArray(game.players) ? game.players : [];
+  const p = players[i];
+  const name = p && typeof p.name === 'string' ? p.name.trim() : '';
+  return name || (i === 0 ? '你' : '对手');
+}
+
+/**
+ * 按杆累计的进球曲线：`[{x, y1, y2}]`，x 是杆号，y1 是「我」的累计进球，
+ * y2 是对手的。第一个点是 (0, 0, 0)，折线从坐标原点起步，不会凭空从中间开始。
+ *
+ * @param {Array<{shot:number|null, shooter:number|null}>} entries
+ * @param {number|null} winner
+ * @returns {{series:Array<{x:number, y1:number, y2:number}>, pots:[number, number]}}
+ */
+function matchSeriesOf(entries, winner) {
+  const series = [{ x: 0, y1: 0, y2: 0 }];
+  const pots = [0, 0];
+  let y1 = 0;
+  let y2 = 0;
+  let lastX = 0;
+  for (const entry of entries) {
+    // 杆号本来就该递增；手写记录缺号时按顺序补一个，免得两条点落在同一 x 上。
+    const x = entry.shot !== null && entry.shot > lastX ? entry.shot : lastX + 1;
+    lastX = x;
+    if (isPotted(entry, winner)) {
+      if (entry.shooter === 0) {
+        pots[0] += 1;
+        y1 += 1;
+      } else if (entry.shooter === 1) {
+        pots[1] += 1;
+        y2 += 1;
+      }
+    }
+    series.push({ x, y1, y2 });
+  }
+  return { series, pots };
+}
+
+/**
+ * 等间距抽点，首尾必留。返回的数组长度不超过 limit，x 严格递增。
+ *
+ * @param {Array<{x:number}>} points
+ * @param {number} limit
+ */
+function sampleMatchSeries(points, limit) {
+  if (points.length <= limit) return points;
+  const out = [];
+  const last = points.length - 1;
+  for (let i = 0; i < limit; i += 1) {
+    const p = points[Math.round((i * last) / (limit - 1))];
+    if (!out.length || out[out.length - 1].x !== p.x) out.push(p);
+  }
+  // 取整可能把最后一点挤掉（虽然这里不会），补一次保证折线收在终局。
+  if (out[out.length - 1].x !== points[last].x) out.push(points[last]);
+  return out;
+}
+
+/** 最长连击的区间（连续进球、同一人、中间没有空杆/犯规）。 */
+function longestRunRange(entries, winner) {
+  let best = { len: 0, from: null, to: null };
+  let run = 0;
+  let from = null;
+  let lastShooter = null;
+  for (const entry of entries) {
+    if (!isPotted(entry, winner)) {
+      run = 0;
+      lastShooter = null;
+      continue;
+    }
+    const same = lastShooter !== null && entry.shooter === lastShooter;
+    run = same ? run + 1 : 1;
+    if (!same) from = entry.shot;
+    lastShooter = entry.shooter;
+    if (run > best.len) best = { len: run, from, to: entry.shot };
+  }
+  return best;
+}
+
+/**
+ * 挑「最大容错杆」：容错角最大的一杆，也就是这一局里最不该打丢的一杆。
+ *
+ * 数据来自求解结果的候选（src/solver.js 的 `{shot, targetNumber, pocketId,
+ * toleranceDeg}`）。只认有限正数，没有就返回 null，不编一个 ±0.00°。
+ */
+function bestToleranceShot(input) {
+  const lists = [input && input.shots, input && input.attempts];
+  let best = null;
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue;
+    for (const c of list) {
+      if (!c || typeof c !== 'object') continue;
+      const deg = Number(c.toleranceDeg);
+      if (!Number.isFinite(deg) || deg <= 0) continue;
+      const shot = Number(c.shot);
+      const target = Number(c.targetNumber);
+      const item = {
+        shot: Number.isFinite(shot) && shot > 0 ? Math.floor(shot) : null,
+        targetNumber: Number.isFinite(target) && target > 0 ? target : null,
+        pocketId: typeof c.pocketId === 'string' ? c.pocketId : '',
+        toleranceDeg: deg,
+      };
+      if (!best || item.toleranceDeg > best.toleranceDeg) best = item;
+    }
+  }
+  return best;
+}
+
+/** 犯规那句的括号：按代码计数，最多列两类，多了收成「等 N 类」。 */
+function foulBreakdownText(entries, total) {
+  const tally = new Map();
+  for (const entry of entries) {
+    if (!entry.foul) continue;
+    const codes = entry.raw && Array.isArray(entry.raw.fouls) ? entry.raw.fouls : [];
+    for (const code of codes) {
+      if (typeof code !== 'string' || !code) continue;
+      tally.set(code, (tally.get(code) || 0) + 1);
+    }
+  }
+  const all = [...tally.entries()].sort((a, b) => b[1] - a[1]);
+  if (!all.length) return `${total} 次`;
+  const parts = all
+    .slice(0, 2)
+    .map(([code, n]) => `${FOUL_CODE_TEXT[code] || code} ×${n}`);
+  const more = all.length > 2 ? ` 等 ${all.length} 类` : '';
+  return `${total} 次（${parts.join('、')}${more}）`;
+}
+
+/**
+ * 关键杆：最多 3 条，顺序固定——最长连击 → 最大容错杆 → 犯规 → 收官一杆
+ * （前三条占满就丢掉收官，宁可少说一句也不把图排成流水账）。
+ */
+function matchKeyLines({ entries, stats, winner, winnerName, shots }) {
+  const lines = [];
+  const run = longestRunRange(entries, winner);
+  if (run.len >= 2) {
+    const where = run.from === run.to ? `第 ${run.from} 杆` : `第 ${run.from}–${run.to} 杆`;
+    lines.push(`最长连击 ${run.len} 杆（${where}）`);
+  }
+  const tol = bestToleranceShot(shots);
+  if (tol) {
+    const ball = tol.targetNumber ? shareBallText(tol.targetNumber) : '';
+    const pocket = tol.pocketId ? pocketName(tol.pocketId) : '';
+    const where = ball && pocket ? `${ball} → ${pocket}` : ball || pocket || `第 ${tol.shot} 杆`;
+    lines.push(`最大容错杆 ${where} ±${tol.toleranceDeg.toFixed(2)}°`);
+  }
+  if (stats.fouls > 0) lines.push(`犯规 ${foulBreakdownText(entries, stats.fouls)}`);
+  if (lines.length < MATCH_KEY_LIMIT) {
+    const end = entries.filter((e) => e.end).pop();
+    if (end) lines.push(`收官一杆 第 ${end.shot} 杆 · ${winnerName} 赢下这一局`);
+  }
+  if (!lines.length) lines.push('这一局没有可复盘的关键杆');
+  return lines.slice(0, MATCH_KEY_LIMIT).map((value, i) => ({
+    label: `关键杆 ${i + 1}`,
+    value,
+  }));
+}
+
+/**
+ * 整局复盘要印在图上的文案 + 折线数据。
+ *
+ * 输入宽容：`game` 缺字段、`log` 不是数组、`stats` / `shots` 是半截对象都不抛。
+ * 但**只要这局还没结束（或结束时连胜者都不知道），或者一条可用的流水都没有，
+ * 就返回 null**——调用方据此把「复盘这一局」按钮禁掉。绝不退化成一份 0:0 的图。
+ *
+ * @param {{game?:object|null, log?:unknown[], stats?:object|null, table?:object,
+ *   shots?:unknown[], attempts?:unknown[]}} [input]
+ *   game    createGame() 出来的对局；phase 不是 ended 就直接 null
+ *   log     对局流水，缺省取 game.log
+ *   stats   computeMatchStats 的结果；只在字段缺失时兜底，数字仍以 log 为准
+ *   table   球台，目前不参与文案（台面由 render.js 画）
+ *   shots   本局每一杆的求解候选（`{shot, targetNumber, pocketId, toleranceDeg}`），
+ *           用来挑「最大容错杆」；没有就不印这一条
+ * @returns {{title:string, lines:Array<{label:string, value:string}>,
+ *   chart:Array<{x:number, y1:number, y2:number}>}|null}
+ *   chart 是纯数据：x = 杆号，y1 = 我的累计进球，y2 = 对手的累计进球。
+ *   点最多 MATCH_CHART_LIMIT 个，超了等间距抽点并在 lines 里说明。
+ */
+export function buildMatchSummary(input = {}) {
+  const opts = input && typeof input === 'object' ? input : {};
+  const game = opts.game && typeof opts.game === 'object' ? opts.game : null;
+  if (!game) return null;
+  // 只认 phase === 'ended'：winner 有值但 phase 没跟上，说明这局正处在中间态
+  // （或者存档写坏了），此时导出的「终局图」根本不对应任何终局。
+  if (game.phase !== 'ended') return null;
+  const winner = matchWinnerOf(game);
+  if (winner === null) return null;
+
+  const kind = typeof game.kind === 'string' ? game.kind : '';
+  const log = Array.isArray(opts.log)
+    ? opts.log
+    : Array.isArray(game.log)
+      ? game.log
+      : [];
+  const entries = readMatchLog(log, kind);
+  if (!entries.length) return null;
+  // 一条带杆号的记录都没有 = 这不是一份能复盘的流水（null / 数字 / 空对象混进来就是这样）。
+  // 此时统计会全 0，照画就是那张「0:0 的复盘」——宁可给 null 让按钮灰着。
+  if (!entries.some((e) => e.shot !== null)) return null;
+
+  const derived = computeMatchStats({ log, kind, winner });
+  const src = opts.stats && typeof opts.stats === 'object' ? opts.stats : {};
+  const pick = (v, fallback) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : fallback);
+  const stats = {
+    shots: Math.floor(pick(src.shots, derived.shots)),
+    // potRate 是 0..1 的比例，0 是合法值（打了但一杆没进），不能和「没有」混起来
+    potRate:
+      typeof src.potRate === 'number' && Number.isFinite(src.potRate)
+        ? clamp(src.potRate, 0, 1)
+        : derived.potRate,
+    longestRun: Math.floor(pick(src.longestRun, derived.longestRun)),
+    fouls: Math.floor(pick(src.fouls, derived.fouls)),
+  };
+
+  const { series, pots } = matchSeriesOf(entries, winner);
+  const oppName = matchPlayerName(game, 1);
+  const kindLabel = TABLE_KIND_LABEL[kind] || '对局';
+  let mine = pots[0];
+  let theirs = pots[1];
+  if (kind === 'snooker') {
+    const scores = game.snooker && Array.isArray(game.snooker.scores) ? game.snooker.scores : [];
+    if (Number.isFinite(scores[0]) && Number.isFinite(scores[1])) {
+      mine = scores[0];
+      theirs = scores[1];
+    }
+  }
+
+  const lines = matchKeyLines({
+    entries,
+    stats,
+    winner,
+    winnerName: matchPlayerName(game, winner),
+    shots: opts,
+  });
+
+  let chart = series;
+  if (series.length > MATCH_CHART_LIMIT) {
+    chart = sampleMatchSeries(series, MATCH_CHART_LIMIT);
+    lines.push({
+      label: '走势',
+      value: `共 ${series.length - 1} 杆，折线降采样到 ${chart.length} 点`,
+    });
+  }
+
+  lines.push({ label: '杆数', value: `${stats.shots} 杆` });
+  lines.push({ label: '命中率', value: stats.potRate === null ? '—' : `${Math.round(stats.potRate * 100)}%` });
+  lines.push({ label: '最长连击', value: `${stats.longestRun} 杆` });
+  lines.push({ label: '犯规', value: `${stats.fouls} 次` });
+
+  return {
+    title: `${kindLabel} · 我 ${mine} : ${theirs} ${oppName}`,
+    lines,
+    chart,
+  };
 }

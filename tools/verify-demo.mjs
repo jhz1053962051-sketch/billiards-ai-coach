@@ -3422,6 +3422,233 @@ check(
 
 await send(ws, 'Emulation.clearDeviceMetricsOverride');
 
+// ------------------------------------------------------------ 整局复盘图（第三种导出）
+//
+// 这张图和前两张共用 createShareScene → buildShareSheet → publishShare，所以画布
+// 宽度、文件名、长按保存的提示都跟着那条管线走，这里只钉三件会真出错的事：
+// 1) 局没打完按钮必须是灰的——点得动就等于允许拿一张 0:0 的假复盘出去；
+// 2) 打完点得动，出的是 1080 宽的真 blob 图、字节数像张真图；
+// 3) 图上印的比分与命中率，跟右边「对局记录」面板是同一份账（各算一遍再比）。
+const matchBtnState = `(() => {
+  const btn = document.getElementById('shareMatch');
+  return JSON.stringify({ disabled: btn.disabled, title: btn.title.replace(/\\s+/g, ' ').trim() });
+})()`;
+
+await evaluate(`(() => {
+  const app = window.__app;
+  app.setMode('game');
+  const autoBox = document.getElementById('autoOpponent');
+  if (autoBox && autoBox.checked) { autoBox.checked = false; autoBox.dispatchEvent(new Event('change', { bubbles: true })); }
+  const kindSel = document.getElementById('gameKind');
+  if (kindSel.value !== 'eightball') { kindSel.value = 'eightball'; kindSel.dispatchEvent(new Event('change', { bubbles: true })); }
+  app.newGame();
+})()`);
+await sleep(300);
+const midGameBtn = JSON.parse(await evaluate(matchBtnState));
+console.log('复盘按钮·对局中:', JSON.stringify(midGameBtn));
+check(
+  '局还没打完时「复盘这一局」是禁用的，点不出 0:0 的假复盘',
+  midGameBtn.disabled === true,
+  JSON.stringify(midGameBtn),
+);
+check(
+  '禁用时 title 写了原因（不是干灰着让人猜）',
+  /还没结束/.test(midGameBtn.title),
+  midGameBtn.title,
+);
+
+/** 某人打进的杆数；与面板各算一遍，别拿被测函数互相证明。 */
+const potsOf = (rows, who, winner) =>
+  rows.filter((e) => {
+    if (e.shooter !== who) return false;
+    if ((Array.isArray(e.fouls) && e.fouls.length) || /犯规/.test(e.summary || '')) return false;
+    if (/这一局结束/.test(e.summary || '')) return e.shooter === winner;
+    return /进\s*\d+\s*号/.test(e.summary || '');
+  }).length;
+
+const matchDone = await matchWinShot('eightball', 8);
+const matchWant = expectedFromLog(matchDone.log || [], matchDone.winner);
+const rivalPots = potsOf(matchDone.log || [], 1, matchDone.winner);
+const endedBtn = JSON.parse(await evaluate(matchBtnState));
+check(
+  '这一局打完之后「复盘这一局」可以点了',
+  matchDone.phase === 'ended' && endedBtn.disabled === false,
+  `phase=${matchDone.phase} disabled=${endedBtn.disabled} title=${endedBtn.title}`,
+);
+
+const review = JSON.parse(await evaluate(`(async () => {
+  const app = window.__app;
+  const g = app.state.game;
+  const out = document.getElementById('shareOut');
+  const img = document.getElementById('shareImage');
+  // 先直接调一次拿字节数（CSP 的 connect-src 只放 'self'，fetch blob: 会被挡），
+  // 再清空预览、真点一次按钮：按钮能出图这件事必须由点击证明。
+  const published = await app.shareMatch();
+  out.classList.add('hidden');
+  document.getElementById('shareMatch').click();
+  const t0 = Date.now();
+  let w = 0;
+  let h = 0;
+  while (Date.now() - t0 < 12000) {
+    if (!out.classList.contains('hidden') && img.naturalWidth > 0) {
+      w = img.naturalWidth;
+      h = img.naturalHeight;
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  const summary = app.buildMatchSummary({ game: g, log: g.log, shots: app.state.shotLog });
+  const value = (label) => {
+    const hit = summary ? summary.lines.find((l) => l.label === label) : null;
+    return hit ? hit.value : '';
+  };
+  const grid = Array.from(document.querySelectorAll('#matchStats .match-grid div')).map((d) =>
+    d.textContent.replace(/\\s+/g, ' ').trim(),
+  );
+  return JSON.stringify({
+    w, h,
+    src: img.src,
+    bytes: (published && published.bytes) || 0,
+    publishedOk: Boolean(published && published.ok),
+    alt: img.alt,
+    title: summary ? summary.title : null,
+    potRate: value('命中率'),
+    shotsLine: value('杆数'),
+    keyLines: summary ? summary.lines.filter((l) => l.label.indexOf('关键杆') === 0).length : 0,
+    chart: summary ? summary.chart : null,
+    grid,
+  });
+})()`));
+console.log('整局复盘图:', JSON.stringify({
+  size: `${review.w}×${review.h}`,
+  bytes: review.bytes,
+  title: review.title,
+  potRate: review.potRate,
+  grid: review.grid,
+}));
+
+check(
+  '复盘图出的是 1080 宽的真 blob 图，不是占位 canvas',
+  review.w === 1080 && review.src.startsWith('blob:'),
+  `${review.w}×${review.h} ${review.src.split(':')[0]}:`,
+);
+check(
+  '复盘图比纯台面图更高（上面台面、中间折线、下面关键杆与统计）',
+  review.h > 900,
+  `${review.w}×${review.h}`,
+);
+check(
+  '复盘图的字节数像张真图（>20KB）',
+  review.publishedOk === true && review.bytes > 20000,
+  `${review.bytes} bytes`,
+);
+check('复盘图的 alt 以「复盘：」开头，读屏能听出这是整局复盘', /^复盘：/.test(review.alt), review.alt);
+check(
+  '复盘图的标题比分与 g.log 独立重算的一致',
+  review.title === `八球 · 我 ${matchWant.pots} : ${rivalPots} 对手`,
+  `图=${review.title} 重算=${matchWant.pots}:${rivalPots}`,
+);
+check(
+  '复盘图上的命中率与「对局记录」面板印的是同一个数',
+  review.grid[0] === `杆数${matchWant.shots}` &&
+    review.grid[1] === `进球${matchWant.pots}` &&
+    review.grid[2] === `命中率${review.potRate}`,
+  `面板=${JSON.stringify(review.grid.slice(0, 3))} 图=${review.potRate} 重算=${JSON.stringify(matchWant)}`,
+);
+check(
+  '折线末点等于双方累计进球（走势不是凭空画的）',
+  Array.isArray(review.chart) &&
+    review.chart.length === matchWant.shots + 1 &&
+    review.chart[review.chart.length - 1].y1 === matchWant.pots &&
+    review.chart[review.chart.length - 1].y2 === rivalPots,
+  `chart=${JSON.stringify((review.chart || []).slice(-1))}`,
+);
+check(
+  '关键杆最多三条，且至少有一条（这一局有收官那一杆）',
+  review.keyLines >= 1 && review.keyLines <= 3,
+  `${review.keyLines} 条`,
+);
+
+// 390×844：三个按钮必须排得下、互不重叠、都能点到，且都不压台面。
+await send(ws, 'Emulation.setDeviceMetricsOverride', {
+  width: 390,
+  height: 844,
+  deviceScaleFactor: 2,
+  mobile: true,
+});
+await sleep(400);
+const threeButtons = JSON.parse(await evaluate(`(async () => {
+  const vw = window.innerWidth;
+  const stage = document.getElementById('stage');
+  const pick = (el) => {
+    const r = el.getBoundingClientRect();
+    return {
+      left: Math.round(r.left),
+      right: Math.round(r.right),
+      top: Math.round(r.top),
+      bottom: Math.round(r.bottom),
+      w: Math.round(r.width),
+    };
+  };
+  const shot = pick(document.getElementById('shareShot'));
+  const tableBtn = pick(document.getElementById('shareTable'));
+  const matchBtn = pick(document.getElementById('shareMatch'));
+  const overlap = (a, b) => !(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top);
+  const stageBottom = stage ? Math.round(stage.getBoundingClientRect().bottom) : 0;
+  const out = document.getElementById('shareOut');
+  out.classList.add('hidden');
+  document.getElementById('shareMatch').click();
+  const t0 = Date.now();
+  let w = 0;
+  let h = 0;
+  while (Date.now() - t0 < 12000) {
+    const img = document.getElementById('shareImage');
+    if (!out.classList.contains('hidden') && img.naturalWidth > 0) {
+      w = img.naturalWidth;
+      h = img.naturalHeight;
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return JSON.stringify({
+    vw, shot, tableBtn, matchBtn, stageBottom, w, h,
+    scrollW: document.documentElement.scrollWidth,
+    overlaps: {
+      shotTable: overlap(shot, tableBtn),
+      shotMatch: overlap(shot, matchBtn),
+      tableMatch: overlap(tableBtn, matchBtn),
+    },
+  });
+})()`));
+console.log('复盘图·390 窄屏:', JSON.stringify(threeButtons));
+
+check(
+  '390 宽下三个按钮都在视口内、互不重叠、也不压台面',
+  ['shot', 'tableBtn', 'matchBtn'].every(
+    (k) =>
+      threeButtons[k].left >= -1 &&
+      threeButtons[k].right <= threeButtons.vw + 1 &&
+      threeButtons[k].w > 60 &&
+      threeButtons[k].top >= threeButtons.stageBottom - 1,
+  ) &&
+    !threeButtons.overlaps.shotTable &&
+    !threeButtons.overlaps.shotMatch &&
+    !threeButtons.overlaps.tableMatch,
+  JSON.stringify({ shot: threeButtons.shot, table: threeButtons.tableBtn, match: threeButtons.matchBtn, overlaps: threeButtons.overlaps }),
+);
+check(
+  '390 宽下点「复盘这一局」照样出 1080 宽的真图',
+  threeButtons.w === 1080 && threeButtons.h > 900,
+  `${threeButtons.w}×${threeButtons.h}`,
+);
+check(
+  '390 宽下三个按钮排得下，整页没有横向滚动',
+  threeButtons.scrollW <= threeButtons.vw + 1,
+  `scrollWidth=${threeButtons.scrollW} viewport=${threeButtons.vw}`,
+);
+
+await send(ws, 'Emulation.clearDeviceMetricsOverride');
+
 // ------------------------------------------------------------ 收尾
 
 // 有些崩溃发生在某段断言之后（比如回放的 tick 要等帧放完才走到回调），
