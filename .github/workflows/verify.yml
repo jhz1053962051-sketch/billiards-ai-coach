@@ -70,6 +70,24 @@ jobs:
         # 没写 @ts-check 的文件（physics/sim/solver/constants）本轮不校验，但仍参与类型推断。
         run: npm run typecheck
 
+      - name: dist 过期检查
+        # dist/ 是入库的最小化产物（33 个文件），tools/build-min.mjs --check 会重算
+        # 每个文件的字节并与磁盘逐字节比对，源改了却忘了重建就直接判红——这是
+        # 「改了 src/demo 但 dist 静默过期」唯一的保护。
+        #
+        # 为什么要先补两个文件：dist/vendor/pose/pose_landmarker_lite.task（5.7 MB）与
+        # dist/vendor/pose/wasm/vision_wasm_internal.wasm（14.5 MB）被 .gitignore 排除，
+        # 干净 clone 上没有；而 --check 对 COPY_TARGETS 也会逐字节比对，缺席就报
+        # 「缺文件」把整步判红（本地已实测：干净 clone + autocrlf=false 只报这两条）。
+        # 这两个产物本来就是从 vendor/ 原样复制，所以先补进去；若 vendor 源真变了却
+        # 没重建，BUILD.json 里的 sha256 会对不上，--check 仍会报「BUILD.json 与当前
+        # 源码不一致」，不会因此漏判。
+        run: |
+          mkdir -p dist/vendor/pose/wasm
+          cp vendor/pose/pose_landmarker_lite.task dist/vendor/pose/
+          cp vendor/pose/wasm/vision_wasm_internal.wasm dist/vendor/pose/wasm/
+          npm run check:dist
+
       - name: 单元测试
         run: npm test
 

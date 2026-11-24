@@ -8,6 +8,8 @@
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import fs from 'node:fs';
+import zlib from 'node:zlib';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,8 +31,16 @@ after(async () => {
   await new Promise((resolve) => server.close(resolve));
 });
 
-/** 发一个请求，返回状态码、头与响应体。Host 可以伪造。 */
-function request(pathname, { method = 'GET', host } = {}) {
+/**
+ * 发一个请求，返回状态码、头与响应体。Host 可以伪造。
+ * `acceptEncoding` 传字符串就原样发；不传则完全不发这个头——Node 的 http 客户端
+ * 默认不加 Accept-Encoding，正好用来确认「不带这个头时服务不压缩」。
+ * `raw` 是未解码的字节（压缩响应只有它有意义），`body` 仍是 utf8 文本，老断言不受影响。
+ */
+function request(pathname, { method = 'GET', host, acceptEncoding } = {}) {
+  const headers = {};
+  if (host) headers.host = host;
+  if (acceptEncoding !== undefined) headers['accept-encoding'] = acceptEncoding;
   return new Promise((resolve, reject) => {
     const req = http.request(
       {
@@ -38,18 +48,20 @@ function request(pathname, { method = 'GET', host } = {}) {
         port,
         path: pathname,
         method,
-        headers: host ? { host } : {},
+        headers,
       },
       (res) => {
         const chunks = [];
         res.on('data', (chunk) => chunks.push(chunk));
-        res.on('end', () =>
+        res.on('end', () => {
+          const raw = Buffer.concat(chunks);
           resolve({
             status: res.statusCode,
             headers: res.headers,
-            body: Buffer.concat(chunks).toString('utf8'),
-          }),
-        );
+            body: raw.toString('utf8'),
+            raw,
+          });
+        });
       },
     );
     req.on('error', reject);
@@ -191,4 +203,63 @@ test('一键启动：起服务后 /demo/ 真的能打开，且不弹浏览器', 
   } finally {
     child.kill();
   }
+});
+// ── 响应压缩 ─────────────────────────────────────────────────────────────────
+//
+// tools/serve.mjs 的 br/gzip 分支原来一条测试都没有（上面 10 条全都不带
+// Accept-Encoding）。压缩写错了在手工点页面时几乎看不出来：体积没降、或者解压
+// 失败白屏。所以这里同时验三件事——头写对了、字节真的变小、解压回来与原文件相同。
+
+const LARGE_TEXT = 'src/solver.js'; // 30 KB+，肯定过 MIN_COMPRESS_BYTES
+
+test('静态服务：Accept-Encoding: br 时走 brotli，体积变小且能还原', async () => {
+  const raw = await fs.promises.readFile(path.join(ROOT, LARGE_TEXT));
+  const res = await request('/' + LARGE_TEXT, { acceptEncoding: 'br' });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.headers['content-encoding'], 'br');
+  // 缓存与中间代理必须按这个维度分桶，否则会把压缩结果发给不接受它的客户端
+  assert.equal(res.headers.vary, 'Accept-Encoding');
+  // content-length 报的是压缩后的真实字节数，不是解压后的
+  assert.equal(Number(res.headers['content-length']), res.raw.length);
+  assert.ok(res.raw.length < raw.length, `br 后 ${res.raw.length}B 应小于原 ${raw.length}B`);
+  // 解压回去必须逐字节等于磁盘上的源文件：压缩不能改内容
+  assert.deepEqual(zlib.brotliDecompressSync(res.raw), raw);
+});
+
+test('静态服务：Accept-Encoding: gzip 时走 gzip，体积变小且能还原', async () => {
+  const raw = await fs.promises.readFile(path.join(ROOT, LARGE_TEXT));
+  const res = await request('/' + LARGE_TEXT, { acceptEncoding: 'gzip' });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.headers['content-encoding'], 'gzip');
+  assert.equal(res.headers.vary, 'Accept-Encoding');
+  assert.equal(Number(res.headers['content-length']), res.raw.length);
+  assert.ok(res.raw.length < raw.length, `gzip 后 ${res.raw.length}B 应小于原 ${raw.length}B`);
+  assert.deepEqual(zlib.gunzipSync(res.raw), raw);
+});
+
+test('静态服务：identity 或不带 Accept-Encoding 时原样返回', async () => {
+  const raw = await fs.promises.readFile(path.join(ROOT, LARGE_TEXT));
+
+  for (const opts of [{}, { acceptEncoding: 'identity' }]) {
+    const res = await request('/' + LARGE_TEXT, opts);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers['content-encoding'], undefined, '不该带 content-encoding');
+    assert.equal(Number(res.headers['content-length']), raw.length);
+    assert.deepEqual(res.raw, raw);
+  }
+});
+
+test('静态服务：小于 1024B 的文本即使请求 br 也不压缩', async () => {
+  // MIN_COMPRESS_BYTES = 1024：小文件压完常常更大，压缩头本身就是成本
+  const rel = 'src/geometry.js';
+  const raw = await fs.promises.readFile(path.join(ROOT, rel));
+  assert.ok(raw.length < 1024, `${rel} 已涨到 ${raw.length}B，这条用例需要换一个更小的夹具`);
+
+  const res = await request('/' + rel, { acceptEncoding: 'br' });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers['content-encoding'], undefined);
+  assert.equal(Number(res.headers['content-length']), raw.length);
+  assert.deepEqual(res.raw, raw);
 });
