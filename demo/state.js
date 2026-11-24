@@ -14,6 +14,7 @@
 // `await import()` 真的加载这个文件来核对导出，一碰 window 就是整条门禁红。
 
 import {
+  GAME_KINDS,
   cloneGame,
   legalTargetNumbers,
   numbersOnTable,
@@ -78,6 +79,24 @@ export function tableForKind(kind, manualByKind = {}) {
   if (kind === 'snooker') return 'snooker';
   const manual = manualByKind?.[kind];
   return typeof manual === 'string' && manual ? manual : fallback;
+}
+
+/**
+ * 把「页面上来的玩法字符串」校验成 GAME_KINDS 里的一个 id，不认识就抛。
+ *
+ * 这里是**唯一**的兜底闸门：下拉框给什么值、将来接 URL 参数给什么值，都必须先过
+ * 这一道。以前写成 `GAME_KINDS[v] ? v : 'eightball'`——加十球 / 中式八球时忘了
+ * 补分支，用户选中的新玩法会静默按黑八开一整局，规则全错而日志干干净净。
+ * 名单只认 src/rack.js 的 GAME_KINDS，不在这里再抄一份。
+ *
+ * @param {unknown} value 待校验的玩法 id
+ * @returns {string} 原样返回合法的 id
+ */
+export function gameKindOrThrow(value) {
+  if (typeof value === 'string' && Object.prototype.hasOwnProperty.call(GAME_KINDS, value)) {
+    return value;
+  }
+  throw new Error(`不认识的玩法：${String(value)}（支持 ${Object.keys(GAME_KINDS).join(' / ')}）`);
 }
 
 // ---------------------------------------------------------------- 力度档位
@@ -1377,7 +1396,9 @@ const TABLE_KIND_LABEL = { eightball: '八球', nineball: '九球', snooker: '�
  * 局面要点：一个标题 + 若干「字段 / 值」行 + 圈球用的 mark。
  *
  * 与 buildShareSummary 一样刻意宽容：game 缺字段、balls 不是数组、shot 是半截对象
- * 都不抛——**能导出一张「还没开局」的图，比在按钮上炸掉有用**。
+ * 都不抛——**能导出一张「还没开局」的图，比在按钮上炸掉有用**。唯一的例外是
+ * game.kind：玩法不认识说明代码少了一路分支（不是数据坏），那时必须响亮地报错，
+ * 见 tableMarkLabel。
  *
  * @param {{game?:object|null, balls?:unknown[], table?:object, shot?:unknown}} [input]
  *   game   createGame() 出来的对局；传空就是练习摆球（没有比分可印）
@@ -1526,10 +1547,20 @@ function matchTableSummary(g, onTable, next) {
 
 /** 图例文案：图上圈住的这批球在叫什么。 */
 function tableMarkLabel(kind, turnGroup, targets) {
-  if (kind === 'eightball') return turnGroup ? TABLE_GROUP_NAME[turnGroup] : '未分组';
-  if (kind === 'nineball') return targets.length ? `目标 ${targets[0]} 号球` : '台面已清空';
-  if (kind === 'snooker') return '当前该打';
-  return '台面';
+  // 显式穷举，不留 else：以前最后一行是 `return '台面'`，加十球 / 中式八球时
+  // 忘了在这里补分支，导出的图上会印一句和玩法无关的「台面」，而且不报错。
+  switch (kind) {
+    case 'eightball':
+      return turnGroup ? TABLE_GROUP_NAME[turnGroup] : '未分组';
+    case 'nineball':
+      return targets.length ? `目标 ${targets[0]} 号球` : '台面已清空';
+    case 'snooker':
+      return '当前该打';
+    default:
+      throw new Error(
+        `不认识的玩法：${String(kind)}（图例文案没有对应分支，支持 ${Object.keys(GAME_KINDS).join(' / ')}）`
+      );
+  }
 }
 
 /** 斯诺克那一行：红球还剩几颗 + 这一杆该打什么。 */
@@ -1901,4 +1932,75 @@ export function buildMatchSummary(input = {}) {
     lines,
     chart,
   };
+}
+
+// ---------------------------------------------------------------- 一杆播报（#report）
+//
+// 一杆结算完，界面要把 rules.js 的 report 拼成一条给玩家看的话：摘要 + 犯规红行 +
+// 一行补充（分组 / 重摆 / 持球 / 待决事项）。这段拼装原来在 app.js 里**逐字抄了三份**
+// （玩家求解打、玩家手打、对手自动出杆），改一个字段漏一处，就会出现「有些流程显示、
+// 有些流程不显示」——最难发现的那种错。
+//
+// 三个调用点确实有三处**真实的**差异，所以不强行合并成一句话，全部做成参数：
+//   1. 对手那一杆前面多一段 `<b>对手</b> · `（prefix）；
+//   2. 重摆提示的措辞不同：玩家这杆写「8 号球已重摆回 8 号点」（只在 8 号球时写），
+//      收尾那杆按实际号码写「N 号球已重摆回底点」（spotted）；
+//   3. 对手那一杆只在轮到玩家时才写持球提示（球权刚交给玩家），玩家自己那一杆
+//      和收尾那一杆无条件写（ballInHandForPlayerOnly）；
+// 另外收尾那杆多一句待决事项（pendingChoiceHint），对手那一杆末尾多一段选杆说明（tail）。
+//
+// **拼出来的字符串与改动前逐字节相同**（test/demo-state.test.js 里有钉死的期望值，
+// 12 份 report × 三个调用点都在 test/ 里对过）。这里只负责去重，不改任何一句文案。
+
+/**
+ * 一杆播报的 HTML。
+ *
+ * @param {object} report resolveShot 返回的报告
+ * @param {object} [options]
+ * @param {object|null} [options.next] 结算后的局面，用来读 ballInHand / turn
+ * @param {string} [options.prefix] 播报前缀，对手那一杆是 `<b>对手</b> · `
+ * @param {'only8'|'any'} [options.spotted] 重摆提示口径，见上
+ * @param {boolean} [options.pendingChoiceHint] 是否写「开球不达标…」那句待决提示
+ * @param {boolean} [options.ballInHandForPlayerOnly] 只在轮到玩家时才写持球提示
+ * @param {string[]} [options.tail] 追加在最后的行（对手的选杆说明）
+ * @returns {string}
+ */
+export function reportHtml(report, options = {}) {
+  const opts = options && typeof options === 'object' ? options : {};
+  const next = opts.next && typeof opts.next === 'object' ? opts.next : null;
+  const prefix = typeof opts.prefix === 'string' ? opts.prefix : '';
+  const spottedMode = opts.spotted === 'any' ? 'any' : 'only8';
+  const tail = Array.isArray(opts.tail) ? opts.tail : [];
+
+  const fouls = Array.isArray(report.fouls) ? report.fouls : [];
+  const foulHtml = fouls.length
+    ? `<div class="foul">犯规：${fouls.map((f) => f.text).join('；')}</div>`
+    : '';
+
+  const extra = [];
+  if (report.groupAssigned) {
+    const who = report.groupAssigned.player === 0 ? '你' : '对手';
+    extra.push(`分组：${who}拿到${TABLE_GROUP_NAME[report.groupAssigned.group]}`);
+  }
+  if (spottedMode === 'only8') {
+    if (report.spotted === 8) extra.push('8 号球已重摆回 8 号点');
+  } else if (report.spotted) {
+    extra.push(`${report.spotted} 号球已重摆回底点`);
+  }
+  if (report.requiresRerack) extra.push('开球不合法，需要重摆');
+  if (opts.pendingChoiceHint && report.pendingChoice) {
+    extra.push('开球不达标，你可以在下面选照打还是交回去');
+  }
+  const ballInHand = next && next.ballInHand;
+  if (ballInHand && (!opts.ballInHandForPlayerOnly || next.turn === 0)) {
+    const where = ballInHand.zone === 'kitchen' ? '在开球线后点一下放母球' : '在台面上点一下放母球';
+    extra.push(`持球：${where}`);
+  }
+  for (const line of tail) extra.push(line);
+
+  const details = extra.length ? '<div>' + extra.join(' · ') + '</div>' : '';
+  // summary 一定是字符串（rules.js 每一份 report 都带）；真缺了也别在面板上印一个
+  // 「undefined」——那是把内部状态漏给用户看。
+  const summary = typeof report.summary === 'string' ? report.summary : String(report.summary ?? '');
+  return `${prefix}${summary}${foulHtml}${details}`;
 }

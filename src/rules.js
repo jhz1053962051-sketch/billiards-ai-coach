@@ -407,8 +407,21 @@ export function spotEight(game) {
  * @returns {{next:object, report:object}}
  */
 export function resolveShot(game, facts) {
-  if (game.kind === 'snooker') return resolveSnooker(game, facts);
-  return game.kind === 'nineball' ? resolveNineBall(game, facts) : resolveEightBall(game, facts);
+  // 显式穷举，不留 else 兜底：以前写成「不是斯诺克 / 不是九球就是黑八」，加十球或
+  // 中式八球时忘了在这里加一行，整局就会**静默按黑八规则跑完**——用户看到的是错
+  // 规则，日志里什么都没有，比直接报错难查得多（同 createGame 的做法）。
+  switch (game && game.kind) {
+    case 'eightball':
+      return resolveEightBall(game, facts);
+    case 'nineball':
+      return resolveNineBall(game, facts);
+    case 'snooker':
+      return resolveSnooker(game, facts);
+    default:
+      throw new Error(
+        `不认识的玩法：${String(game && game.kind)}（resolveShot 支持 ${Object.keys(GAME_KINDS).join(' / ')}）`
+      );
+  }
 }
 
 // ==========================================================================

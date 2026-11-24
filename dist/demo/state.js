@@ -1,4 +1,5 @@
-import{cloneGame,
+import{GAME_KINDS,
+cloneGame,
 legalTargetNumbers,
 numbersOnTable,
 remainingOfGroup,}from'../src/rules.js';import{SEARCH_DT}from'../src/constants.js';import{createWorld,strike,stepWorld,allStopped,createRollTracker}from'../src/physics.js';import{ballLabel,cueRestText,pocketName,toleranceText}from'../src/solver.js';export function clamp(v,lo,hi){return v<lo?lo:v>hi?hi:v;}
@@ -6,6 +7,8 @@ const ESC_MAP={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'};expor
 export const DEFAULT_TABLE_BY_KIND=Object.freeze({eightball:'pool8',
 nineball:'pool9',
 snooker:'snooker',});export function tableForKind(kind,manualByKind={}){const fallback=DEFAULT_TABLE_BY_KIND[kind];if(!fallback)return null;if(kind==='snooker')return'snooker';const manual=manualByKind?.[kind];return typeof manual==='string'&&manual?manual:fallback;}
+export function gameKindOrThrow(value){if(typeof value==='string'&&Object.prototype.hasOwnProperty.call(GAME_KINDS,value)){return value;}
+throw new Error(`不认识的玩法：${String(value)}（支持 ${Object.keys(GAME_KINDS).join(' / ')}）`);}
 export function getPowerTier(speed){const min=0.55;const max=6.6;const clamped=clamp(speed,min,max);const ratio=(clamped-min)/(max-min);const pct=Math.round(ratio*100);if(pct<30){return{level:'轻力',
 sub:'细腻走位',
 pct,
@@ -265,7 +268,13 @@ value:target?`无分组 · 目标 ${target} 号球 · 台面剩 ${onTable.length
 lines.push({label:'下一步',value:next});const targets=safeLegalTargets(g,onTable);return{title,
 lines,
 mark:{numbers:targets,label:tableMarkLabel(kind,turnGroup,targets)},};}
-function tableMarkLabel(kind,turnGroup,targets){if(kind==='eightball')return turnGroup?TABLE_GROUP_NAME[turnGroup]:'未分组';if(kind==='nineball')return targets.length?`目标 ${targets[0]} 号球`:'台面已清空';if(kind==='snooker')return'当前该打';return'台面';}
+function tableMarkLabel(kind,turnGroup,targets){switch(kind){case'eightball':
+return turnGroup?TABLE_GROUP_NAME[turnGroup]:'未分组';case'nineball':
+return targets.length?`目标 ${targets[0]} 号球`:'台面已清空';case'snooker':
+return'当前该打';default:
+throw new Error(
+`不认识的玩法：${String(kind)}（图例文案没有对应分支，支持 ${Object.keys(GAME_KINDS).join(' / ')}）`
+);}}
 function snookerTableText(g,onTable){const redsOnTable=onTable.filter((n)=>n>=1&&n<=15).length;const fromGame=g.snooker&&Number.isFinite(g.snooker.reds)?g.snooker.reds:null;const reds=redsOnTable||(fromGame===null?0:fromGame);const ballOn=g.snooker?g.snooker.ballOn:'red';return`红球剩 ${reds} 颗 · 该打 ${snookerBallOnText(ballOn)}`;}
 function snookerBallOnText(ballOn){if(ballOn==='red')return'红球';if(ballOn==='color')return'任意彩球';if(typeof ballOn==='number'&&Number.isFinite(ballOn)&&ballOn>0)return ballLabel(ballOn);return'红球';}
 function safeLegalTargets(g,onTable){try{const list=legalTargetNumbers(g,onTable);return Array.isArray(list)
@@ -325,3 +334,10 @@ value:`共 ${series.length - 1} 杆，折线降采样到 ${chart.length} 点`,})
 lines.push({label:'杆数',value:`${stats.shots} 杆`});lines.push({label:'命中率',value:stats.potRate===null?'—':`${Math.round(stats.potRate * 100)}%`});lines.push({label:'最长连击',value:`${stats.longestRun} 杆`});lines.push({label:'犯规',value:`${stats.fouls} 次`});return{title:`${kindLabel} · 我 ${mine} : ${theirs} ${oppName}`,
 lines,
 chart,};}
+export function reportHtml(report,options={}){const opts=options&&typeof options==='object'?options:{};const next=opts.next&&typeof opts.next==='object'?opts.next:null;const prefix=typeof opts.prefix==='string'?opts.prefix:'';const spottedMode=opts.spotted==='any'?'any':'only8';const tail=Array.isArray(opts.tail)?opts.tail:[];const fouls=Array.isArray(report.fouls)?report.fouls:[];const foulHtml=fouls.length
+?`<div class="foul">犯规：${fouls.map((f) => f.text).join('；')}</div>`
+:'';const extra=[];if(report.groupAssigned){const who=report.groupAssigned.player===0?'你':'对手';extra.push(`分组：${who}拿到${TABLE_GROUP_NAME[report.groupAssigned.group]}`);}
+if(spottedMode==='only8'){if(report.spotted===8)extra.push('8 号球已重摆回 8 号点');}else if(report.spotted){extra.push(`${report.spotted} 号球已重摆回底点`);}
+if(report.requiresRerack)extra.push('开球不合法，需要重摆');if(opts.pendingChoiceHint&&report.pendingChoice){extra.push('开球不达标，你可以在下面选照打还是交回去');}
+const ballInHand=next&&next.ballInHand;if(ballInHand&&(!opts.ballInHandForPlayerOnly||next.turn===0)){const where=ballInHand.zone==='kitchen'?'在开球线后点一下放母球':'在台面上点一下放母球';extra.push(`持球：${where}`);}
+for(const line of tail)extra.push(line);const details=extra.length?'<div>'+extra.join(' · ')+'</div>':'';const summary=typeof report.summary==='string'?report.summary:String(report.summary??'');return`${prefix}${summary}${foulHtml}${details}`;}

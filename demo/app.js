@@ -68,6 +68,7 @@ import {
   describeNextShot,
   esc,
   findSpot,
+  gameKindOrThrow,
   getAimHUDInfo,
   getPowerTier,
   practiceHint,
@@ -75,6 +76,7 @@ import {
   pushHistoryEntry,
   reduceAutoPause,
   reduceSaveWrite,
+  reportHtml,
   restoreGameState,
   restorePositions,
   shouldAutoShoot,
@@ -1850,15 +1852,9 @@ function gameShoot() {
     state.placing = Boolean(next.ballInHand);
     canvas.classList.toggle('placing', state.placing);
 
-    const foulHtml = report.fouls.length
-      ? `<div class="foul">犯规：${report.fouls.map((f) => f.text).join('；')}</div>`
-      : '';
-    const extra = [];
-    if (report.groupAssigned) extra.push(`分组：${report.groupAssigned.player === 0 ? '你' : '对手'}拿到${GROUP_LABEL[report.groupAssigned.group]}`);
-    if (report.spotted === 8) extra.push('8 号球已重摆回 8 号点');
-    if (report.requiresRerack) extra.push('开球不合法，需要重摆');
-    if (next.ballInHand) extra.push(`持球：${next.ballInHand.zone === 'kitchen' ? '在开球线后点一下放母球' : '在台面上点一下放母球'}`);
-    setReport(`${report.summary}${foulHtml}${extra.length ? '<div>' + extra.join(' · ') + '</div>' : ''}`);
+    // 拼装的唯一实现在 state.js 的 reportHtml：三个调用点原来各抄了一份逐字相同的
+    // 代码，改一个字段漏一处就会「有的流程显示、有的流程不显示」。差异走参数。
+    setReport(reportHtml(report, { next, spotted: 'only8' }));
 
     $('gRerack').classList.toggle('hidden', !next.requiresRerack);
     $('gAdvice').textContent = next.phase === 'ended' ? '这一局结束了。' : '—';
@@ -2046,26 +2042,25 @@ function runOpponentTurn(gen = state.generation) {
     state.placing = Boolean(r.next.ballInHand) && r.next.turn === 0;
     canvas.classList.toggle('placing', state.placing);
 
-    const report = r.report;
-    const foulHtml = report.fouls.length
-      ? `<div class="foul">犯规：${report.fouls.map((f) => f.text).join('；')}</div>`
-      : '';
-    const extra = [];
-    if (report.groupAssigned) extra.push(`分组：${report.groupAssigned.player === 0 ? '你' : '对手'}拿到${GROUP_LABEL[report.groupAssigned.group]}`);
-    if (report.spotted === 8) extra.push('8 号球已重摆回 8 号点');
-    if (report.requiresRerack) extra.push('开球不合法，需要重摆');
-    if (r.next.ballInHand && r.next.turn === 0) {
-      extra.push(`持球：${r.next.ballInHand.zone === 'kitchen' ? '在开球线后点一下放母球' : '在台面上点一下放母球'}`);
-    }
     // 三步选杆：让玩家看得见对手在想什么，而不是"它好像随便打了一杆"
     const chosen = r.scores?.[0];
+    const tail = [];
     if (chosen) {
       // 算过第三层就用「对手回完我之后」剩下的容错，那才是真实的难度
       const tol = chosen.myToleranceDeg ?? chosen.opponentToleranceDeg;
-      const tail = `打完留给你最好打的一杆容错 ±${tol.toFixed(2)}°`;
-      extra.push(r.scores.length > 1 ? `在 ${r.scores.length} 个能进的方案里挑的：${tail}` : tail);
+      const behind = `打完留给你最好打的一杆容错 ±${tol.toFixed(2)}°`;
+      tail.push(r.scores.length > 1 ? `在 ${r.scores.length} 个能进的方案里挑的：${behind}` : behind);
     }
-    setReport(`<b>对手</b> · ${report.summary}${foulHtml}${extra.length ? '<div>' + extra.join(' · ') + '</div>' : ''}`);
+    // 对手这一杆：前缀 + 只在轮到玩家时才写持球 + 末尾接选杆说明（见 reportHtml 的注释）
+    setReport(
+      reportHtml(r.report, {
+        next: r.next,
+        prefix: '<b>对手</b> · ',
+        spotted: 'only8',
+        ballInHandForPlayerOnly: true,
+        tail,
+      })
+    );
 
     $('gRerack').classList.toggle('hidden', !r.next.requiresRerack);
     $('gVerdict').textContent = '';
@@ -2341,16 +2336,8 @@ function finishGameShot(next, report, gen) {
   state.placing = Boolean(next.ballInHand);
   canvas.classList.toggle('placing', state.placing);
 
-  const foulHtml = report.fouls.length
-    ? `<div class="foul">犯规：${report.fouls.map((f) => f.text).join('；')}</div>`
-    : '';
-  const extra = [];
-  if (report.groupAssigned) extra.push(`分组：${report.groupAssigned.player === 0 ? '你' : '对手'}拿到${GROUP_LABEL[report.groupAssigned.group]}`);
-  if (report.spotted) extra.push(`${report.spotted} 号球已重摆回底点`);
-  if (report.requiresRerack) extra.push('开球不合法，需要重摆');
-  if (report.pendingChoice) extra.push('开球不达标，你可以在下面选照打还是交回去');
-  if (next.ballInHand) extra.push(`持球：${next.ballInHand.zone === 'kitchen' ? '在开球线后点一下放母球' : '在台面上点一下放母球'}`);
-  setReport(`${report.summary}${foulHtml}${extra.length ? '<div>' + extra.join(' · ') + '</div>' : ''}`);
+  // 收尾这一杆：重摆提示按实际号码写「N 号球已重摆回底点」，并补一句待决事项
+  setReport(reportHtml(report, { next, spotted: 'any', pendingChoiceHint: true }));
 
   $('gRerack').classList.toggle('hidden', !next.requiresRerack);
   // 待决事项只有轮到玩家时才让玩家选；轮到对手那它自己选（acceptTable，照打）。
@@ -3371,7 +3358,10 @@ $('autoPauseResume').addEventListener('click', resumeAutoOpponent);
 
 $('gameKind').addEventListener('change', (ev) => {
   const v = ev.target.value;
-  state.gameKind = GAME_KINDS[v] ? v : 'eightball';
+  // 下拉框给的值必须真的是一种玩法：以前写成 `GAME_KINDS[v] ? v : 'eightball'`，
+  // 将来加十球时忘了改这里，用户选中的新玩法会静默按黑八开一整局——规则全错、
+  // 日志里什么都没有。未知值直接抛（见 state.js 的 gameKindOrThrow）。
+  state.gameKind = gameKindOrThrow(v);
   // 换玩法等于换一套规则（能否分组、先碰哪颗、9 号进袋算不算赢），
   // 旧局不能就地续上，所以直接开新的一局。
   // 球台也得跟着换：斯诺克的彩球点位（开球线 737 mm、黑球距顶库 324 mm）

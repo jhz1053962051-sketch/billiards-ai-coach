@@ -311,3 +311,45 @@ test('护栏：pendingChoice 通道只挂在九球 report 上（extraReport 参�
     '两个 report 的字段集合只允许差 BASE_ALLOW 里的字段'
   );
 });
+
+// ---------------------------------------------------------------- 未知玩法不许静默兜底
+
+/**
+ * resolveShot 的默认分支以前写作「不是斯诺克、不是九球，那就是黑八」。
+ * 加十球 / 中式八球时忘了在这里补一行，整局会**静默按黑八规则跑完**：用户看到的
+ * 是错规则，日志里什么都没有。这条测试就是那个兜底的护栏——未知 kind 必须抛，
+ * 而且错误信息里得能看见实际收到的值，否则定位不到是哪个调用方传错的。
+ */
+test('护栏：resolveShot 遇到未知玩法直接抛错，不许静默按黑八跑', () => {
+  const base = createGame(table, makeBalls([1, 2, 8]), { kind: 'eightball' });
+  const facts = makeFacts(base);
+
+  for (const kind of ['tenball', 'chineseeight', 'snooker8', '', undefined]) {
+    const broken = { ...base, kind };
+    assert.throws(
+      () => resolveShot(broken, facts),
+      (err) => {
+        assert.match(err.message, /不认识的玩法：/, `错误信息要说明玩法不认识：${err.message}`);
+        assert.ok(
+          err.message.includes(String(kind)),
+          `错误信息必须带上实际收到的 kind（${String(kind)}），否则定位不到调用方：${err.message}`
+        );
+        assert.match(err.message, /eightball/, `顺手把支持哪几种写出来：${err.message}`);
+        return true;
+      },
+      `kind=${String(kind)} 必须抛`
+    );
+  }
+});
+
+test('护栏：未知玩法抛错之后，三种已知玩法的分派没有被收窄', () => {
+  const eight = createGame(table, makeBalls([1, 2, 8]), { kind: 'eightball' });
+  const r8 = resolveShot(eight, makeFacts(eight));
+  assert.ok(r8.next && r8.report, '八球照常返回 { next, report }');
+
+  const nine = createGame(table, makeBalls([1, 2, 9]), { kind: 'nineball' });
+  const r9 = resolveShot(nine, makeFacts(nine));
+  assert.ok(r9.next && r9.report, '九球照常返回 { next, report }');
+  assert.equal('pendingChoice' in r9.report, true, '九球专属通道证明走的是九球那一支');
+  assert.equal('pendingChoice' in r8.report, false, '八球那一支不该出现九球的字段');
+});

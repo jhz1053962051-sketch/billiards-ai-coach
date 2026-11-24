@@ -7,9 +7,9 @@
       "path": "demo/app.js",
       "src": "demo/app.js",
       "mode": "minify",
-      "srcBytes": 148427,
-      "outBytes": 90476,
-      "sha256": "8eaa54f20dedd99b4d3a86e1895782219615ad66e58ddd8c8c6cf18d69fb7e19"
+      "srcBytes": 147181,
+      "outBytes": 88558,
+      "sha256": "e026a90234ffbd5d44e557e7f4b82123998a6dc274268774b597f0966265b20b"
     },
     {
       "path": "demo/file-guard.js",
@@ -71,9 +71,9 @@
       "path": "demo/state.js",
       "src": "demo/state.js",
       "mode": "minify",
-      "srcBytes": 82083,
-      "outBytes": 35167,
-      "sha256": "ce81fc4723de4a21874fd12023119e33942643e476ebe360e5352121d912fbed"
+      "srcBytes": 87598,
+      "outBytes": 37099,
+      "sha256": "50db4e3cf83bcc96d7837789e0166e23860cfa05146876add78e999713bae6e6"
     },
     {
       "path": "src/aim.js",
@@ -159,9 +159,9 @@
       "path": "src/rules.js",
       "src": "src/rules.js",
       "mode": "minify",
-      "srcBytes": 42868,
-      "outBytes": 17725,
-      "sha256": "08e1824bdaa085e3b061746ce3aa471307663aa89bb72166f093c92b1a91d28d"
+      "srcBytes": 43435,
+      "outBytes": 17900,
+      "sha256": "3765ecf4daac0ff51724b5178985d8a515706e98586384c37ec8a57261c44a1f"
     },
     {
       "path": "src/safety.js",
@@ -270,8 +270,8 @@
   ],
   "totals": {
     "files": 33,
-    "srcBytes": 21565024,
-    "outBytes": 21188453
+    "srcBytes": 21569860,
+    "outBytes": 21188642
   },
   "firstScreen": {
     "files": [
@@ -296,7 +296,7 @@
       "src/tolerance.js"
     ],
     "count": 19,
-    "srcBytes": 614447,
-    "outBytes": 285513
+    "srcBytes": 619283,
+    "outBytes": 285702
   }
 }

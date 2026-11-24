@@ -33,6 +33,7 @@ import {
   describeNextShot,
   esc,
   findSpot,
+  gameKindOrThrow,
   getAimHUDInfo,
   getPowerTier,
   packHistory,
@@ -41,6 +42,7 @@ import {
   pushHistoryEntry,
   reduceAutoPause,
   reduceSaveWrite,
+  reportHtml,
   restoreGameState,
   restorePositions,
   saveCoord,
@@ -2449,4 +2451,139 @@ test('回归护栏：buildShareSummary / buildTableSummary 的字段与顺序不
   const tableOut = buildTableSummary({ game, balls: game.balls });
   assert.deepEqual(Object.keys(tableOut), ['title', 'lines', 'mark']);
   assert.deepEqual(Object.keys(tableOut.mark), ['numbers', 'label']);
+});
+
+// ---------------------------------------------------------------- 这一杆的播报文案
+//
+// reportHtml 原先在 app.js 里被逐字抄了三遍（玩家打完一杆 / 对手那一杆 / 结算那一杆）。
+// 改一个字段漏一处，就会出现「同样的 report，有的流程显示、有的流程不显示」。
+// 现在只有这一份实现，三个调用点各自传选项；这里的断言把那三份输出逐字钉住，
+// 谁再把它复制回去、或者顺手改了个标点，测试都会红。
+
+test('reportHtml：普通进球（玩家一杆）就是 summary 加上犯规和附加行', () => {
+  assert.equal(reportHtml({ summary: '你打进 3 号球，继续。' }, { next: { turn: 0 } }), '你打进 3 号球，继续。');
+  assert.equal(
+    reportHtml(
+      { summary: '你打进 3 号球，继续。', fouls: [{ text: '击球后没有球碰库' }, { text: '母球先碰到 8 号' }] },
+      {}
+    ),
+    '你打进 3 号球，继续。<div class="foul">犯规：击球后没有球碰库；母球先碰到 8 号</div>',
+    '多条犯规用「；」连起来，前缀是「犯规：」'
+  );
+});
+
+test('reportHtml：分组与持球两行按固定顺序拼在末尾的 div 里', () => {
+  const report = { summary: '犯规。', fouls: [{ text: '母球落袋' }], groupAssigned: { player: 1, group: 'stripe' } };
+  assert.equal(
+    reportHtml(report, { next: { turn: 0, ballInHand: { zone: 'kitchen' } } }),
+    '犯规。<div class="foul">犯规：母球落袋</div>' +
+      '<div>分组：对手拿到花色 · 持球：在开球线后点一下放母球</div>',
+    '犯规块在前，附加行统一折叠成一个 div、用「 · 」分隔'
+  );
+  assert.equal(
+    reportHtml({ ...report, groupAssigned: { player: 0, group: 'solid' } }, {
+      next: { turn: 1, ballInHand: {} },
+    }),
+    '犯规。<div class="foul">犯规：母球落袋</div>' +
+      '<div>分组：你拿到全色 · 持球：在台面上点一下放母球</div>',
+    'zone 不是 kitchen 就是台面上；持球这行对谁写由 ballInHandForPlayerOnly 决定，默认都写'
+  );
+});
+
+test('reportHtml：重摆文案有三个调用点的真实差异，靠 spotted 选项区分而不是各写一份', () => {
+  // 玩家那一杆 / 对手那一杆：只有 8 号球重摆才说，而且说「回 8 号点」
+  assert.equal(
+    reportHtml({ summary: '清台。', spotted: 8 }, { next: { turn: 0 }, spotted: 'only8' }),
+    '清台。<div>8 号球已重摆回 8 号点</div>'
+  );
+  assert.equal(
+    reportHtml({ summary: '清台。', spotted: 9 }, { next: { turn: 0 }, spotted: 'only8' }),
+    '清台。',
+    'only8 模式下别的号码重摆不写（那不是 8 号点的事）'
+  );
+  // 结算那一杆：任何号码都写，但说的是「回底点」
+  assert.equal(
+    reportHtml({ summary: '清台。', spotted: 9 }, { next: { turn: 0 }, spotted: 'any' }),
+    '清台。<div>9 号球已重摆回底点</div>'
+  );
+  assert.equal(
+    reportHtml({ summary: '清台。', spotted: 8 }, { next: { turn: 0 }, spotted: 'any' }),
+    '清台。<div>8 号球已重摆回底点</div>'
+  );
+});
+
+test('reportHtml：对手那一杆的前缀与「只在轮到玩家时才写持球」', () => {
+  const report = { summary: '对手打进 5 号球。', fouls: [], spotted: 8 };
+  const options = { prefix: '<b>对手</b> · ', spotted: 'only8', ballInHandForPlayerOnly: true, tail: ['挑的这杆留给你 ±1.20°'] };
+  assert.equal(
+    reportHtml(report, { ...options, next: { turn: 0, ballInHand: {} } }),
+    '<b>对手</b> · 对手打进 5 号球。<div>8 号球已重摆回 8 号点 · 持球：在台面上点一下放母球 · 挑的这杆留给你 ±1.20°</div>',
+    '轮到玩家、且玩家有持球：写；选杆说明排在最后'
+  );
+  assert.equal(
+    reportHtml(report, { ...options, next: { turn: 1, ballInHand: {} } }),
+    '<b>对手</b> · 对手打进 5 号球。<div>8 号球已重摆回 8 号点 · 挑的这杆留给你 ±1.20°</div>',
+    '还是对手的回合、持球是给对手的：不写，免得玩家以为该自己放球'
+  );
+});
+
+test('reportHtml：开球不合法 / 开球不达标两句只在结算那一杆出现', () => {
+  const report = { summary: '开球不合法。', requiresRerack: true, pendingChoice: { kind: 'break' } };
+  assert.equal(
+    reportHtml(report, { next: { turn: 1 }, pendingChoiceHint: true }),
+    '开球不合法。<div>开球不合法，需要重摆 · 开球不达标，你可以在下面选照打还是交回去</div>'
+  );
+  assert.equal(
+    reportHtml(report, { next: { turn: 1 } }),
+    '开球不合法。<div>开球不合法，需要重摆</div>',
+    '没开 pendingChoiceHint 就只写重摆，别替玩家决定'
+  );
+});
+
+test('reportHtml：空 report 不产出空壳 div，对手那一杆仍保留前缀', () => {
+  assert.equal(reportHtml({}, { next: { turn: 0 } }), '');
+  assert.equal(reportHtml({ summary: '' }, {}), '', '没有附加行时不许留下一个空的 <div></div>');
+  assert.equal(reportHtml({}, { prefix: '<b>对手</b> · ' }), '<b>对手</b> · ');
+  assert.equal(reportHtml({}, { tail: [] }), '', 'tail 是空数组不算附加行');
+});
+
+// ---------------------------------------------------------------- 未知玩法不许静默兜底
+
+test('gameKindOrThrow：认识的原样返回，不认识的直接抛且带上实际收到的值', () => {
+  for (const kind of ['eightball', 'nineball', 'snooker']) {
+    assert.equal(gameKindOrThrow(kind), kind, '已知玩法必须原样返回，不能顺手改写成别的');
+  }
+  const bad = ['tenball', 'chineseeight', 'Eightball', '', 'toString', undefined, null, {}, 0];
+  for (const kind of bad) {
+    assert.throws(
+      () => gameKindOrThrow(kind),
+      (err) => {
+        assert.match(err.message, /不认识的玩法：/, err.message);
+        assert.ok(err.message.includes(String(kind)), `错误信息要带上实际收到的值：${err.message}`);
+        assert.match(err.message, /eightball/, `顺便说清支持哪几种：${err.message}`);
+        return true;
+      },
+      `${String(kind)} 必须抛`
+    );
+  }
+});
+
+test('buildTableSummary：未知玩法不再印「台面」，直接抛错', () => {
+  const game = createGame(table, makeBalls([1, 2, 8]), { names: ['你', '对手'], kind: 'eightball' });
+  game.breakShot = false;
+  game.open = false;
+  game.shots = 4;
+  // 已知玩法照旧
+  assert.equal(buildTableSummary({ game, balls: game.balls }).mark.label, '未分组');
+
+  const broken = { ...game, kind: 'tenball' };
+  assert.throws(
+    () => buildTableSummary({ game: broken, balls: broken.balls }),
+    (err) => {
+      assert.match(err.message, /不认识的玩法：/);
+      assert.ok(err.message.includes('tenball'), `错误信息要带上实际收到的 kind：${err.message}`);
+      return true;
+    },
+    '加十球时忘了补图例分支，必须当场炸，不能印一句「台面」糊过去'
+  );
 });

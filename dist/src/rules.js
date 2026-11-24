@@ -81,7 +81,13 @@ balls.every((b)=>{if(b.pocketed||b.number===excludeNumber)return true;return Mat
 for(let i=1;i<=400;i++){const x=cx-i*step;if(x<table.bounds.minX)break;if(free(x,cy))return{x,y:cy};}
 return null;}
 export function spotEight(game){return spotBall(game,8);}
-export function resolveShot(game,facts){if(game.kind==='snooker')return resolveSnooker(game,facts);return game.kind==='nineball'?resolveNineBall(game,facts):resolveEightBall(game,facts);}
+export function resolveShot(game,facts){switch(game&&game.kind){case'eightball':
+return resolveEightBall(game,facts);case'nineball':
+return resolveNineBall(game,facts);case'snooker':
+return resolveSnooker(game,facts);default:
+throw new Error(
+`不认识的玩法：${String(game && game.kind)}（resolveShot 支持 ${Object.keys(GAME_KINDS).join(' / ')}）`
+);}}
 function beginShot(game,facts){const next=cloneGame(game);const me=next.turn;const opp=1-me;const ctx={next,
 facts,
 me,
