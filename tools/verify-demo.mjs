@@ -4079,7 +4079,9 @@ const gateReady = await gateWaitReady();
 check('门禁·刷新之后演示页重新起来（读的是 localStorage 里那份档）', gateReady === true, String(gateReady));
 
 // 刷新之后页面停在练习模式，这里就是真实用户路径的起点：直接点「读取存档」。
-// 先把这一步的现场记下来——它和手动验证时看到的并不完全一样（见下面的「已知缺陷」）。
+// 这一步的按钮对齐发生在 setMode('game') 之前（applyLoadedGame 先装局面、再切模式），
+// 所以它同时钉着「门禁判据不能依赖当前标签页」——判据里掺了 mode，这一刻就会判成
+// 「没在等继续」，撤销按钮亮着而点下去真的撤了一步。
 await evaluate(`document.getElementById('loadGame').click()`);
 const gateLoadPractice = await gateWaitFor('刷新后直接读档完成', (s) => s.shots === 1 && s.pauseHidden === false, 60);
 console.log('门禁·刷新后直接读档:', JSON.stringify({
@@ -4093,13 +4095,10 @@ check(
     /先点提示条上的/.test(gateLoadPractice.shoot.title),
   JSON.stringify({ solve: gateLoadPractice.solve, shoot: gateLoadPractice.shoot }),
 );
-// 这条是钉住一个真实缺陷，不是给缺陷背书：applyLoadedGame 里 updateUndoButton()
-// （demo/app.js:2718）跑在 setMode('game')（:2725）之前，而 pendingResume() 要求
-// state.mode === 'game'（:2062），所以「刷新后直接读档」这条路撤销按钮没被门禁挡住，
-// 点下去真的会撤销。等 app.js 把那两步的先后改对，这条要翻成 disabled === true。
 check(
-  '（已知缺陷·钉住）#gUndo 在「刷新后直接读档」时没被门禁挡住：updateUndoButton() 早于 setMode("game")',
-  Boolean(gateLoadPractice.undo) && gateLoadPractice.undo.disabled === false,
+  '刷新后直接读档（页面还在练习模式）：#gUndo 同样被挡住、title 也指回提示条',
+  Boolean(gateLoadPractice.undo) && gateLoadPractice.undo.disabled === true &&
+    /先点提示条上的/.test(gateLoadPractice.undo.title),
   JSON.stringify(gateLoadPractice.undo),
 );
 
@@ -4219,6 +4218,14 @@ check(
   Boolean(gateResume.shoot) && /先点「求解」/.test(gateResume.shoot.title),
   gateResume.shoot ? gateResume.shoot.title : '按钮不见了',
 );
+// 反向断言：门禁不是常灰。继续点过之后撤销栈还在（读档把那一杆带回来了），#gUndo
+// 必须重新可点、title 也不再指向提示条——修读档这条门禁不能顺手把撤销永久禁掉。
+check(
+  '点「点此继续」后 #gUndo 恢复可点（撤销栈非空，没有被永久禁掉），title 也不再指向提示条',
+  Boolean(gateResume.undo) && gateResume.history > 0 && gateResume.undo.disabled === false &&
+    !/先点提示条上的/.test(gateResume.undo.title),
+  JSON.stringify({ undo: gateResume.undo, history: gateResume.history, turn: gateResume.turn }),
+);
 
 // ---- 4c：撤销走的是另一条进门的路径，门禁必须一样（不能只堵了读档那条）
 const gateShot2 = await gameManualShot('1.20', 1, { setup: GAME_SETUP });
@@ -4249,6 +4256,13 @@ check(
   '撤销后 #gSolve 同样被禁用、title 同一句话',
   Boolean(gateUndo.solve) && gateUndo.solve.disabled === true && /先点提示条上的/.test(gateUndo.solve.title),
   JSON.stringify(gateUndo.solve),
+);
+// 撤销这条路上的 #gUndo 也是同一个门禁算出来的：undoGame 先对齐按钮、后置暂停，
+// 顺序和读档是同一个坑；灰掉的理由要说成「先点提示条上的…」，不能停在「没有可撤的一杆」。
+check(
+  '撤销后 #gUndo 的 title 也换成「先点提示条上的…」（不是「没有可撤的一杆」那种旧理由）',
+  Boolean(gateUndo.undo) && gateUndo.undo.disabled === true && /先点提示条上的/.test(gateUndo.undo.title),
+  JSON.stringify(gateUndo.undo),
 );
 check(
   '撤销后提示条也挂出来了（和读档后同一个可见状态，不只是内部置了个标志）',

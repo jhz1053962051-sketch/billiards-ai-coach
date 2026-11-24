@@ -403,10 +403,10 @@ targetNumber:Number.isFinite(Number(candidate.targetNumber))?Number(candidate.ta
 pocketId:typeof candidate.pocketId==='string'?candidate.pocketId:'',
 toleranceDeg:deg,};state.shotLog=state.shotLog.filter((e)=>e&&e.shot!==shot);state.shotLog.push(entry);if(state.shotLog.length>200)state.shotLog=state.shotLog.slice(-200);}
 function pushHistory(game){pushHistoryEntry(state.history,game);updateUndoButton();}
-function pendingResume(){const g=state.game;if(state.mode!=='game'||!g||g.phase==='ended')return false;if(!state.autoPaused)return false;return state.autoPauseReason==='load'||state.autoPauseReason==='undo';}
+function pendingResume(){const g=state.game;if(!g||g.phase==='ended')return false;if(!state.autoPaused)return false;return state.autoPauseReason==='load'||state.autoPauseReason==='undo';}
 function syncGameGates(){const g=state.game;const solve=$('gSolve');const shoot=$('gShoot');if(!solve||!shoot)return;let reason='';if(!g)reason='先点「新的一局」开一局。';else if(g.phase==='ended')reason='这一局已经结束了，点「新的一局」再打。';else if(state.animating)reason='这一杆还在回放，演完才能操作。';else if(pendingResume())reason='先点提示条上的「点此继续」，再操作这一局。';else if(g.requiresRerack)reason='上一杆开球不合法，先点「重摆开球」。';else if(g.ballInHand)reason='先在台面上把母球摆好。';solve.disabled=Boolean(reason);solve.title=reason;const shootReason=
 reason||
-(!state.gSolution?.found?'先点「求解」，再来打这一杆。':'');shoot.disabled=Boolean(shootReason);shoot.title=shootReason;}
+(!state.gSolution?.found?'先点「求解」，再来打这一杆。':'');shoot.disabled=Boolean(shootReason);shoot.title=shootReason;updateUndoButton();}
 function updateUndoButton(){const btn=$('gUndo');if(!btn)return;const n=state.history.length;const pending=pendingResume();btn.disabled=n===0||state.animating||pending;btn.textContent=undoLabel(n);btn.title=state.animating
 ?'这一杆还在回放，演完才能撤销'
 :pending
@@ -417,7 +417,7 @@ function updateUndoButton(){const btn=$('gUndo');if(!btn)return;const n=state.hi
 function undoGame(){if(state.animating){setReport('这一杆还在回放（对手出杆也算），演完才能撤销——现在撤，下一秒的球位又会盖回来。');return;}
 const prev=state.history.pop();if(!prev){setReport('已经退到这一局的起点了，没有更早的局面可退。');return;}
 state.game=prev;if(Array.isArray(state.shotLog)){const keep=Number(prev.shots)||0;state.shotLog=state.shotLog.filter((e)=>e&&e.shot<=keep);}
-state.generation+=1;state.gSolution=null;state.placing=Boolean(prev.ballInHand);canvas.classList.toggle('placing',state.placing);$('gRerack').classList.toggle('hidden',!prev.requiresRerack);setReport(`已撤销一步，回到第 ${prev.shots} 杆之后的局面。`);$('gAdvice').textContent=prev.phase==='ended'?'这一局结束了。':'—';$('gAdvice').className='empty';$('gVerdict').textContent='撤销后要重新「求解」，原来那份方案对应的是旧局面。';clearOpponentMark();updateScore();updateLog();updateUndoButton();render();state.opponentThinking=false;Object.assign(state,reduceAutoPause(state,'undo'));updateAutoPauseBar();}
+state.generation+=1;state.gSolution=null;state.placing=Boolean(prev.ballInHand);canvas.classList.toggle('placing',state.placing);$('gRerack').classList.toggle('hidden',!prev.requiresRerack);setReport(`已撤销一步，回到第 ${prev.shots} 杆之后的局面。`);$('gAdvice').textContent=prev.phase==='ended'?'这一局结束了。':'—';$('gAdvice').className='empty';$('gVerdict').textContent='撤销后要重新「求解」，原来那份方案对应的是旧局面。';clearOpponentMark();updateScore();updateLog();state.opponentThinking=false;Object.assign(state,reduceAutoPause(state,'undo'));updateUndoButton();render();updateAutoPauseBar();}
 function maybeOpponentTurn(){const g=state.game;if(!shouldAutoShoot(state))return;if(g.requiresRerack){setReport('对手开球不合法，需要重摆——点「重摆开球」继续。');$('gRerack').classList.remove('hidden');return;}
 state.opponentThinking=true;$('gAdvice').textContent='对手在算这一杆……';$('gAdvice').className='empty';const gen=state.generation;requestAnimationFrame(()=>{if(gen!==state.generation)return;runOpponentTurn(gen);});}
 function runOpponentTurn(gen=state.generation){const g=state.game;if(!g||g.phase==='ended'||state.animating){state.opponentThinking=false;return;}

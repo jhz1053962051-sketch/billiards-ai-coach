@@ -2056,19 +2056,30 @@ function pushHistory(game) {
  * 条上的「点此继续」。但界面上同时有「打这一杆」「求解」亮着（点了没反应）和 AI
  * 卡上那句「先点「求解」」，三条指引各说各的，谁也不知道该信哪条。这里把它算成
  * 一个明确的状态，让 syncGameGates 把别的入口关掉。
+ *
+ * 判据只看「局面 + 暂停状态 + 暂停原因」，**不看当前是哪个标签页**：暂停是这一局
+ * 自己的状态，切到练习模式再切回来它还在，凭什么一会儿算一会儿不算。更要紧的是
+ * 调序问题——applyLoadedGame 是「先把局面装好、再把按钮对齐、最后才 setMode('game')」，
+ * 而刷新后直接读档时页面还停在练习模式；判据里掺了 mode，那一刻就会算出「没在等
+ * 继续」，撤销按钮亮着、点下去才是真的撤了一步（原来那条「按钮可点但没反应」的
+ * 老毛病又换了个入口复现）。把 mode 摘掉，判据就不依赖调用顺序了。
  */
 function pendingResume() {
   const g = state.game;
-  if (state.mode !== 'game' || !g || g.phase === 'ended') return false;
+  if (!g || g.phase === 'ended') return false;
   if (!state.autoPaused) return false;
   return state.autoPauseReason === 'load' || state.autoPauseReason === 'undo';
 }
 
 /**
- * 「求解 / 打这一杆」两个按钮的可用性（撤销按钮在 updateUndoButton 里）。
+ * 「求解 / 打这一杆 / 撤销」三个入口的可用性——一处算清，三处对齐。
  *
  * 只留一个下一步入口：能点的一定是现在该点的那一个，灰掉的都在 title 里说清
  * 为什么灰——用户原来遇到的正是「按钮可点但没反应」。
+ *
+ * 撤销也算「操作这一局」，所以它的可用性从 updateUndoButton 里来、由这里统一
+ * 触发：点提示条上的「点此继续」只走 updateAutoPauseBar → 这里，漏掉撤销就会
+ * 出现「继续点过了，撤销还灰着、title 还停在旧理由」。
  */
 function syncGameGates() {
   const g = state.game;
@@ -2093,6 +2104,12 @@ function syncGameGates() {
     (!state.gSolution?.found ? '先点「求解」，再来打这一杆。' : '');
   shoot.disabled = Boolean(shootReason);
   shoot.title = shootReason;
+  // 撤销也是「操作这一局」：它的 disabled/title 由 updateUndoButton 算（撤销栈、
+  // 回放中、等继续三种理由都在那儿），但**必须在这里统一触发一次**。点提示条上的
+  // 「点此继续」只走 updateAutoPauseBar → 这里，漏了这一句就会出现「继续点过了、
+  // 撤销还灰着、title 还停在旧理由」。
+  // 方向是单向的：updateUndoButton 不回头调 syncGameGates，所以不会递归。
+  updateUndoButton();
 }
 
 function updateUndoButton() {
@@ -2144,13 +2161,16 @@ function undoGame() {
   clearOpponentMark();
   updateScore();
   updateLog();
-  updateUndoButton();
-  render();
   // 撤销之后暂停自动出杆：用户刚退回来是要看清局面，1–2 秒后对手自己出杆
   // 会把刚恢复的球位又改掉——真机实测里这条最容易被当成「撤销没生效」。
   // 恢复只有三条路：自己打一杆、点提示条上的「点此继续」、重开一局。
+  // **必须先落暂停、再对齐按钮**：pendingResume() 读的就是 autoPaused/原因，
+  // 反过来先对齐的话，按钮拿到的是撤销前的旧暂停态——灰不了、title 还停在
+  // 「这一局还没有可以撤销的一杆」那种旧理由。
   state.opponentThinking = false;
   Object.assign(state, reduceAutoPause(state, 'undo'));
+  updateUndoButton();
+  render();
   updateAutoPauseBar();
 }
 

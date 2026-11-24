@@ -7,9 +7,9 @@
       "path": "demo/app.js",
       "src": "demo/app.js",
       "mode": "minify",
-      "srcBytes": 156795,
-      "outBytes": 92143,
-      "sha256": "fc5d2e8c7c00015b267610f5a07e03dedb839f1a6de3117935615ae0f3e35033"
+      "srcBytes": 158527,
+      "outBytes": 92141,
+      "sha256": "5358e13c2061b127d6df4491c7855cd3b461933b5609b1307c6475be5ba1d2b4"
     },
     {
       "path": "demo/file-guard.js",
@@ -270,8 +270,8 @@
   ],
   "totals": {
     "files": 33,
-    "srcBytes": 21582306,
-    "outBytes": 21194514
+    "srcBytes": 21584038,
+    "outBytes": 21194512
   },
   "firstScreen": {
     "files": [
@@ -296,7 +296,7 @@
       "src/tolerance.js"
     ],
     "count": 19,
-    "srcBytes": 629545,
-    "outBytes": 289390
+    "srcBytes": 631277,
+    "outBytes": 289388
   }
 }
