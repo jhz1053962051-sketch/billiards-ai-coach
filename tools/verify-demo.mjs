@@ -3982,6 +3982,280 @@ check(
   `${mineSettled.report} / turn=${mineSettled.turn} pending=${JSON.stringify(mineSettled.pending)}`,
 );
 
+// ------------------------------------------------------------ 读档 / 撤销后的按钮门禁
+//
+// 「读档或撤销之后该点哪个按钮」原来只有手动截图看过：三个入口（求解 / 打这一杆 /
+// 撤销）同时灰掉，唯一的下一步是提示条上的「点此继续」；点完之后只有「求解」活过来，
+// 「打这一杆」还灰着、理由换成「先点「求解」」。门禁在 demo/app.js 的
+// syncGameGates() / updateUndoButton() 里，这里全部读页面属性（disabled / title）与
+// 页面文本，不看 window.__app 的实现细节——用户能看到的才是要验的。
+//
+// 自包含：自己建局、自己打一杆、自己存、自己刷新、自己读。刷新之后页面里只剩
+// localStorage，前面任何用例留下的局面都用不上，也不该用。
+
+const GATE_SNAP = `(() => {
+  const $id = (id) => document.getElementById(id);
+  const read = (id) => {
+    const el = $id(id);
+    return el ? { disabled: el.disabled, title: el.getAttribute('title') ?? '' } : null;
+  };
+  const app = window.__app;
+  const g = app.state.game;
+  const bar = $id('autoPauseBar');
+  const text = $id('autoPauseText');
+  return JSON.stringify({
+    solve: read('gSolve'),
+    shoot: read('gShoot'),
+    undo: read('gUndo'),
+    shots: g ? g.shots : null,
+    turn: g ? g.turn : null,
+    animating: app.state.animating,
+    history: Array.isArray(app.state.history) ? app.state.history.length : -1,
+    report: $id('report').textContent.replace(/\\s+/g, ' ').trim(),
+    pauseHidden: bar ? bar.classList.contains('hidden') : null,
+    pauseText: text ? text.textContent.replace(/\\s+/g, ' ').trim() : null,
+  });
+})()`;
+
+const gateSnap = async () => JSON.parse(await evaluate(GATE_SNAP));
+
+/**
+ * 轮询真实 DOM/状态直到 want() 为真。不用固定 sleep 蒙时长；超时把最后一份快照
+ * 一起带回去，失败详情里才有现场，而不是只剩一句「超时」。
+ */
+async function gateWaitFor(what, want, tries = 60) {
+  let last = null;
+  for (let i = 0; i < tries; i++) {
+    last = await gateSnap();
+    if (want(last)) return { ...last, waited: what, timedOut: false };
+    await sleep(100);
+  }
+  return { ...(last ?? {}), waited: what, timedOut: true };
+}
+
+/** 刷新之后等演示页自己起来：导航途中执行上下文会被销毁，抛错是正常的，接着轮询。 */
+async function gateWaitReady(tries = 120) {
+  for (let i = 0; i < tries; i++) {
+    try {
+      const ok = await evaluate(`(() => Boolean(
+        window.__app && window.__app.state &&
+        document.getElementById('gSolve') && document.getElementById('gShoot') &&
+        document.getElementById('gUndo') && document.getElementById('loadGame')
+      ))()`);
+      if (ok) return true;
+    } catch {
+      /* 导航中，下一轮再看 */
+    }
+    await sleep(100);
+  }
+  return false;
+}
+
+// ---- 4a：读档之后三个入口全灰，title 都指回提示条上的「点此继续」
+const gateShot = await gameManualShot('1.20', 1, { setup: GAME_SETUP });
+check(
+  '门禁·夹具：自己建一局、手打一杆进球，杆数到 1（不借前序用例的局面）',
+  gateShot.shots === 1 && gateShot.animating === false && gateShot.b1 && gateShot.b1.pocketed === true,
+  JSON.stringify({ shots: gateShot.shots, animating: gateShot.animating, b1: gateShot.b1 }),
+);
+
+// 连点两下「保存这一局」：第一下可能被「存档是另一个标签页写的」挡下来，第二下
+// 带着 overwrite 才真写（和上面「读档之后替对手手打」同一套处理）。
+await evaluate(`(() => {
+  document.getElementById('saveGame').click();
+  document.getElementById('saveGame').click();
+})()`);
+const gateSaved = await gateWaitFor('存档落盘', (s) => /已存档：第 1 杆/.test(s.report), 40);
+check(
+  '门禁·存档：播报确认第 1 杆已存进本地存储',
+  gateSaved.timedOut === false && /已存档：第 1 杆/.test(gateSaved.report),
+  gateSaved.report,
+);
+
+// 刷新 = 页面里的状态全丢，读档只能靠 localStorage：这一步同时证明下面那份门禁
+// 是「读回来的局面」上的，不是内存里接着用的。
+await send(ws, 'Page.navigate', { url: URL });
+const gateReady = await gateWaitReady();
+check('门禁·刷新之后演示页重新起来（读的是 localStorage 里那份档）', gateReady === true, String(gateReady));
+
+// 刷新之后页面停在练习模式，这里就是真实用户路径的起点：直接点「读取存档」。
+// 先把这一步的现场记下来——它和手动验证时看到的并不完全一样（见下面的「已知缺陷」）。
+await evaluate(`document.getElementById('loadGame').click()`);
+const gateLoadPractice = await gateWaitFor('刷新后直接读档完成', (s) => s.shots === 1 && s.pauseHidden === false, 60);
+console.log('门禁·刷新后直接读档:', JSON.stringify({
+  solve: gateLoadPractice.solve, shoot: gateLoadPractice.shoot, undo: gateLoadPractice.undo,
+}));
+check(
+  '刷新后直接读档（页面还在练习模式）：#gSolve / #gShoot 照样被挡住、title 一样',
+  Boolean(gateLoadPractice.solve) && gateLoadPractice.solve.disabled === true &&
+    /先点提示条上的/.test(gateLoadPractice.solve.title) &&
+    Boolean(gateLoadPractice.shoot) && gateLoadPractice.shoot.disabled === true &&
+    /先点提示条上的/.test(gateLoadPractice.shoot.title),
+  JSON.stringify({ solve: gateLoadPractice.solve, shoot: gateLoadPractice.shoot }),
+);
+// 这条是钉住一个真实缺陷，不是给缺陷背书：applyLoadedGame 里 updateUndoButton()
+// （demo/app.js:2718）跑在 setMode('game')（:2725）之前，而 pendingResume() 要求
+// state.mode === 'game'（:2062），所以「刷新后直接读档」这条路撤销按钮没被门禁挡住，
+// 点下去真的会撤销。等 app.js 把那两步的先后改对，这条要翻成 disabled === true。
+check(
+  '（已知缺陷·钉住）#gUndo 在「刷新后直接读档」时没被门禁挡住：updateUndoButton() 早于 setMode("game")',
+  Boolean(gateLoadPractice.undo) && gateLoadPractice.undo.disabled === false,
+  JSON.stringify(gateLoadPractice.undo),
+);
+
+// 再走一遍手动验证时那个现场：页面已经在球局模式里，然后读档。先点「新的一局」把
+// 上一次读档留下的暂停清掉，回到一个普通局面再读——否则读的是同一份暂停态，说明不了问题。
+await evaluate(`document.getElementById('newGame').click()`);
+const gateFresh = await gateWaitFor('新的一局开起来', (s) => s.shots === 0 && s.pauseHidden === true, 40);
+check(
+  '门禁·读档前先回到球局模式（点「新的一局」），上一次读档的暂停已清掉',
+  gateFresh.shots === 0 && gateFresh.pauseHidden === true && Boolean(gateFresh.solve) && gateFresh.solve.disabled === false,
+  JSON.stringify({ shots: gateFresh.shots, pauseHidden: gateFresh.pauseHidden, solve: gateFresh.solve }),
+);
+
+await evaluate(`document.getElementById('loadGame').click()`);
+const gateLoad = await gateWaitFor('读档完成', (s) => s.shots === 1 && s.pauseHidden === false, 60);
+console.log('门禁·读档后:', JSON.stringify({
+  solve: gateLoad.solve, shoot: gateLoad.shoot, undo: gateLoad.undo, pause: gateLoad.pauseText,
+}));
+
+check(
+  '读档后 #gSolve 被禁用（这一局能做的只有点提示条上的「点此继续」）',
+  Boolean(gateLoad.solve) && gateLoad.solve.disabled === true,
+  JSON.stringify(gateLoad.solve),
+);
+check(
+  '读档后 #gSolve 的 title 说清先点哪一条（含「先点提示条上的」）',
+  Boolean(gateLoad.solve) && /先点提示条上的/.test(gateLoad.solve.title),
+  gateLoad.solve ? gateLoad.solve.title : '按钮不见了',
+);
+check(
+  '读档后 #gShoot 被禁用',
+  Boolean(gateLoad.shoot) && gateLoad.shoot.disabled === true,
+  JSON.stringify(gateLoad.shoot),
+);
+check(
+  '读档后 #gShoot 的 title 也指回提示条上的「点此继续」（不是空 title 的哑灰）',
+  Boolean(gateLoad.shoot) && /先点提示条上的/.test(gateLoad.shoot.title),
+  gateLoad.shoot ? gateLoad.shoot.title : '按钮不见了',
+);
+check(
+  '读档后 #gUndo 被禁用（连撤销也算操作这一局）',
+  Boolean(gateLoad.undo) && gateLoad.undo.disabled === true,
+  JSON.stringify(gateLoad.undo),
+);
+check(
+  '读档后 #gUndo 的 title 说明为什么要先点继续、再决定撤不撤',
+  Boolean(gateLoad.undo) && /先点提示条上的/.test(gateLoad.undo.title),
+  gateLoad.undo ? gateLoad.undo.title : '按钮不见了',
+);
+check(
+  '读档后提示条真的挂出来了，写着「点此继续」——就是三个 title 指的那一条',
+  gateLoad.pauseHidden === false && /点此继续/.test(gateLoad.pauseText || ''),
+  JSON.stringify({ hidden: gateLoad.pauseHidden, text: gateLoad.pauseText }),
+);
+
+// 被禁用 ≠ 只是变灰：点下去不许有任何副作用。顺手记一笔点击事件有没有真的落到
+// 监听器上（浏览器层的 disabled 拦截 vs. 处理器自己 early-return，两者证据不同）。
+const gateClickHits = await evaluate(`(() => {
+  const b = document.getElementById('gShoot');
+  window.__gateHits = 0;
+  window.__gateProbeFn = () => { window.__gateHits += 1; };
+  b.addEventListener('click', window.__gateProbeFn);
+  b.click();
+  const hits = window.__gateHits;
+  b.removeEventListener('click', window.__gateProbeFn);
+  delete window.__gateProbeFn;
+  delete window.__gateHits;
+  return hits;
+})()`);
+// 有副作用就一定看得到：杆数变、回放起来、播报被改写，任一条出现就算被点动了。
+// 有限窗口内一条都没出现 = 真的没打出去（不是等固定时长蒙过去的）。
+const gateAfterClick = await gateWaitFor(
+  '点被禁用的「打这一杆」有没有产生副作用',
+  (s) => s.shots !== 1 || s.animating === true || s.report !== gateLoad.report,
+  12,
+);
+console.log('门禁·点被禁用的「打这一杆」:', JSON.stringify({
+  listenerHits: gateClickHits,
+  shots: gateAfterClick.shots,
+  animating: gateAfterClick.animating,
+  changed: gateAfterClick.timedOut === false,
+}));
+check(
+  '点被禁用的「打这一杆」：杆数还是 1（真的没打出去）',
+  gateAfterClick.shots === 1,
+  JSON.stringify({ shots: gateAfterClick.shots, listenerHits: gateClickHits }),
+);
+check(
+  '点被禁用的「打这一杆」：没有起回放、播报一个字都没改',
+  gateAfterClick.animating === false && gateAfterClick.report === gateLoad.report,
+  JSON.stringify({ animating: gateAfterClick.animating, before: gateLoad.report, after: gateAfterClick.report }),
+);
+check(
+  '被禁用的「打这一杆」在 1.2 秒的观察窗口里始终没有任何变化（副作用不会迟到）',
+  gateAfterClick.timedOut === true,
+  `等了 ${gateAfterClick.waited ?? '?'} 却有变化：${JSON.stringify({ shots: gateAfterClick.shots, animating: gateAfterClick.animating, report: gateAfterClick.report })}`,
+);
+
+// ---- 4b：点「点此继续」之后只剩「求解」活过来，「打这一杆」还灰着、理由换了一句
+await evaluate(`document.getElementById('autoPauseResume').click()`);
+const gateResume = await gateWaitFor('点「点此继续」之后提示条收起', (s) => s.pauseHidden === true, 60);
+console.log('门禁·继续之后:', JSON.stringify({
+  solve: gateResume.solve, shoot: gateResume.shoot, undo: gateResume.undo, report: gateResume.report,
+}));
+check(
+  '点「点此继续」后 #gSolve 恢复可点（下一步就是求解）',
+  Boolean(gateResume.solve) && gateResume.solve.disabled === false,
+  JSON.stringify(gateResume.solve),
+);
+check(
+  '点「点此继续」后 #gShoot 仍然禁用（还没求解就没得打）',
+  Boolean(gateResume.shoot) && gateResume.shoot.disabled === true,
+  JSON.stringify(gateResume.shoot),
+);
+check(
+  '点「点此继续」后 #gShoot 的 title 换成「先点「求解」」',
+  Boolean(gateResume.shoot) && /先点「求解」/.test(gateResume.shoot.title),
+  gateResume.shoot ? gateResume.shoot.title : '按钮不见了',
+);
+
+// ---- 4c：撤销走的是另一条进门的路径，门禁必须一样（不能只堵了读档那条）
+const gateShot2 = await gameManualShot('1.20', 1, { setup: GAME_SETUP });
+const gateBeforeUndo = await gateSnap();
+console.log('门禁·撤销前:', JSON.stringify({ shots: gateShot2.shots, undo: gateBeforeUndo.undo }));
+check(
+  '门禁·撤销前：#gUndo 可点（有一杆可撤），门禁不是常灰',
+  gateBeforeUndo.shots === 1 && Boolean(gateBeforeUndo.undo) && gateBeforeUndo.undo.disabled === false,
+  JSON.stringify({ shots: gateBeforeUndo.shots, undo: gateBeforeUndo.undo }),
+);
+
+await evaluate(`document.getElementById('gUndo').click()`);
+const gateUndo = await gateWaitFor('撤销之后进入门禁', (s) => s.shots === 0, 60);
+console.log('门禁·撤销后:', JSON.stringify({
+  solve: gateUndo.solve, shoot: gateUndo.shoot, undo: gateUndo.undo, pause: gateUndo.pauseText,
+}));
+check(
+  '撤销后 #gShoot 被禁用（撤销之后同样只能先点「点此继续」）',
+  Boolean(gateUndo.shoot) && gateUndo.shoot.disabled === true,
+  JSON.stringify(gateUndo.shoot),
+);
+check(
+  '撤销后 #gShoot 的 title 也是「先点提示条上的…」（和读档同一个理由）',
+  Boolean(gateUndo.shoot) && /先点提示条上的/.test(gateUndo.shoot.title),
+  gateUndo.shoot ? gateUndo.shoot.title : '按钮不见了',
+);
+check(
+  '撤销后 #gSolve 同样被禁用、title 同一句话',
+  Boolean(gateUndo.solve) && gateUndo.solve.disabled === true && /先点提示条上的/.test(gateUndo.solve.title),
+  JSON.stringify(gateUndo.solve),
+);
+check(
+  '撤销后提示条也挂出来了（和读档后同一个可见状态，不只是内部置了个标志）',
+  gateUndo.pauseHidden === false && /点此继续/.test(gateUndo.pauseText || ''),
+  JSON.stringify({ hidden: gateUndo.pauseHidden, text: gateUndo.pauseText }),
+);
+
 // ------------------------------------------------------------ 收尾
 
 // 有些崩溃发生在某段断言之后（比如回放的 tick 要等帧放完才走到回调），
