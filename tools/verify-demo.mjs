@@ -3649,6 +3649,338 @@ check(
 
 await send(ws, 'Emulation.clearDeviceMetricsOverride');
 
+// ------------------------------------------------------------ 九球·非法开球的待决 UI
+//
+// 九球开球没做到「三颗目标球进袋或越过开球线」时，规则层会挂一个 pendingChoice
+// （src/rules.js 的 illegalBreak 分支），接手方可以选「照这样打」或「交回给对手」。
+// 规则本身有单测，但这段待决 UI 在 DOM 层一直没人验：面板弹不弹、文案说不说得清、
+// 两条分支点下去是不是真的走到两个不同结局，全靠代码自觉。
+//
+// 这里的局面不能靠「开球力度小一点」凑：力度小到一颗都不进时，judgeBreakFouls 的
+// 四球碰库规则会先把这一杆判成开球犯规，播报走犯规分支、根本到不了待决；而真实
+// 摆球是随机 seed，「恰好进 1 颗、又不足 3 颗」并不稳定。所以球位直接摆好（母球在
+// 台心、1 号球落在母球→左下角袋连线上，与 GAME_SETUP 同一条线、同一档 1.20 m/s：
+// 实测进 1 号、0 颗过线），只留「谁开球」这一个开关——因为 updateChoicePanel 在
+// 接手方是对手（pending.player === 1）时会直接替他选「照这样打」、不弹面板，
+// 所以想看到这两个按钮，必须由对手开球（turn 1 + breakShot）。
+// 反向那条用同一杆同一力度，只额外把 2、3 号球摆到开球线后面
+// （进 1 颗 + 过线 2 颗 = 3 颗达标），变量只剩「过线数」。
+
+const NINE_PENDING_SNAP = `(() => {
+  const app = window.__app;
+  const g = app.state.game;
+  const el = (id) => document.getElementById(id);
+  const box = (id) => {
+    const n = el(id);
+    if (!n) return null;
+    const r = n.getBoundingClientRect();
+    return {
+      hidden: n.classList.contains('hidden'),
+      w: Math.round(r.width),
+      h: Math.round(r.height),
+      display: getComputedStyle(n).display,
+    };
+  };
+  const log = el('log');
+  return JSON.stringify({
+    animating: app.state.animating,
+    kind: g ? g.kind : null,
+    shots: g ? g.shots : null,
+    turn: g ? g.turn : null,
+    breakShot: g ? g.breakShot : null,
+    pending: g ? g.pendingChoice : null,
+    turnName: (document.querySelector('#score .who.turn .nm')?.textContent ?? '').trim(),
+    crossed: g
+      ? g.balls.filter((b) => b.number !== 0 && !b.pocketed && b.x < app.table.length / 4).map((b) => b.number).sort((a, b) => a - b)
+      : [],
+    ballsLeft: g
+      ? g.balls.filter((b) => b.number !== 0 && !b.pocketed).map((b) => b.number).sort((a, b) => a - b)
+      : [],
+    panel: box('gChoice'),
+    accept: box('gAccept'),
+    handBack: box('gHandBack'),
+    panelTitle: (el('gChoice')?.querySelector('h2')?.textContent ?? '').replace(/\\s+/g, ' ').trim(),
+    panelHint: (el('gChoice')?.querySelector('.hint')?.textContent ?? '').replace(/\\s+/g, ' ').trim(),
+    report: el('report').textContent.replace(/\\s+/g, ' ').trim(),
+    logRows: Array.from(log.children).map((n) => n.textContent.replace(/\\s+/g, ' ').trim()),
+  });
+})()`;
+
+const nineSnap = async () => JSON.parse(await evaluate(NINE_PENDING_SNAP));
+
+/**
+ * 等到某个真实的 DOM/状态条件成立（不是等固定时长）。超时把最后一份快照带回去，
+ * 失败详情里就能看到它停在什么状态，而不是只有一句「超时」。
+ */
+async function nineWaitFor(what, want, tries = 60) {
+  let last = null;
+  for (let i = 0; i < tries; i++) {
+    last = await nineSnap();
+    if (want(last)) return { ...last, timedOut: false };
+    await sleep(150);
+  }
+  return { ...(last ?? {}), timedOut: true, want: what };
+}
+
+/**
+ * 摆一局九球开球。legal=true 时 2、3 号球先摆在开球线后面（这一杆就成 1 进袋 +
+ * 2 过线 = 3 颗达标）；false 时全部排到远库（只剩 1 号进袋 = 1 颗，不达标）。
+ * turn 决定谁开球：1 = 对手，0 = 玩家自己。
+ */
+const nineBreakSetup = (legal, turn) => `(() => {
+  const app = window.__app;
+  app.setMode('game');
+  // 关掉对手自动出杆：开着的话轮次一到对手它就自己打一杆，把刚结算的播报改掉。
+  const box = document.getElementById('autoOpponent');
+  if (box && box.checked) {
+    box.checked = false;
+    box.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  // 玩法钉成九球、球台钉成 2.54 m 九尺台（九球的开球线 = 台长 / 4），再新开一局。
+  const kindSel = document.getElementById('gameKind');
+  if (kindSel.value !== 'nineball') {
+    kindSel.value = 'nineball';
+    kindSel.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  const tableSel = document.getElementById('tablePreset');
+  if (tableSel.value !== 'pool9') {
+    tableSel.value = 'pool9';
+    tableSel.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  app.newGame();
+  const t = app.table;
+  const g = app.state.game;
+  const pk = t.pockets.find((p) => p.id === 'c-bl');
+  const cue = g.balls.find((b) => b.number === 0);
+  const b1 = g.balls.find((b) => b.number === 1);
+  const dx = pk.x - t.length * 0.5;
+  const dy = pk.y - t.width * 0.5;
+  const len = Math.hypot(dx, dy);
+  const ux = dx / len;
+  const uy = dy / len;
+  cue.x = pk.x - ux * 1.42;
+  cue.y = pk.y - uy * 1.42;
+  b1.x = pk.x - ux * 0.30;
+  b1.y = pk.y - uy * 0.30;
+  let k = 0;
+  for (const b of g.balls) {
+    if (b.number === 0 || b.number === 1) continue;
+    if (${legal} && (b.number === 2 || b.number === 3)) {
+      // 这两颗就停在开球线后面（x 远小于台长 / 4）：不进袋也算「越过开球线」。
+      b.x = t.length * 0.03;
+      b.y = t.width * (b.number === 2 ? 0.35 : 0.65);
+    } else {
+      b.x = t.length * 0.98;
+      b.y = t.width * (0.135 + k++ * 0.0585);
+    }
+  }
+  for (const b of g.balls) {
+    b.vx = 0; b.vy = 0; b.wx = 0; b.wy = 0; b.wz = 0; b.pocketed = false;
+  }
+  g.breakShot = true;
+  g.open = true;
+  g.turn = ${turn};
+  g.phase = 'playing';
+  g.requiresRerack = false;
+  g.ballInHand = null;
+  g.pendingChoice = null;
+  g.shots = 0;
+  g.log = [];
+  g.players[0].group = null;
+  g.players[0].fouls = 0;
+  g.players[1].group = null;
+  g.players[1].fouls = 0;
+  app.state.history = [];
+  app.state.gSolution = null;
+  app.state.solution = null;
+  const aim = app.currentAim();
+  window.dispatchEvent(new Event('resize'));
+  return JSON.stringify({
+    kind: g.kind,
+    tableLen: t.length,
+    headLine: t.length / 4,
+    turn: g.turn,
+    breakShot: g.breakShot,
+    aim: aim ? aim.targetId : null,
+    from: aim ? aim.from : null,
+    cue: { x: +cue.x.toFixed(3), y: +cue.y.toFixed(3) },
+    b1: { x: +b1.x.toFixed(3), y: +b1.y.toFixed(3) },
+    crossedBefore: g.balls.filter((b) => b.number !== 0 && b.x < t.length / 4).map((b) => b.number).sort((a, b) => a - b),
+    panelBefore: document.getElementById('gChoice').classList.contains('hidden'),
+  });
+})()`;
+
+/** 摆好局面再手打一杆，等回放真的结算完（不是等固定时长）。 */
+async function nineBreakShot(legal, turn) {
+  const setup = JSON.parse(await evaluate(nineBreakSetup(legal, turn)));
+  await evaluate(`(() => {
+    document.getElementById('power').value = '1.20';
+    document.getElementById('aimOffset').value = '0';
+    document.getElementById('tipB').value = '0';
+    document.getElementById('tipA').value = '0';
+    document.getElementById('power').dispatchEvent(new Event('input', { bubbles: true }));
+    document.getElementById('shootManual').click();
+  })()`);
+  const settled = await nineWaitFor('这一杆回放结算完', (s) => !s.animating && s.shots === 1);
+  return { setup, settled };
+}
+
+// ---- 3a：对手开球不达标 → 待决面板弹出，两个选择都在页面上
+const pendIllegal = await nineBreakShot(false, 1);
+console.log('九球待决·不达标开球:', JSON.stringify({ setup: pendIllegal.setup, settled: pendIllegal.settled }));
+check(
+  '九球待决局面摆对了：对手开球（turn 1 + breakShot）、最近的合法球是 1 号，母球→左下角袋连线上',
+  pendIllegal.setup.kind === 'nineball' &&
+    Math.abs(pendIllegal.setup.tableLen - 2.54) < 1e-9 &&
+    pendIllegal.setup.turn === 1 &&
+    pendIllegal.setup.breakShot === true &&
+    pendIllegal.setup.aim === 'b1' &&
+    pendIllegal.setup.from === 'direct' &&
+    // 1 号球摆在这条连线上、本来就在开球线后面，所以摆好时线后只有它一颗；
+    // 它这一杆会进袋（按进袋计，不再按过线计），过线数仍是 0。
+    JSON.stringify(pendIllegal.setup.crossedBefore) === JSON.stringify([1]),
+  JSON.stringify(pendIllegal.setup),
+);
+check(
+  '九球这一杆确实「不达标」：进 1 号、0 颗过线（1.20 m/s 手打，进袋 1 + 过线 0 = 1 < 3）',
+  !pendIllegal.settled.ballsLeft.includes(1) &&
+    pendIllegal.settled.crossed.length === 0 &&
+    pendIllegal.settled.shots === 1,
+  JSON.stringify({ ballsLeft: pendIllegal.settled.ballsLeft, crossed: pendIllegal.settled.crossed }),
+);
+
+const pendShown = await nineWaitFor('待决面板出现', (s) => s.panel && s.panel.hidden === false);
+check(
+  '九球开球不达标时 #gChoice 待决面板真的显示了（不是只在状态里挂了个 pendingChoice）',
+  !pendShown.timedOut && pendShown.panel.w > 200 && pendShown.panel.h > 100 && pendShown.panel.display !== 'none',
+  JSON.stringify({ panel: pendShown.panel, timedOut: pendShown.timedOut }),
+);
+check(
+  '两个选择都在页面上且点得到：「照这样打」#gAccept 与「交回给对手」#gHandBack 都有可见矩形',
+  pendShown.accept.w > 20 && pendShown.accept.h > 20 && pendShown.handBack.w > 20 && pendShown.handBack.h > 20,
+  JSON.stringify({ accept: pendShown.accept, handBack: pendShown.handBack }),
+);
+check(
+  '面板标题说明原因：就是「开球不达标」',
+  pendShown.panelTitle === '开球不达标',
+  pendShown.panelTitle || '(空)',
+);
+check(
+  '面板正文说清判定标准与依据：至少三颗目标球「进袋或越过开球线」，按 WPA Regulation 16 由接手方选择',
+  /至少三颗目标球/.test(pendShown.panelHint) &&
+    /越过开球线/.test(pendShown.panelHint) &&
+    /WPA Regulation 16/.test(pendShown.panelHint) &&
+    /照现在这样接着打/.test(pendShown.panelHint) &&
+    /交回给开球方/.test(pendShown.panelHint),
+  pendShown.panelHint || '(空)',
+);
+check(
+  '播报区也点了「开球不达标」，并写明接手方可以照打或交回',
+  /开球不达标/.test(pendShown.report) && /照打/.test(pendShown.report) && /交回/.test(pendShown.report),
+  pendShown.report,
+);
+check(
+  '待决这一刻轮次已经交到接手方（你自己）手上，记分板回合标记也移过来了',
+  pendShown.turn === 0 && pendShown.turnName === '你' && pendShown.shots === 1,
+  `turn=${pendShown.turnName} shots=${pendShown.shots}`,
+);
+
+// ---- 3b：点「照这样打」→ 待决清空、面板收起、轮次留在自己这边（不换人）
+const accepted = await (async () => {
+  await evaluate(`document.getElementById('gAccept').click()`);
+  return nineWaitFor('点「照这样打」后面板收起', (s) => s.pending === null && s.panel.hidden === true);
+})();
+console.log('九球待决·照这样打:', JSON.stringify(accepted));
+check(
+  '点「照这样打」之后待决状态清空、面板收起（按钮跟着父面板一起不可见，矩形归零）',
+  !accepted.timedOut && accepted.pending === null && accepted.panel.hidden === true &&
+    accepted.accept.w === 0 && accepted.handBack.w === 0,
+  JSON.stringify({ pending: accepted.pending, panel: accepted.panel, accept: accepted.accept }),
+);
+check(
+  '点「照这样打」之后播报换成「你选择照这样打。」，不再提开球不达标',
+  /你选择照这样打/.test(accepted.report) && !/开球不达标/.test(accepted.report),
+  accepted.report || '超时',
+);
+check(
+  '「照这样打」= 直接接着打：轮次仍留在接手方（你），杆数还是 1 杆、对局记录不多写一条',
+  accepted.turn === 0 && accepted.turnName === '你' && accepted.shots === 1 && accepted.logRows.length === 1,
+  `turn=${accepted.turnName} shots=${accepted.shots} log=${accepted.logRows.length}`,
+);
+
+// ---- 3c：再摆一次，点「交回给对手」→ 与「照这样打」走的是不同结局
+const pendAgain = await nineBreakShot(false, 1);
+const pendAgainShown = await nineWaitFor('待决面板再次出现', (s) => s.panel && s.panel.hidden === false);
+check(
+  '每条用例自己建局面：重摆一局后待决面板照样弹出（不吃上一条用例的残留状态）',
+  !pendAgain.settled.timedOut && !pendAgainShown.timedOut && pendAgainShown.panel.hidden === false &&
+    pendAgainShown.accept.w > 20 && pendAgainShown.handBack.w > 20,
+  JSON.stringify({ settled: pendAgain.settled.ballsLeft, panel: pendAgainShown.panel }),
+);
+
+const handedBack = await (async () => {
+  await evaluate(`document.getElementById('gHandBack').click()`);
+  return nineWaitFor('点「交回给对手」后面板收起', (s) => s.pending === null && s.panel.hidden === true);
+})();
+console.log('九球待决·交回给对手:', JSON.stringify(handedBack));
+check(
+  '点「交回给对手」之后播报说明台面已交回去，并点名交给谁',
+  /已把台面交回给/.test(handedBack.report) && /对手/.test(handedBack.report),
+  handedBack.report || '超时',
+);
+check(
+  '「交回给对手」= 轮次退回开球方（对手），记分板回合标记跟着过去',
+  handedBack.turn === 1 && handedBack.turnName === '对手',
+  `turn=${handedBack.turn} ${handedBack.turnName}`,
+);
+check(
+  '「交回给对手」会在对局记录里补一条「交回给原开球方再打一杆」（照这样打不会写），两条分支的结局确实不同',
+  handedBack.logRows.length === 2 &&
+    handedBack.logRows.some((r) => /交回给原开球方/.test(r)) &&
+    handedBack.turn === 1 &&
+    accepted.turn === 0 &&
+    accepted.logRows.length === 1,
+  JSON.stringify({ rows: handedBack.logRows, turn: handedBack.turn, acceptTurn: accepted.turn }),
+);
+
+// ---- 3d：反向断言——合法开球（进 1 颗 + 过线 2 颗 = 3 颗）时这两个按钮不出现
+const pendLegal = await nineBreakShot(true, 1);
+const legalSettled = await nineWaitFor('合法开球结算完', (s) => !s.animating && s.shots === 1 && /开球/.test(s.report));
+console.log('九球待决·合法开球对照:', JSON.stringify({ setup: pendLegal.setup, settled: legalSettled }));
+check(
+  '合法开球的自检：这一杆进 1 号、另有 2、3 两颗停在开球线后（1 + 2 = 3 颗达标）',
+  !legalSettled.ballsLeft.includes(1) &&
+    JSON.stringify(legalSettled.crossed) === JSON.stringify([2, 3]) &&
+    JSON.stringify(pendLegal.setup.crossedBefore) === JSON.stringify([1, 2, 3]),
+  JSON.stringify({ crossed: legalSettled.crossed, crossedBefore: pendLegal.setup.crossedBefore }),
+);
+check(
+  '合法开球时根本不挂待决：面板收起、两个按钮都不可见（矩形为 0，不是只把文字藏起来）',
+  legalSettled.pending === null && legalSettled.panel.hidden === true &&
+    legalSettled.accept.w === 0 && legalSettled.handBack.w === 0,
+  JSON.stringify({ pending: legalSettled.pending, panel: legalSettled.panel, accept: legalSettled.accept, handBack: legalSettled.handBack }),
+);
+check(
+  '合法开球的播报是正常的「对手 继续」，一个字都不提开球不达标',
+  /进 1 号/.test(legalSettled.report) && /对手 继续/.test(legalSettled.report) && !/开球不达标/.test(legalSettled.report),
+  legalSettled.report || '超时',
+);
+
+// ---- 3e：反向断言——玩家自己开球不达标时也不弹面板（代码替对手选了「照这样打」）
+const pendMine = await nineBreakShot(false, 0);
+const mineSettled = await nineWaitFor('玩家自己开球不达标时结算完', (s) => !s.animating && s.shots === 1 && /照这样打/.test(s.report));
+console.log('九球待决·玩家自己开球:', JSON.stringify({ setup: pendMine.setup, settled: mineSettled }));
+check(
+  '玩家自己开球不达标时面板同样不弹（接手方是对手，代码直接替他照这样打）',
+  mineSettled.panel.hidden === true && mineSettled.accept.w === 0 && mineSettled.handBack.w === 0,
+  JSON.stringify({ panel: mineSettled.panel, accept: mineSettled.accept }),
+);
+check(
+  '玩家自己开球不达标时播报说「对手选择照这样打。」，待决已被自动清掉、轮次交给对手',
+  mineSettled.pending === null && /对手选择照这样打/.test(mineSettled.report) && mineSettled.turn === 1,
+  `${mineSettled.report} / turn=${mineSettled.turn} pending=${JSON.stringify(mineSettled.pending)}`,
+);
+
 // ------------------------------------------------------------ 收尾
 
 // 有些崩溃发生在某段断言之后（比如回放的 tick 要等帧放完才走到回调），
