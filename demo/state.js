@@ -479,7 +479,9 @@ export function practiceHint(state) {
     return '先求解一个目标袋方案，再记录真实练习结果。';
   }
   if (state.practiceRecorded) return '这一杆记下了。同一个球位可以接着记，换球位就再求解一次。';
-  return '按实际结果点「进了」或「没进」——记下来才看得出进步。';
+  // 文案与按钮同名：面板说「实战打进 / 实战没进」，按钮上写的也是这两个词。
+  // 原来写成「进了 / 没进」，用户会去找两个不存在的按钮。
+  return '按实际结果点「实战打进」或「实战没进」——记下来才看得出进步。';
 }
 
 /**
@@ -970,13 +972,21 @@ export function autoPauseHint(state) {
   const g = state?.game;
   if (!g || g.phase === 'ended') return null;
   if (state.autoPaused) {
+    const why = state.autoPauseReason === 'undo' ? '撤销之后' : '读档之后';
+    // 轮到对手：暂停的是它的自动出杆，说清「点此继续」会让它接着打。
+    // 轮到玩家：根本没有对手要暂停，让人误以为对手在等他；这时说的是
+    // 「局面停住了，点此继续再求解」——按钮上的灰也是照着这句话给的理由。
+    if (g.turn === 1) {
+      return {
+        level: 'paused',
+        canResume: true,
+        text: `已暂停对手自动出杆 —— ${why}先让你看清局面，点此继续`,
+      };
+    }
     return {
       level: 'paused',
       canResume: true,
-      text:
-        state.autoPauseReason === 'undo'
-          ? '已暂停对手自动出杆 —— 撤销之后先让你看清局面，点此继续'
-          : '已暂停对手自动出杆 —— 读档之后先让你看清局面，点此继续',
+      text: `${why}局面先停住不动 —— 点此继续，再按「求解」打这一杆`,
     };
   }
   if (!state.autoOpponent && g.turn === 1) {

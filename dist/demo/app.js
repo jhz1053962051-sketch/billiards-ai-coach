@@ -121,7 +121,7 @@ createBall('cue',table.length*0.24,table.width*0.5,{number:0,...ballStyle(0)})
 createBall('b'+s.n,s.x*table.length,s.y*table.width,{number:s.n,
 ...ballStyle(s.n),})
 );}
-createWorld(table,state.balls);refreshBallPicker();setAdvice('点「求解最佳方案」开始。','');$('alts').innerHTML='—';$('alts').className='empty';render();}
+createWorld(table,state.balls);refreshBallPicker();setAdvice('点「求解最佳方案」开始。','');setAltsEmpty();render();}
 function refreshBallPicker(){const used=new Set(state.balls.filter((b)=>!b.pocketed).map((b)=>b.number));const sel=$('ballPick');const prev=Number(sel.value);sel.innerHTML='';const free=RACK_NUMBERS.filter((n)=>!used.has(n));if(!free.length){const opt=document.createElement('option');opt.textContent='15 颗都在台上了';opt.value='';sel.appendChild(opt);sel.disabled=true;$('addBall').disabled=true;}else{for(const n of free){const opt=document.createElement('option');opt.value=String(n);opt.textContent=`${n} 号（${GROUP_LABEL[groupOf(n)]}）`;sel.appendChild(opt);}
 sel.disabled=false;$('addBall').disabled=false;if(free.includes(prev))sel.value=String(prev);}
 refreshRemovePicker();}
@@ -134,7 +134,8 @@ const ball=createBall('b'+n,spot.x,spot.y,{number:n,...ballStyle(n)});state.ball
 function rackUp(){if(state.animating)return;state.balls=createStandardRack(table,{seed:Math.floor(Math.random()*1e6)}).map((b)=>
 createBall(b.id,b.x,b.y,b)
 );createWorld(table,state.balls);clearSolution('已摆满 15 颗，可以开球了。');refreshBallPicker();render();}
-function clearSolution(text){state.solution=null;state.practiceRecorded=false;updatePracticeFeedback();if(text)setAdvice(text,'');$('alts').innerHTML='—';$('alts').className='empty';}
+function clearSolution(text){state.solution=null;state.practiceRecorded=false;updatePracticeFeedback();if(text)setAdvice(text,'');setAltsEmpty();}
+function setAltsEmpty(){$('alts').innerHTML='—';$('alts').className='empty';$('altsCard').classList.add('hidden');$('shootNote').textContent='';$('shootNote').classList.add('hidden');}
 function setTablePreset(presetId){const next=createTable(presetId);table=next;R=next.ballRadius;view.setTable(next);state.generation+=1;state.game=null;state.history=[];resetLayout();resize();if(state.mode==='game')newGame();$('tablePreset').value=next.preset;$('subtitle').textContent=
 `${next.label}（${next.length} × ${next.width} 米）· 换台后已重摆`;}
 function setAdvice(text,verdict,cls=''){$('advice').textContent=text;$('advice').className=/^(点|没有|已|台面)/.test(text)?'empty':'';$('verdict').textContent=verdict;$('verdict').className=cls;}
@@ -261,38 +262,49 @@ tableId:table.preset,
 drillId:state.activeDrillId,
 missReason:made?null:$('missReason').value||null,});if(!saved){updatePracticeFeedback('本次记录未能保存；请检查浏览器是否允许本地存储。');return false;}
 state.practiceRecorded=true;state.lastRecordAt=now;$('missReason').value='';updatePracticeLog();updatePracticeFeedback(`已记录实战结果：${made ? '命中' : '未进'}。同一个球位可以接着记。`);return true;}
-function runSolve(){state.practiceRecorded=false;invalidateShare();const t0=performance.now();const all=solveShot(table,state.balls);const ms=performance.now()-t0;const card=coach(table,state.balls,{candidates:all});state.solution=card;updatePracticeFeedback();if(!card.found){setAdvice(card.message,'');$('alts').innerHTML='—';$('alts').className='empty';render();return;}
-const cls=card.best.difficulty>80?'brutal':card.best.difficulty>55?'hard':'';setAdvice(card.message,`${card.verdict} · 求解 ${ms.toFixed(0)} ms`,cls);renderAlts(card,ms);render();}
-function renderAlts(card,ms){$('alts').className='';$('alts').innerHTML='';const list=[card.best,...card.alternatives];for(const[i,c]of list.entries()){const row=document.createElement('div');row.className='alt'+(i===0?' active':'');const title=document.createElement('div');const name=document.createElement('span');name.className='name';name.textContent=`${i === 0 ? '★ ' : ''}${c.targetNumber} 号 → ${pocketName(c.pocketId)}`;title.appendChild(name);if(c.positioningRequired&&c.cueRest){const position=document.createElement('span');position.className='position';position.textContent=c.nextShot
+function syncPowerToSolution(speed){const el=$('power');const v=Math.round(clamp(speed,Number(el.min),Number(el.max))*100)/100;state.manual.speed=v;el.value=v.toFixed(2);updateManualLabels();return v;}
+function scoreBadge(score,label){return`难度 ${Math.round(score)}/100（${label}）· ${difficultyCaveat()}`;}
+function runSolve(){state.practiceRecorded=false;invalidateShare();const all=solveShot(table,state.balls);const card=coach(table,state.balls,{candidates:all});state.solution=card;updatePracticeFeedback();if(!card.found){setAdvice(card.message,'');setAltsEmpty();render();return;}
+const cls=card.best.difficulty>80?'brutal':card.best.difficulty>55?'hard':'';const speed=syncPowerToSolution(card.best.speed);const score=card.best.value??card.best.difficulty;setAdvice(card.message,scoreBadge(score,difficultyLabel(score)),cls);renderAlts(card);$('shootNote').textContent=`演示这一杆按建议力度 ${speed.toFixed(2)} m/s 打（左边滑条已同步到同一档）。`;$('shootNote').classList.remove('hidden');render();}
+function renderAlts(card){$('altsCard').classList.remove('hidden');$('alts').className='';$('alts').innerHTML='';const list=[card.best,...card.alternatives];for(const[i,c]of list.entries()){const row=document.createElement('div');row.className='alt'+(i===0?' active':'');const title=document.createElement('div');const name=document.createElement('span');name.className='name';name.textContent=`${i === 0 ? '★ ' : ''}${c.targetNumber} 号 → ${pocketName(c.pocketId)}`;title.appendChild(name);if(c.positioningRequired&&c.cueRest){const position=document.createElement('span');position.className='position';position.textContent=c.nextShot
 ?`${cueRestText(table, c.cueRest)} · 下一杆 ${c.nextShot.targetNumber} 号`
 :cueRestText(table,c.cueRest);title.appendChild(position);}
 const meta=document.createElement('span');meta.className='meta';meta.textContent=`±${c.toleranceDeg.toFixed(2)}° · ${difficultyLabel(c.value ?? c.difficulty)}`;const go=document.createElement('span');go.className='go';go.setAttribute('aria-hidden','true');go.textContent='›';row.append(title,meta,go);row.setAttribute('role','button');row.tabIndex=0;row.title='点一下换成这个方案';row.addEventListener('click',()=>{if(state.animating)return;const v=c.value??c.difficulty;state.solution={...card,
 best:c,
 message:describeCandidate(c),
-verdict:`${difficultyLabel(v)}（综合 ${v}/100 · 单杆难度 ${c.difficulty}/100 · ${difficultyCaveat()}）`,};state.practiceRecorded=false;updatePracticeFeedback();for(const el of $('alts').querySelectorAll('.alt'))el.classList.toggle('active',el===row);const dd=c.difficulty;setAdvice(
-state.solution.message,
-state.solution.verdict+(ms?` · 求解 ${ms.toFixed(0)} ms`:''),
-dd>80?'brutal':dd>55?'hard':''
-);render();});row.addEventListener('keydown',(e)=>{if(e.key!=='Enter'&&e.key!==' ')return;e.preventDefault();row.click();});$('alts').appendChild(row);}}
+verdict:scoreBadge(v,difficultyLabel(v)),};state.practiceRecorded=false;updatePracticeFeedback();for(const el of $('alts').querySelectorAll('.alt'))el.classList.toggle('active',el===row);const dd=c.difficulty;setAdvice(state.solution.message,state.solution.verdict,dd>80?'brutal':dd>55?'hard':'');const speed=syncPowerToSolution(c.speed);$('shootNote').textContent=`演示这一杆按建议力度 ${speed.toFixed(2)} m/s 打（左边滑条已同步到同一档）。`;render();});row.addEventListener('keydown',(e)=>{if(e.key!=='Enter'&&e.key!==' ')return;e.preventDefault();row.click();});$('alts').appendChild(row);}}
 function replay(frames,dt,onDone){const gen=state.generation;const targets=state.mode==='practice'?state.balls:state.game.balls;state.animating=true;updatePracticeFeedback();updateUndoButton();const restoreStroke=()=>{state.manual.strokeOffset=getPowerTier(state.manual.speed).ratio*0.12;};const startRolling=()=>{const t0=performance.now();const tick=()=>{if(gen!==state.generation){restoreStroke();updateUndoButton();return;}
 const elapsed=(performance.now()-t0)/1000;const frameTime=Math.min(frames.length-1,elapsed/dt);const idx=Math.floor(frameTime);const f=interpolateBallStates(frames[idx],frames[Math.min(idx+1,frames.length-1)],frameTime-idx);const balls=targets;for(let i=0;i<balls.length&&i<f.length;i++){balls[i].x=f[i].x;balls[i].y=f[i].y;balls[i].pocketed=f[i].pocketed;balls[i].pocket=f[i].pocket;balls[i].rollAngle=f[i].rollAngle;balls[i].rollDirX=f[i].rollDirX;balls[i].rollDirY=f[i].rollDirY;}
 render();if(frameTime>=frames.length-1){state.animating=false;updatePracticeFeedback();updateUndoButton();const tier=getPowerTier(state.manual.speed);state.manual.strokeOffset=tier.ratio*0.12;onDone();return;}
 requestAnimationFrame(tick);};requestAnimationFrame(tick);};if(view.getCamera().t>0.05){const strikeStart=performance.now();const strikeDuration=60;const fromOffset=state.manual.strokeOffset||0.04;const strikeTick=()=>{if(gen!==state.generation){restoreStroke();return;}
 const elapsed=performance.now()-strikeStart;const p=Math.min(1,elapsed/strikeDuration);state.manual.strokeOffset=fromOffset*(1-p)+(-0.012)*p;render();if(p<1){requestAnimationFrame(strikeTick);}else{startRolling();}};requestAnimationFrame(strikeTick);}else{startRolling();}}
+function practiceConclusion(balls,best){const number=best.targetNumber;const wanted=pocketName(best.pocketId);const target=balls.find((b)=>b.id===best.targetId);if(target?.pocketed&&target.pocket===best.pocketId){return{ok:true,text:`✓ 进袋：${number} 号进了${wanted}`};}
+if(target?.pocketed){return{ok:false,
+text:`✗ 没进：建议打${wanted}，${number} 号却落进了${pocketName(target.pocket)}`,};}
+const pocket=table.pockets.find((p)=>p.id===best.pocketId);if(target&&pocket){const gap=Math.hypot(target.x-pocket.x,target.y-pocket.y)-pocket.captureR;return{ok:false,
+text:`✗ 没进：${number} 号停在${wanted}外，差 ${Math.max(0, gap * 100).toFixed(1)} 厘米`,};}
+return{ok:false,text:`✗ 没进：${number} 号没有进${wanted}`};}
 function shootPractice(){const sol=state.solution;if(!sol||!sol.found){setAdvice('先求解，再演示。','');return;}
 const best=sol.best;const sim=simulateFrames(
 state.balls,
 table,
 {angle:best.aimAngle,speed:best.speed,tip:{a:best.tip.a,b:best.tip.b}},
 SEARCH_DT
-);if(!sim)return;const{frames,dt}=sim;const original=snapshotPositions(state.balls);const gen=state.generation;replay(frames,dt,()=>{if(gen!==state.generation||state.balls.length!==original.length)return;const target=state.balls.find((b)=>b.id===best.targetId);const ok=Boolean(target&&target.pocketed&&target.pocket===best.pocketId);setAdvice((ok?'✓ 进球。':'✗ 这一杆没进（袋口或力度需要微调）。')+' '+sol.message,sol.verdict);restorePositions(state.balls,original);render();});}
+);if(!sim)return;const{frames,dt}=sim;const original=snapshotPositions(state.balls);const gen=state.generation;replay(frames,dt,()=>{if(gen!==state.generation||state.balls.length!==original.length)return;const conclusion=practiceConclusion(state.balls,best);restorePositions(state.balls,original);const score=best.value??best.difficulty;setAdvice(
+`${conclusion.text}。${best.speed.toFixed(2)} m/s · ${sol.message}`,
+`${conclusion.text} · ${scoreBadge(score, difficultyLabel(score))}`,
+conclusion.ok?'':'miss'
+);setReport(
+`练习演示：${conclusion.text}（按建议力度 ${best.speed.toFixed(2)} m/s 跑的仿真，不计入实战统计）。`
+);render();});}
+function clearOpponentMark(){$('gAdviceCard').classList.remove('opponent');$('gAdviceTag').classList.add('hidden');}
 function newGame(){const kind=state.gameKind;const balls=createRack(kind,table,{seed:Math.floor(Math.random()*1e6)}).map((b)=>
 createBall(b.id,b.x,b.y,b)
 );state.generation+=1;state.game=createGame(table,balls,{names:['你','对手'],kind});state.gSolution=null;state.animating=false;state.opponentThinking=false;state.history=[];state.shotLog=[];Object.assign(state,reduceAutoPause(state,'new-game'));state.historyNote=null;updateUndoButton();setReport(
 kind==='nineball'
 ?'九球开球。只能先碰台面上号码最小的那颗；合法进 9 号直接赢局。点「求解」看第一杆怎么打。'
 :'开球。点「求解」看第一杆怎么打。'
-);$('gAdvice').textContent='—';$('gAdvice').className='empty';$('gVerdict').textContent='';$('gRerack').classList.add('hidden');$('gChoice').classList.add('hidden');updateScore();updateLog();updateAutoPauseBar();render();}
+);$('gAdvice').textContent='—';$('gAdvice').className='empty';$('gVerdict').textContent='';clearOpponentMark();$('gRerack').classList.add('hidden');$('gChoice').classList.add('hidden');updateScore();updateLog();updateAutoPauseBar();render();}
 function setReport(html){$('report').innerHTML=html;$('report').className='';}
 function updateScore(){const g=state.game;if(!g)return;const box=$('score');box.innerHTML='';if(g.snooker){for(let i=0;i<2;i++){const p=g.players[i];const div=document.createElement('div');div.className='who'+(g.turn===i&&g.phase==='playing'?' turn':'');div.innerHTML=`<span class="nm">${esc(p.name)}</span>
         <span class="tag2">${g.snooker.scores[i]} 分</span>`;box.appendChild(div);}
@@ -334,7 +346,11 @@ myself:0,});const history=readMatches();const sum=summarizeHistory(history);cons
 `<div>本局结果<b>${MATCH_RESULT_TEXT[stats.result]}</b></div>`+
 '</div>'
 );}else{parts.push('<p class="hint">开一局球，打完在这里看复盘。</p>');}
-if(!history.length){parts.push('<p class="hint">还没有打完的对局——一局结束会自动记一条。</p>');}else{parts.push('<div class="match-title">最近 5 场</div><ul class="match-list">');for(const m of history.slice(-5).reverse()){const kindLabel=GAME_KINDS[m.kind]?.label??m.kind;const cls=m.result==='win'?'warm':m.result==='loss'?'cold':'';parts.push(
+const ended=Boolean(g&&g.phase==='ended');if(!history.length){parts.push(
+ended
+?'<p class="hint">这一局打完了，但战绩没能存下来（浏览器可能禁用了本地存储）。</p>'
+:'<p class="hint">还没有打完的对局——一局结束会自动记一条。</p>'
+);}else{parts.push('<div class="match-title">最近 5 场</div><ul class="match-list">');for(const m of history.slice(-5).reverse()){const kindLabel=GAME_KINDS[m.kind]?.label??m.kind;const cls=m.result==='win'?'warm':m.result==='loss'?'cold':'';parts.push(
 `<li><span>${formatMatchWhen(m.ts)} · ${esc(kindLabel)}</span>`+
 `<span class="${cls}">${MATCH_RESULT_TEXT[m.result]} · ${m.shots} 杆 · ${formatRate(m.potRate)}</span></li>`
 );}
@@ -348,16 +364,18 @@ sum.recent
 .map((r)=>{const cls=r==='win'?'warm':r==='loss'?'cold':'';return`<i class="match-dot ${cls}" title="${MATCH_RESULT_TEXT[r]}"></i>`;})
 .join('')+
 '</div>'
-);}
+);if(ended){parts.push(
+`<p class="hint">战绩已记录（共 ${sum.matches} 场）——刚打完的这一局也在里面。</p>`
+);}}
 box.innerHTML=parts.join('');updateShareMatchButton();}
-function updateAutoPauseBar(){const bar=$('autoPauseBar');if(!bar)return;const hint=state.mode==='game'?autoPauseHint(state):null;if(!hint){bar.classList.add('hidden');return;}
+function updateAutoPauseBar(){const bar=$('autoPauseBar');syncGameGates();if(!bar)return;const hint=state.mode==='game'?autoPauseHint(state):null;if(!hint){bar.classList.add('hidden');return;}
 bar.classList.remove('hidden');const text=$('autoPauseText');if(text)text.textContent=hint.text;const btn=$('autoPauseResume');if(btn)btn.classList.toggle('hidden',!hint.canResume);}
 function resumeAutoOpponent(){Object.assign(state,reduceAutoPause(state,'resume'));if(!state.autoOpponent){state.autoOpponent=true;const box=$('autoOpponent');if(box)box.checked=true;}
 updateAutoPauseBar();setReport('已恢复对手自动出杆。');maybeOpponentTurn();}
-function gameSolve(){const g=state.game;if(!g||g.phase==='ended')return;if(state.autoOpponent&&!state.autoPaused&&g.turn===1){$('gAdvice').textContent='现在是对手回合，不用你算——它会自己打。';$('gAdvice').className='empty';$('gVerdict').textContent='';return;}
-if(state.animating)return;if(g.requiresRerack){$('gAdvice').textContent='上一杆开球不合法，必须先点「重摆开球」——规则里这一杆不算数。';$('gAdvice').className='empty';$('gVerdict').textContent='';return;}
-if(g.ballInHand){$('gAdvice').textContent='先把母球摆到台面上（在合法区里点一下）。';$('gAdvice').className='empty';return;}
-const onTable=numbersOnTable(g.balls);const allow=legalTargetNumbers(g,onTable);const t0=performance.now();const{plan,kind,alternatives}=planShot(table,g,{allow,safety:state.allowSafety});const ms=performance.now()-t0;if(!plan){state.gSolution={found:false};$('gAdvice').textContent='台面上没有可以合法先碰的球。';$('gAdvice').className='empty';$('gVerdict').textContent='';render();return;}
+function gameSolve(){const g=state.game;if(!g||g.phase==='ended')return;if(state.autoOpponent&&!state.autoPaused&&g.turn===1){$('gAdvice').textContent='现在是对手回合，不用你算——它会自己打。';$('gAdvice').className='empty';$('gVerdict').textContent='';clearOpponentMark();return;}
+if(state.animating)return;if(g.requiresRerack){$('gAdvice').textContent='上一杆开球不合法，必须先点「重摆开球」——规则里这一杆不算数。';$('gAdvice').className='empty';$('gVerdict').textContent='';clearOpponentMark();return;}
+if(g.ballInHand){$('gAdvice').textContent='先把母球摆到台面上（在合法区里点一下）。';$('gAdvice').className='empty';clearOpponentMark();return;}
+const onTable=numbersOnTable(g.balls);const allow=legalTargetNumbers(g,onTable);const asOpponent=g.turn===1;const{plan,kind,alternatives}=planShot(table,g,{allow,safety:state.allowSafety});if(!plan){state.gSolution={found:false};$('gAdvice').textContent='台面上没有可以合法先碰的球。';$('gAdvice').className='empty';$('gVerdict').textContent='';clearOpponentMark();syncGameGates();render();return;}
 state.gSolution={found:true,best:plan,all:[plan,...alternatives],kind};$('gAdvice').textContent=describeCandidate(plan);$('gAdvice').className='';const kindLabel=
 kind==='break'
 ?'开球'
@@ -365,13 +383,13 @@ kind==='break'
 ?'没有进攻机会，先保证合法'
 :kind==='safety'
 ?'防守'
-:difficultyLabel(plan.value??plan.difficulty);const diffTxt=
+:difficultyLabel(plan.value??plan.difficulty);const badgeText=
 kind==='attack'
-?`（综合 ${plan.value ?? plan.difficulty}/100 · 单杆难度 ${plan.difficulty}/100 · ${difficultyCaveat()}）`
+?scoreBadge(plan.value??plan.difficulty,kindLabel)
 :kind==='safety'
-?`（对手容错 ±${plan.safetyOppToleranceDeg.toFixed(2)}° · 从 ±${plan.safetyBaseToleranceDeg.toFixed(2)}° 压下来）`
-:'';$('gVerdict').textContent=`${kindLabel}${diffTxt} · 求解 ${ms.toFixed(0)} ms`;$('gVerdict').className=
-kind==='attack'&&plan.difficulty>80?'brutal':kind==='attack'&&plan.difficulty>55?'hard':'';render();}
+?`${kindLabel}（对手容错 ±${plan.safetyOppToleranceDeg.toFixed(2)}° · 从 ±${plan.safetyBaseToleranceDeg.toFixed(2)}° 压下来）`
+:kindLabel;$('gVerdict').textContent=badgeText;$('gVerdict').className=
+kind==='attack'&&plan.difficulty>80?'brutal':kind==='attack'&&plan.difficulty>55?'hard':'';$('gAdviceCard').classList.toggle('opponent',asOpponent);$('gAdviceTag').classList.toggle('hidden',!asOpponent);syncGameGates();render();}
 function gameShoot(){const g=state.game;if(!g||g.phase==='ended')return;if(state.autoOpponent&&!state.autoPaused&&g.turn===1)return;if(state.animating)return;if(g.requiresRerack){$('gAdvice').textContent='上一杆开球不合法，先点「重摆开球」。';return;}
 if(g.ballInHand){$('gAdvice').textContent='先把母球摆到台面上。';return;}
 const sol=state.gSolution;if(!sol||!sol.found){$('gAdvice').textContent='先点「求解」。';return;}
@@ -379,17 +397,27 @@ const best=sol.best;const facts=simulateShot(
 table,
 g.balls,
 {angle:best.aimAngle,speed:best.speed,tip:{a:best.tip.a,b:best.tip.b}},
-{record:true,dt:SEARCH_DT});const{next,report}=resolveShot(g,facts);pushHistory(g);const gen=state.generation;replay(facts.frames,facts.dt,()=>{if(gen!==state.generation)return;state.game=next;state.gSolution=null;recordTolerance(next.shots,best);state.placing=Boolean(next.ballInHand);canvas.classList.toggle('placing',state.placing);setReport(reportHtml(report,{next,spotted:'only8'}));$('gRerack').classList.toggle('hidden',!next.requiresRerack);$('gAdvice').textContent=next.phase==='ended'?'这一局结束了。':'—';$('gAdvice').className='empty';$('gVerdict').textContent='';updateScore();updateLog();render();Object.assign(state,reduceAutoPause(state,'user-shot'));updateAutoPauseBar();maybeOpponentTurn();});}
+{record:true,dt:SEARCH_DT});const{next,report}=resolveShot(g,facts);pushHistory(g);const gen=state.generation;replay(facts.frames,facts.dt,()=>{if(gen!==state.generation)return;state.game=next;state.gSolution=null;recordTolerance(next.shots,best);state.placing=Boolean(next.ballInHand);canvas.classList.toggle('placing',state.placing);setReport(reportHtml(report,{next,spotted:'only8'}));$('gRerack').classList.toggle('hidden',!next.requiresRerack);$('gAdvice').textContent=next.phase==='ended'?'这一局结束了。':'—';$('gAdvice').className='empty';$('gVerdict').textContent='';clearOpponentMark();updateScore();updateLog();render();Object.assign(state,reduceAutoPause(state,'user-shot'));updateAutoPauseBar();maybeOpponentTurn();});}
 function recordTolerance(shotNumber,candidate){if(!candidate||typeof candidate!=='object')return;const shot=Math.floor(Number(shotNumber));const deg=Number(candidate.toleranceDeg);if(!Number.isFinite(shot)||shot<=0)return;if(!Number.isFinite(deg)||deg<=0)return;const entry={shot,
 targetNumber:Number.isFinite(Number(candidate.targetNumber))?Number(candidate.targetNumber):null,
 pocketId:typeof candidate.pocketId==='string'?candidate.pocketId:'',
 toleranceDeg:deg,};state.shotLog=state.shotLog.filter((e)=>e&&e.shot!==shot);state.shotLog.push(entry);if(state.shotLog.length>200)state.shotLog=state.shotLog.slice(-200);}
 function pushHistory(game){pushHistoryEntry(state.history,game);updateUndoButton();}
-function updateUndoButton(){const btn=$('gUndo');if(!btn)return;const n=state.history.length;btn.disabled=n===0||state.animating;btn.textContent=undoLabel(n);btn.title=state.animating?'这一杆还在回放，演完才能撤销':'';}
+function pendingResume(){const g=state.game;if(state.mode!=='game'||!g||g.phase==='ended')return false;if(!state.autoPaused)return false;return state.autoPauseReason==='load'||state.autoPauseReason==='undo';}
+function syncGameGates(){const g=state.game;const solve=$('gSolve');const shoot=$('gShoot');if(!solve||!shoot)return;let reason='';if(!g)reason='先点「新的一局」开一局。';else if(g.phase==='ended')reason='这一局已经结束了，点「新的一局」再打。';else if(state.animating)reason='这一杆还在回放，演完才能操作。';else if(pendingResume())reason='先点提示条上的「点此继续」，再操作这一局。';else if(g.requiresRerack)reason='上一杆开球不合法，先点「重摆开球」。';else if(g.ballInHand)reason='先在台面上把母球摆好。';solve.disabled=Boolean(reason);solve.title=reason;const shootReason=
+reason||
+(!state.gSolution?.found?'先点「求解」，再来打这一杆。':'');shoot.disabled=Boolean(shootReason);shoot.title=shootReason;}
+function updateUndoButton(){const btn=$('gUndo');if(!btn)return;const n=state.history.length;const pending=pendingResume();btn.disabled=n===0||state.animating||pending;btn.textContent=undoLabel(n);btn.title=state.animating
+?'这一杆还在回放，演完才能撤销'
+:pending
+?'先点提示条上的「点此继续」，再决定要不要撤销。'
+:n===0
+?'这一局还没有可以撤销的一杆。'
+:'';}
 function undoGame(){if(state.animating){setReport('这一杆还在回放（对手出杆也算），演完才能撤销——现在撤，下一秒的球位又会盖回来。');return;}
 const prev=state.history.pop();if(!prev){setReport('已经退到这一局的起点了，没有更早的局面可退。');return;}
 state.game=prev;if(Array.isArray(state.shotLog)){const keep=Number(prev.shots)||0;state.shotLog=state.shotLog.filter((e)=>e&&e.shot<=keep);}
-state.generation+=1;state.gSolution=null;state.placing=Boolean(prev.ballInHand);canvas.classList.toggle('placing',state.placing);$('gRerack').classList.toggle('hidden',!prev.requiresRerack);setReport(`已撤销一步，回到第 ${prev.shots} 杆之后的局面。`);$('gAdvice').textContent=prev.phase==='ended'?'这一局结束了。':'—';$('gAdvice').className='empty';$('gVerdict').textContent='撤销后要重新「求解」，原来那份方案对应的是旧局面。';updateScore();updateLog();updateUndoButton();render();state.opponentThinking=false;Object.assign(state,reduceAutoPause(state,'undo'));updateAutoPauseBar();}
+state.generation+=1;state.gSolution=null;state.placing=Boolean(prev.ballInHand);canvas.classList.toggle('placing',state.placing);$('gRerack').classList.toggle('hidden',!prev.requiresRerack);setReport(`已撤销一步，回到第 ${prev.shots} 杆之后的局面。`);$('gAdvice').textContent=prev.phase==='ended'?'这一局结束了。':'—';$('gAdvice').className='empty';$('gVerdict').textContent='撤销后要重新「求解」，原来那份方案对应的是旧局面。';clearOpponentMark();updateScore();updateLog();updateUndoButton();render();state.opponentThinking=false;Object.assign(state,reduceAutoPause(state,'undo'));updateAutoPauseBar();}
 function maybeOpponentTurn(){const g=state.game;if(!shouldAutoShoot(state))return;if(g.requiresRerack){setReport('对手开球不合法，需要重摆——点「重摆开球」继续。');$('gRerack').classList.remove('hidden');return;}
 state.opponentThinking=true;$('gAdvice').textContent='对手在算这一杆……';$('gAdvice').className='empty';const gen=state.generation;requestAnimationFrame(()=>{if(gen!==state.generation)return;runOpponentTurn(gen);});}
 function runOpponentTurn(gen=state.generation){const g=state.game;if(!g||g.phase==='ended'||state.animating){state.opponentThinking=false;return;}
@@ -402,7 +430,10 @@ r.kind==='break'
 ?'没有进攻机会，直接撞球'
 :r.kind==='safety'
 ?'打防守'
-:describeCandidate(r.plan);setReport(`<b>对手</b>${placedNote}：${shotNote}<div>正在打……</div>`);$('gAdvice').textContent='对手出杆中……';$('gAdvice').className='empty';pushHistory(g);replay(r.facts.frames,r.facts.dt,()=>{if(gen!==state.generation)return;state.game=r.next;recordTolerance(r.next.shots,r.plan);state.opponentThinking=false;state.placing=Boolean(r.next.ballInHand)&&r.next.turn===0;canvas.classList.toggle('placing',state.placing);const chosen=r.scores?.[0];const tail=[];if(chosen){const tol=chosen.myToleranceDeg??chosen.opponentToleranceDeg;const behind=`打完留给你最好打的一杆容错 ±${tol.toFixed(2)}°`;tail.push(r.scores.length>1?`在 ${r.scores.length} 个能进的方案里挑的：${behind}`:behind);}
+:describeCandidate(r.plan);setReport(`<b>对手</b>${placedNote}：${shotNote}<div>正在打……</div>`);$('gAdvice').textContent='对手出杆中……';$('gAdvice').className='empty';clearOpponentMark();pushHistory(g);replay(r.facts.frames,r.facts.dt,()=>{if(gen!==state.generation)return;state.game=r.next;recordTolerance(r.next.shots,r.plan);state.opponentThinking=false;state.placing=Boolean(r.next.ballInHand)&&r.next.turn===0;canvas.classList.toggle('placing',state.placing);const chosen=r.scores?.[0];const tail=[];if(chosen){const tol=chosen.myToleranceDeg??chosen.opponentToleranceDeg;const behind=
+Number.isFinite(tol)&&tol<0.005
+?'打完留给你最好打的一杆：几乎必进（容错 <0.01°）'
+:`打完留给你最好打的一杆容错 ±${Number(tol).toFixed(2)}°`;tail.push(r.scores.length>1?`在 ${r.scores.length} 个能进的方案里挑的：${behind}`:behind);}
 setReport(
 reportHtml(r.report,{next:r.next,
 prefix:'<b>对手</b> · ',
@@ -433,7 +464,7 @@ Math.abs(m.tipA)<0.03
 ?`右塞 +${m.tipA.toFixed(2)}`
 :`左塞 ${m.tipA.toFixed(2)}`;updateCueBallPad();updatePowerMeterUI(tier,m.speed);state.manual.strokeOffset=tier.ratio*0.12;}
 function applySolutionToManual(){const inGame=state.mode==='game';const sol=inGame?state.gSolution:state.solution;if(!sol?.found||!sol.best){setAdvice('先求解，才有参数可以套用。','');return;}
-const b=sol.best;state.manual.speed=Math.round(clamp(b.speed,Number($('power').min),Number($('power').max))*20)/20;state.manual.aimOffsetDeg=0;state.manual.tipB=b.tip.b??0;state.manual.tipA=b.tip.a??0;state.manual.touched=true;$('power').value=String(state.manual.speed);$('aimOffset').value='0';$('tipB').value=String(state.manual.tipB);$('tipA').value=String(state.manual.tipA);updateManualLabels();if(inGame){$('gAdvice').textContent=`已套用求解参数：${state.manual.speed.toFixed(2)} m/s · ${b.tip.name}。用滑块微调后再打。`;$('gAdvice').className='';}else{setAdvice(`已套用求解参数：${state.manual.speed.toFixed(2)} m/s · ${b.tip.name}。用滑块微调后再打。`,'');}}
+const b=sol.best;state.manual.speed=Math.round(clamp(b.speed,Number($('power').min),Number($('power').max))*100)/100;state.manual.aimOffsetDeg=0;state.manual.tipB=b.tip.b??0;state.manual.tipA=b.tip.a??0;state.manual.touched=true;$('power').value=state.manual.speed.toFixed(2);$('aimOffset').value='0';$('tipB').value=String(state.manual.tipB);$('tipA').value=String(state.manual.tipA);updateManualLabels();if(inGame){$('gAdvice').textContent=`已套用求解参数：${state.manual.speed.toFixed(2)} m/s · ${b.tip.name}。用滑块微调后再打。`;$('gAdvice').className='';}else{setAdvice(`已套用求解参数：${state.manual.speed.toFixed(2)} m/s · ${b.tip.name}。用滑块微调后再打。`,'');}}
 function shootManual(){if(state.animating)return;readManualControls();const aim=currentAim(state);if(!aim){if(state.mode==='game')$('gAdvice').textContent='台面上没有可以打的球。';else setAdvice('台面上没有可以打的球。','');return;}
 const angle=aim.angle+(state.manual.aimOffsetDeg*Math.PI)/180;const shot={angle,
 speed:state.manual.speed,
@@ -457,7 +488,7 @@ aim.from==='solution'?'方向取自求解结果 + 你调的偏移':'方向直指
 function shootGameWith(shot,aim){const g=state.game;if(!g||g.phase==='ended')return;if(state.autoOpponent&&!state.autoPaused&&g.turn===1)return;if(g.requiresRerack){$('gAdvice').textContent='上一杆开球不合法，先点「重摆开球」。';return;}
 if(g.ballInHand){$('gAdvice').textContent='先把母球摆到台面上。';return;}
 const facts=simulateShot(table,g.balls,shot,{record:true,dt:SEARCH_DT});const{next,report}=resolveShot(g,facts);pushHistory(g);const gen=state.generation;replay(facts.frames,facts.dt,()=>{if(gen!==state.generation)return;finishGameShot(next,report,gen);});void aim;}
-function finishGameShot(next,report,gen){state.game=next;state.gSolution=null;state.placing=Boolean(next.ballInHand);canvas.classList.toggle('placing',state.placing);setReport(reportHtml(report,{next,spotted:'any',pendingChoiceHint:true}));$('gRerack').classList.toggle('hidden',!next.requiresRerack);updateChoicePanel(next);$('gAdvice').textContent=next.phase==='ended'?'这一局结束了。':'—';$('gAdvice').className='empty';$('gVerdict').textContent='';updateScore();updateLog();updateUndoButton();render();Object.assign(state,reduceAutoPause(state,'user-shot'));updateAutoPauseBar();if(gen===state.generation)maybeOpponentTurn();}
+function finishGameShot(next,report,gen){state.game=next;state.gSolution=null;state.placing=Boolean(next.ballInHand);canvas.classList.toggle('placing',state.placing);setReport(reportHtml(report,{next,spotted:'any',pendingChoiceHint:true}));$('gRerack').classList.toggle('hidden',!next.requiresRerack);updateChoicePanel(next);$('gAdvice').textContent=next.phase==='ended'?'这一局结束了。':'—';$('gAdvice').className='empty';$('gVerdict').textContent='';clearOpponentMark();updateScore();updateLog();updateUndoButton();render();Object.assign(state,reduceAutoPause(state,'user-shot'));updateAutoPauseBar();if(gen===state.generation)maybeOpponentTurn();}
 function updateChoicePanel(g){const pending=g?.pendingChoice??null;if(!pending){$('gChoice').classList.add('hidden');return;}
 if(pending.player===1){$('gChoice').classList.add('hidden');const next=acceptTable(g);state.game=next;setReport(`${esc(next.players[1].name)}选择照这样打。`);return;}
 $('gChoice').classList.remove('hidden');}
@@ -486,7 +517,7 @@ setReport('没有可用的存档。');refreshSaveInfo();return;}
 applyLoadedGame(saved);state.saveSession=readSaveMeta()?.session??TAB_SESSION;}
 function applyLoadedGame(saved){if(saved.table.id!==table.preset){const okTable=TABLE_PRESETS[saved.table.id];if(!okTable){setReport(`存档用的球台（${saved.table.id}）这个版本不认识，读不了。`);return;}
 setTablePreset(saved.table.id);}
-const balls=saved.balls.map((b)=>createBall(b.id,b.x,b.y,b));const g=createGame(table,balls,{names:saved.players.map((p)=>p.name),kind:saved.kind});state.gameKind=g.kind;$('gameKind').value=g.kind;restoreGameState(g,saved);state.generation+=1;state.game=g;matchedGeneration=state.generation;state.gSolution=null;state.animating=false;state.opponentThinking=false;state.placing=Boolean(g.ballInHand);canvas.classList.toggle('placing',state.placing);const decoded=unpackHistory(saved.history,g);state.history=decoded.entries;state.shotLog=[];const missing=Math.max(decoded.dropped,saved.shots-decoded.entries.length);state.historyNote=missing>0?`更早的 ${missing} 步未随存档保存`:null;state.saveStamp=saved.savedAt;state.saveOverwrite=false;Object.assign(state,reduceAutoPause(state,'load'));updateUndoButton();$('gRerack').classList.toggle('hidden',!g.requiresRerack);$('gAdvice').textContent='—';$('gAdvice').className='empty';$('gVerdict').textContent='';setReport(`已读取存档：第 ${g.shots} 杆，轮到「${esc(g.players[g.turn].name)}」。`);if(state.mode!=='game')setMode('game');updateScore();updateLog();render();updateAutoPauseBar();maybeOpponentTurn();}
+const balls=saved.balls.map((b)=>createBall(b.id,b.x,b.y,b));const g=createGame(table,balls,{names:saved.players.map((p)=>p.name),kind:saved.kind});state.gameKind=g.kind;$('gameKind').value=g.kind;restoreGameState(g,saved);state.generation+=1;state.game=g;matchedGeneration=state.generation;state.gSolution=null;state.animating=false;state.opponentThinking=false;state.placing=Boolean(g.ballInHand);canvas.classList.toggle('placing',state.placing);const decoded=unpackHistory(saved.history,g);state.history=decoded.entries;state.shotLog=[];const missing=Math.max(decoded.dropped,saved.shots-decoded.entries.length);state.historyNote=missing>0?`更早的 ${missing} 步未随存档保存`:null;state.saveStamp=saved.savedAt;state.saveOverwrite=false;Object.assign(state,reduceAutoPause(state,'load'));updateUndoButton();$('gRerack').classList.toggle('hidden',!g.requiresRerack);$('gAdvice').textContent='—';$('gAdvice').className='empty';$('gVerdict').textContent='';clearOpponentMark();setReport(`已读取存档：第 ${g.shots} 杆，轮到「${esc(g.players[g.turn].name)}」。`);if(state.mode!=='game')setMode('game');updateScore();updateLog();render();updateAutoPauseBar();maybeOpponentTurn();}
 function removeSave(){const ok=clearSave();state.saveStamp=null;state.saveSession=TAB_SESSION;state.saveOverwrite=false;setReport(ok?'存档已删除。':'删不了——浏览器禁用了本地存储。');refreshSaveInfo();}
 function exportGameText(now=Date.now()){const g=state.game;if(!g)return null;return JSON.stringify(serialize(g,now,state.history),null,2);}
 function importGameText(text){let raw;try{raw=JSON.parse(text);}catch{return{ok:false,reason:'这个文件不是 JSON，可能选错了。'};}

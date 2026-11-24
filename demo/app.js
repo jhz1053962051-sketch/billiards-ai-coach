@@ -266,8 +266,7 @@ function resetLayout() {
   createWorld(table, state.balls);
   refreshBallPicker();
   setAdvice('点「求解最佳方案」开始。', '');
-  $('alts').innerHTML = '—';
-  $('alts').className = 'empty';
+  setAltsEmpty();
   render();
 }
 
@@ -380,8 +379,23 @@ function clearSolution(text) {
   state.practiceRecorded = false;
   updatePracticeFeedback();
   if (text) setAdvice(text, '');
+  setAltsEmpty();
+}
+
+/**
+ * 备选卡的空状态。
+ *
+ * 没有备选时整张卡藏起来，不留一张写着「—」的空卡：手机窄屏下这张卡排在
+ * 「AI 击球战术」上面（@media 里 order:-1），首屏第一眼就是一块只有标题和
+ * 一个破折号的空白（真机走查报的那条）。有方案时 renderAlts 再把它放回来。
+ */
+function setAltsEmpty() {
   $('alts').innerHTML = '—';
   $('alts').className = 'empty';
+  $('altsCard').classList.add('hidden');
+  // 方案没了，「演示按建议力度 X m/s」这句话也就过期了，一起收起来。
+  $('shootNote').textContent = '';
+  $('shootNote').classList.add('hidden');
 }
 
 /** 换球台。换完必须重摆，因为旧台的球坐标对新台尺寸没有意义。 */
@@ -1264,32 +1278,66 @@ function recordPracticeOutcome(made) {
   return true;
 }
 
+/**
+ * 把建议力度写进手打滑条。
+ *
+ * 求解给的 best.speed 是任意浮点（几何解出来的 seedSpeed × 力度系数），滑条只能
+ * 停在格子上。滑条 step 改成 0.01、界面上的力度一直按两位小数显示，所以这里也
+ * 取到两位：建议值、滑条值、力度标签从此是同一个数，不会出现「求解说轻力、力度
+ * 条却在爆杆」。
+ *
+ * 只动 UI 这一侧：演示这一杆照样拿 best.speed 本身跑仿真，精度没被滑条吃掉。
+ */
+function syncPowerToSolution(speed) {
+  const el = $('power');
+  const v = Math.round(clamp(speed, Number(el.min), Number(el.max)) * 100) / 100;
+  state.manual.speed = v;
+  el.value = v.toFixed(2);
+  updateManualLabels();
+  return v;
+}
+
+/**
+ * 结论徽章：只留一个分数和一句人话。
+ *
+ * coach() 给的 verdict 里塞了两个分数（综合 / 单杆难度）和一个毫秒数：两个分数
+ * 读不出区别，毫秒是给我们自己看性能的，对球友没有意义。
+ */
+function scoreBadge(score, label) {
+  return `难度 ${Math.round(score)}/100（${label}）· ${difficultyCaveat()}`;
+}
+
 function runSolve() {
   state.practiceRecorded = false;
   // 局面要重新算了，上一次导出的图不再代表这一杆
   invalidateShare();
-  const t0 = performance.now();
   const all = solveShot(table, state.balls);
-  const ms = performance.now() - t0;
   const card = coach(table, state.balls, { candidates: all });
   state.solution = card;
   updatePracticeFeedback();
 
   if (!card.found) {
     setAdvice(card.message, '');
-    $('alts').innerHTML = '—';
-    $('alts').className = 'empty';
+    setAltsEmpty();
     render();
     return;
   }
 
   const cls = card.best.difficulty > 80 ? 'brutal' : card.best.difficulty > 55 ? 'hard' : '';
-  setAdvice(card.message, `${card.verdict} · 求解 ${ms.toFixed(0)} ms`, cls);
-  renderAlts(card, ms);
+  // 建议力度同步进手打滑条。不同步的话，求解说「轻力」而力度条还停在爆杆那一档
+  // （演示这一杆用的是 best.speed，滑条只喂手打），用户看到的是两句互相打脸的话。
+  // 只动 UI：演示仍然用 best.speed 本身跑仿真。
+  const speed = syncPowerToSolution(card.best.speed);
+  const score = card.best.value ?? card.best.difficulty;
+  setAdvice(card.message, scoreBadge(score, difficultyLabel(score)), cls);
+  renderAlts(card);
+  $('shootNote').textContent = `演示这一杆按建议力度 ${speed.toFixed(2)} m/s 打（左边滑条已同步到同一档）。`;
+  $('shootNote').classList.remove('hidden');
   render();
 }
 
-function renderAlts(card, ms) {
+function renderAlts(card) {
+  $('altsCard').classList.remove('hidden');
   $('alts').className = '';
   $('alts').innerHTML = '';
   const list = [card.best, ...card.alternatives];
@@ -1328,17 +1376,17 @@ function renderAlts(card, ms) {
         ...card,
         best: c,
         message: describeCandidate(c),
-        verdict: `${difficultyLabel(v)}（综合 ${v}/100 · 单杆难度 ${c.difficulty}/100 · ${difficultyCaveat()}）`,
+        verdict: scoreBadge(v, difficultyLabel(v)),
       };
       state.practiceRecorded = false;
       updatePracticeFeedback();
       for (const el of $('alts').querySelectorAll('.alt')) el.classList.toggle('active', el === row);
       const dd = c.difficulty;
-      setAdvice(
-        state.solution.message,
-        state.solution.verdict + (ms ? ` · 求解 ${ms.toFixed(0)} ms` : ''),
-        dd > 80 ? 'brutal' : dd > 55 ? 'hard' : ''
-      );
+      setAdvice(state.solution.message, state.solution.verdict, dd > 80 ? 'brutal' : dd > 55 ? 'hard' : '');
+      // 换方案等于换力度：滑条和下面那行说明也得跟着换，否则又回到「建议和滑条
+      // 各说各话」。
+      const speed = syncPowerToSolution(c.speed);
+      $('shootNote').textContent = `演示这一杆按建议力度 ${speed.toFixed(2)} m/s 打（左边滑条已同步到同一档）。`;
       render();
     });
     // 标了 role=button + tabIndex，键盘也得能按，否则焦点停在上面按回车没反应
@@ -1440,6 +1488,38 @@ function replay(frames, dt, onDone) {
   }
 }
 
+/**
+ * 演示一杆之后的结论。
+ *
+ * 原来点完「演示这一杆」，球散开、动画停住，页面上没有一句话说这一杆成没成：
+ * #advice 还停在求解时的建议上，#verdict 还是求解徽章，#report 还写着「点
+ * 「新的一局」开始。」——新手只能自己盯着台面猜。这里给一行明确结论，并说清
+ * 差多少（落点是仿真里的真实球位，不是估算）。
+ */
+function practiceConclusion(balls, best) {
+  const number = best.targetNumber;
+  const wanted = pocketName(best.pocketId);
+  const target = balls.find((b) => b.id === best.targetId);
+  if (target?.pocketed && target.pocket === best.pocketId) {
+    return { ok: true, text: `✓ 进袋：${number} 号进了${wanted}` };
+  }
+  if (target?.pocketed) {
+    return {
+      ok: false,
+      text: `✗ 没进：建议打${wanted}，${number} 号却落进了${pocketName(target.pocket)}`,
+    };
+  }
+  const pocket = table.pockets.find((p) => p.id === best.pocketId);
+  if (target && pocket) {
+    const gap = Math.hypot(target.x - pocket.x, target.y - pocket.y) - pocket.captureR;
+    return {
+      ok: false,
+      text: `✗ 没进：${number} 号停在${wanted}外，差 ${Math.max(0, gap * 100).toFixed(1)} 厘米`,
+    };
+  }
+  return { ok: false, text: `✗ 没进：${number} 号没有进${wanted}` };
+}
+
 function shootPractice() {
   const sol = state.solution;
   if (!sol || !sol.found) {
@@ -1463,15 +1543,38 @@ function shootPractice() {
   const gen = state.generation;
   replay(frames, dt, () => {
     if (gen !== state.generation || state.balls.length !== original.length) return;
-    const target = state.balls.find((b) => b.id === best.targetId);
-    const ok = Boolean(target && target.pocketed && target.pocket === best.pocketId);
-    setAdvice((ok ? '✓ 进球。' : '✗ 这一杆没进（袋口或力度需要微调）。') + ' ' + sol.message, sol.verdict);
+    // 结论要在还原球位之前取：restorePositions 会把 pocketed / 落点一起抹掉。
+    const conclusion = practiceConclusion(state.balls, best);
     restorePositions(state.balls, original);
+    const score = best.value ?? best.difficulty;
+    // ✓ / ✗ 打头是 E2E 认的契约（E2E 用 startsWith('✓') 判演示成功）。
+    setAdvice(
+      `${conclusion.text}。${best.speed.toFixed(2)} m/s · ${sol.message}`,
+      `${conclusion.text} · ${scoreBadge(score, difficultyLabel(score))}`,
+      conclusion.ok ? '' : 'miss'
+    );
+    // 播报位也记一条：球局面板的「这一杆播报」原来一直停在「点「新的一局」开始。」，
+    // 练完一杆回头看不出刚发生了什么。
+    setReport(
+      `练习演示：${conclusion.text}（按建议力度 ${best.speed.toFixed(2)} m/s 跑的仿真，不计入实战统计）。`
+    );
     render();
   });
 }
 
 // ---------------------------------------------------------------- 球局
+
+/**
+ * 撤掉「对手方案」标记。
+ *
+ * 标记的意义是「这张卡里装的是对手的打法」，只在刚给对手算过的那一份方案上有
+ * 效。换局面（重开 / 撤销 / 读档 / 自己打了一杆 / 对手自己打完）之后卡片内容不是
+ * 那份方案了，标记必须跟着撤——留着就是给错的内容盖了个公章。
+ */
+function clearOpponentMark() {
+  $('gAdviceCard').classList.remove('opponent');
+  $('gAdviceTag').classList.add('hidden');
+}
 
 function newGame() {
   // 玩法决定摆球：黑八摆三角 15 颗、九球摆菱形 9 颗。
@@ -1502,6 +1605,7 @@ function newGame() {
   $('gAdvice').textContent = '—';
   $('gAdvice').className = 'empty';
   $('gVerdict').textContent = '';
+  clearOpponentMark();
   $('gRerack').classList.add('hidden');
   $('gChoice').classList.add('hidden');
   updateScore();
@@ -1679,8 +1783,16 @@ function updateMatchStats() {
     parts.push('<p class="hint">开一局球，打完在这里看复盘。</p>');
   }
 
+  // 这行文案必须跟着「有没有打完的对局」走。原来不管三七二十一都写「还没有打完
+  // 的对局」，于是终局时上面一行是「本局结果 负」，下面一行说还没打完——自己跟
+  // 自己打架。存不下战绩（浏览器禁了本地存储）是另一件事，也要分开说。
+  const ended = Boolean(g && g.phase === 'ended');
   if (!history.length) {
-    parts.push('<p class="hint">还没有打完的对局——一局结束会自动记一条。</p>');
+    parts.push(
+      ended
+        ? '<p class="hint">这一局打完了，但战绩没能存下来（浏览器可能禁用了本地存储）。</p>'
+        : '<p class="hint">还没有打完的对局——一局结束会自动记一条。</p>'
+    );
   } else {
     parts.push('<div class="match-title">最近 5 场</div><ul class="match-list">');
     for (const m of history.slice(-5).reverse()) {
@@ -1706,6 +1818,13 @@ function updateMatchStats() {
           .join('') +
         '</div>'
     );
+    // 刚打完这一局：明确说一句「记上了」，别让人对着历史列表猜这一局到底进没进
+    // 战绩（终局那一屏最容易让人不放心）。
+    if (ended) {
+      parts.push(
+        `<p class="hint">战绩已记录（共 ${sum.matches} 场）——刚打完的这一局也在里面。</p>`
+      );
+    }
   }
   box.innerHTML = parts.join('');
   // 这一局刚打完（或刚被撤销 / 读档）时，「复盘这一局」的可用性要跟着变
@@ -1720,6 +1839,8 @@ function updateMatchStats() {
  */
 function updateAutoPauseBar() {
   const bar = $('autoPauseBar');
+  // 提示条出现/消失就是「该按哪个按钮」变了，顺便把按钮的可用性对齐。
+  syncGameGates();
   if (!bar) return;
   const hint = state.mode === 'game' ? autoPauseHint(state) : null;
   if (!hint) {
@@ -1759,6 +1880,7 @@ function gameSolve() {
     $('gAdvice').textContent = '现在是对手回合，不用你算——它会自己打。';
     $('gAdvice').className = 'empty';
     $('gVerdict').textContent = '';
+    clearOpponentMark();
     return;
   }
   if (state.animating) return;
@@ -1766,24 +1888,29 @@ function gameSolve() {
     $('gAdvice').textContent = '上一杆开球不合法，必须先点「重摆开球」——规则里这一杆不算数。';
     $('gAdvice').className = 'empty';
     $('gVerdict').textContent = '';
+    clearOpponentMark();
     return;
   }
   if (g.ballInHand) {
     $('gAdvice').textContent = '先把母球摆到台面上（在合法区里点一下）。';
     $('gAdvice').className = 'empty';
+    clearOpponentMark();
     return;
   }
   const onTable = numbersOnTable(g.balls);
   const allow = legalTargetNumbers(g, onTable);
-  const t0 = performance.now();
+  // 这次求解是给谁算的：轮到对手（自动出杆关掉或暂停时玩家可以替它算）时，
+  // 方案是「它怎么打你」，必须跟自己的建议区分开。
+  const asOpponent = g.turn === 1;
   const { plan, kind, alternatives } = planShot(table, g, { allow, safety: state.allowSafety });
-  const ms = performance.now() - t0;
 
   if (!plan) {
     state.gSolution = { found: false };
     $('gAdvice').textContent = '台面上没有可以合法先碰的球。';
     $('gAdvice').className = 'empty';
     $('gVerdict').textContent = '';
+    clearOpponentMark();
+    syncGameGates();
     render();
     return;
   }
@@ -1800,15 +1927,22 @@ function gameSolve() {
         : kind === 'safety'
           ? '防守'
           : difficultyLabel(plan.value ?? plan.difficulty);
-  const diffTxt =
+  // 一个分数 + 一句人话就够了：原来塞了两个分数和一个毫秒数，「综合 10.7」和
+  // 「单杆难度 32.3」读不出区别，14 ms 是给我们自己看的。
+  const badgeText =
     kind === 'attack'
-      ? `（综合 ${plan.value ?? plan.difficulty}/100 · 单杆难度 ${plan.difficulty}/100 · ${difficultyCaveat()}）`
+      ? scoreBadge(plan.value ?? plan.difficulty, kindLabel)
       : kind === 'safety'
-        ? `（对手容错 ±${plan.safetyOppToleranceDeg.toFixed(2)}° · 从 ±${plan.safetyBaseToleranceDeg.toFixed(2)}° 压下来）`
-        : '';
-  $('gVerdict').textContent = `${kindLabel}${diffTxt} · 求解 ${ms.toFixed(0)} ms`;
+        ? `${kindLabel}（对手容错 ±${plan.safetyOppToleranceDeg.toFixed(2)}° · 从 ±${plan.safetyBaseToleranceDeg.toFixed(2)}° 压下来）`
+        : kindLabel;
+  $('gVerdict').textContent = badgeText;
   $('gVerdict').className =
     kind === 'attack' && plan.difficulty > 80 ? 'brutal' : kind === 'attack' && plan.difficulty > 55 ? 'hard' : '';
+  // 角标 + 换色说清这份方案是给对手的：不然「防守：打 4 号球偏 -5°」会被当成
+  // 给自己的建议，照着打等于替对手打了一杆最好的球。
+  $('gAdviceCard').classList.toggle('opponent', asOpponent);
+  $('gAdviceTag').classList.toggle('hidden', !asOpponent);
+  syncGameGates();
   render();
 }
 
@@ -1860,6 +1994,7 @@ function gameShoot() {
     $('gAdvice').textContent = next.phase === 'ended' ? '这一局结束了。' : '—';
     $('gAdvice').className = 'empty';
     $('gVerdict').textContent = '';
+    clearOpponentMark();
     updateScore();
     updateLog();
     render();
@@ -1914,15 +2049,68 @@ function pushHistory(game) {
   updateUndoButton();
 }
 
+/**
+ * 「读档 / 撤销之后，就等你点一下继续」这个状态。
+ *
+ * 这几种局面下自动出杆被暂停、原来那份方案也作废了：能做的只有一件事——点提示
+ * 条上的「点此继续」。但界面上同时有「打这一杆」「求解」亮着（点了没反应）和 AI
+ * 卡上那句「先点「求解」」，三条指引各说各的，谁也不知道该信哪条。这里把它算成
+ * 一个明确的状态，让 syncGameGates 把别的入口关掉。
+ */
+function pendingResume() {
+  const g = state.game;
+  if (state.mode !== 'game' || !g || g.phase === 'ended') return false;
+  if (!state.autoPaused) return false;
+  return state.autoPauseReason === 'load' || state.autoPauseReason === 'undo';
+}
+
+/**
+ * 「求解 / 打这一杆」两个按钮的可用性（撤销按钮在 updateUndoButton 里）。
+ *
+ * 只留一个下一步入口：能点的一定是现在该点的那一个，灰掉的都在 title 里说清
+ * 为什么灰——用户原来遇到的正是「按钮可点但没反应」。
+ */
+function syncGameGates() {
+  const g = state.game;
+  const solve = $('gSolve');
+  const shoot = $('gShoot');
+  if (!solve || !shoot) return;
+
+  let reason = '';
+  if (!g) reason = '先点「新的一局」开一局。';
+  else if (g.phase === 'ended') reason = '这一局已经结束了，点「新的一局」再打。';
+  else if (state.animating) reason = '这一杆还在回放，演完才能操作。';
+  else if (pendingResume()) reason = '先点提示条上的「点此继续」，再操作这一局。';
+  else if (g.requiresRerack) reason = '上一杆开球不合法，先点「重摆开球」。';
+  else if (g.ballInHand) reason = '先在台面上把母球摆好。';
+
+  solve.disabled = Boolean(reason);
+  solve.title = reason;
+  // 「打这一杆」多一道门槛：没有方案就没得打（原来点了只会在卡片上写一句
+  // 「先点「求解」」，看着像按钮坏了）。
+  const shootReason =
+    reason ||
+    (!state.gSolution?.found ? '先点「求解」，再来打这一杆。' : '');
+  shoot.disabled = Boolean(shootReason);
+  shoot.title = shootReason;
+}
+
 function updateUndoButton() {
   const btn = $('gUndo');
   if (!btn) return;
   const n = state.history.length;
-  btn.disabled = n === 0 || state.animating;
+  const pending = pendingResume();
+  btn.disabled = n === 0 || state.animating || pending;
   btn.textContent = undoLabel(n);
-  // 灰掉的原因要说得出口：回放中（对手出杆也算）和「没得撤」是两回事，
-  // 只说「不能点」会让人以为撤销坏了。
-  btn.title = state.animating ? '这一杆还在回放，演完才能撤销' : '';
+  // 灰掉的原因要说得出口：回放中（对手出杆也算）、等你点继续、和「没得撤」是
+  // 三回事，只说「不能点」会让人以为撤销坏了。
+  btn.title = state.animating
+    ? '这一杆还在回放，演完才能撤销'
+    : pending
+      ? '先点提示条上的「点此继续」，再决定要不要撤销。'
+      : n === 0
+        ? '这一局还没有可以撤销的一杆。'
+        : '';
 }
 
 function undoGame() {
@@ -1953,6 +2141,7 @@ function undoGame() {
   $('gAdvice').textContent = prev.phase === 'ended' ? '这一局结束了。' : '—';
   $('gAdvice').className = 'empty';
   $('gVerdict').textContent = '撤销后要重新「求解」，原来那份方案对应的是旧局面。';
+  clearOpponentMark();
   updateScore();
   updateLog();
   updateUndoButton();
@@ -2032,6 +2221,8 @@ function runOpponentTurn(gen = state.generation) {
   setReport(`<b>对手</b>${placedNote}：${shotNote}<div>正在打……</div>`);
   $('gAdvice').textContent = '对手出杆中……';
   $('gAdvice').className = 'empty';
+  // 对手自己出杆了：卡片上那份「对手方案」已经过期（而且它正按那份方案打）。
+  clearOpponentMark();
   pushHistory(g);
 
   replay(r.facts.frames, r.facts.dt, () => {
@@ -2048,7 +2239,12 @@ function runOpponentTurn(gen = state.generation) {
     if (chosen) {
       // 算过第三层就用「对手回完我之后」剩下的容错，那才是真实的难度
       const tol = chosen.myToleranceDeg ?? chosen.opponentToleranceDeg;
-      const behind = `打完留给你最好打的一杆容错 ±${tol.toFixed(2)}°`;
+      // 「容错 ±0.00°」对读者没有信息量，看上去像是数据坏了：那其实是「这杆留得
+      // 几乎是必进球」，用一句人话说掉。
+      const behind =
+        Number.isFinite(tol) && tol < 0.005
+          ? '打完留给你最好打的一杆：几乎必进（容错 <0.01°）'
+          : `打完留给你最好打的一杆容错 ±${Number(tol).toFixed(2)}°`;
       tail.push(r.scores.length > 1 ? `在 ${r.scores.length} 个能进的方案里挑的：${behind}` : behind);
     }
     // 对手这一杆：前缀 + 只在轮到玩家时才写持球 + 末尾接选杆说明（见 reportHtml 的注释）
@@ -2204,12 +2400,13 @@ function applySolutionToManual() {
     return;
   }
   const b = sol.best;
-  state.manual.speed = Math.round(clamp(b.speed, Number($('power').min), Number($('power').max)) * 20) / 20;
+  // 滑条 step 是 0.01，这里也取两位：对齐格子，别让「套用」之后的数和建议值差一截。
+  state.manual.speed = Math.round(clamp(b.speed, Number($('power').min), Number($('power').max)) * 100) / 100;
   state.manual.aimOffsetDeg = 0;
   state.manual.tipB = b.tip.b ?? 0;
   state.manual.tipA = b.tip.a ?? 0;
   state.manual.touched = true;
-  $('power').value = String(state.manual.speed);
+  $('power').value = state.manual.speed.toFixed(2);
   $('aimOffset').value = '0';
   $('tipB').value = String(state.manual.tipB);
   $('tipA').value = String(state.manual.tipA);
@@ -2345,6 +2542,7 @@ function finishGameShot(next, report, gen) {
   $('gAdvice').textContent = next.phase === 'ended' ? '这一局结束了。' : '—';
   $('gAdvice').className = 'empty';
   $('gVerdict').textContent = '';
+  clearOpponentMark();
   updateScore();
   updateLog();
   updateUndoButton();
@@ -2522,6 +2720,7 @@ function applyLoadedGame(saved) {
   $('gAdvice').textContent = '—';
   $('gAdvice').className = 'empty';
   $('gVerdict').textContent = '';
+  clearOpponentMark();
   setReport(`已读取存档：第 ${g.shots} 杆，轮到「${esc(g.players[g.turn].name)}」。`);
   if (state.mode !== 'game') setMode('game');
   updateScore();

@@ -301,7 +301,7 @@ console.log('练习·求解:', solved);
   );
   // 求解完成后状态行要换成「下一步做什么」，不能还留着求解前那句、也不能空
   const hint = await evaluate(`document.getElementById('practiceMessage').textContent`);
-  check('求解后状态行说清下一步', /点「进了」或「没进」/.test(hint), hint);
+  check('求解后状态行说清下一步', /「实战打进」或「实战没进」/.test(hint), hint);
 }
 
 // 架杆：几何上能进不等于人打得着。母球贴库时杆尾要翘，教练卡必须说出来，
@@ -797,9 +797,10 @@ check(
 // 两步选杆要在界面上说出来：对手不是"随便打一杆"，而是在能进的方案里挑了一个
 // 让你最难上手的。这条只查播报里有没有这句话——选杆本身由 Node 侧的对手测试守着。
 const lookaheadNote = await evaluate(`document.getElementById('report').textContent`);
+// 容错极小（<0.01°）时界面会说「几乎必进」，否则报具体角度——两支都算说清了。
 check(
   '对手出杆后说明它在几个方案里挑的',
-  /打完留给你最好打的一杆容错 ±[\d.]+°/.test(lookaheadNote),
+  /打完留给你最好打的一杆(容错 ±[\d.]+°|：几乎必进（容错 <0\.01°）)/.test(lookaheadNote),
   (lookaheadNote || '').slice(0, 120)
 );
 

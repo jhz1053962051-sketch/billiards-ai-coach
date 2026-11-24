@@ -69,7 +69,7 @@ return{frames,balls:copy,dt};}
 export const HISTORY_LIMIT=20;export function pushHistoryEntry(history,game,limit=HISTORY_LIMIT){history.push(cloneGame(game));if(history.length>limit)history.shift();return history;}
 export function undoLabel(n){return n===0?'撤销上一杆':`撤销上一杆（${n}）`;}
 export function practiceHint(state){if(state.mode!=='practice')return'';if(!state.solution?.found||!state.solution.best?.pocketId){return'先求解一个目标袋方案，再记录真实练习结果。';}
-if(state.practiceRecorded)return'这一杆记下了。同一个球位可以接着记，换球位就再求解一次。';return'按实际结果点「进了」或「没进」——记下来才看得出进步。';}
+if(state.practiceRecorded)return'这一杆记下了。同一个球位可以接着记，换球位就再求解一次。';return'按实际结果点「实战打进」或「实战没进」——记下来才看得出进步。';}
 export function practiceReady(state){return Boolean(
 state.mode==='practice'&&
 state.solution?.found&&
@@ -159,12 +159,12 @@ return{autoPaused:false,autoPauseReason:null};default:
 return{autoPaused:Boolean(prev?.autoPaused),
 autoPauseReason:prev?.autoPauseReason??null,};}}
 export function shouldAutoShoot(state){const g=state?.game;if(!g||g.phase==='ended')return false;if(!state.autoOpponent||state.autoPaused)return false;if(g.turn!==1)return false;if(state.animating||state.opponentThinking)return false;return true;}
-export function autoPauseHint(state){const g=state?.game;if(!g||g.phase==='ended')return null;if(state.autoPaused){return{level:'paused',
+export function autoPauseHint(state){const g=state?.game;if(!g||g.phase==='ended')return null;if(state.autoPaused){const why=state.autoPauseReason==='undo'?'撤销之后':'读档之后';if(g.turn===1){return{level:'paused',
 canResume:true,
-text:
-state.autoPauseReason==='undo'
-?'已暂停对手自动出杆 —— 撤销之后先让你看清局面，点此继续'
-:'已暂停对手自动出杆 —— 读档之后先让你看清局面，点此继续',};}
+text:`已暂停对手自动出杆 —— ${why}先让你看清局面，点此继续`,};}
+return{level:'paused',
+canResume:true,
+text:`${why}局面先停住不动 —— 点此继续，再按「求解」打这一杆`,};}
 if(!state.autoOpponent&&g.turn===1){return{level:'off',
 canResume:false,
 text:'对手自动出杆已关闭 —— 轮到对手，点「求解」自己打这一杆',};}

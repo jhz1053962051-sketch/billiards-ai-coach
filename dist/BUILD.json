@@ -7,9 +7,9 @@
       "path": "demo/app.js",
       "src": "demo/app.js",
       "mode": "minify",
-      "srcBytes": 147181,
-      "outBytes": 88558,
-      "sha256": "e026a90234ffbd5d44e557e7f4b82123998a6dc274268774b597f0966265b20b"
+      "srcBytes": 156795,
+      "outBytes": 92143,
+      "sha256": "fc5d2e8c7c00015b267610f5a07e03dedb839f1a6de3117935615ae0f3e35033"
     },
     {
       "path": "demo/file-guard.js",
@@ -23,9 +23,9 @@
       "path": "demo/index.html",
       "src": "demo/index.html",
       "mode": "copy",
-      "srcBytes": 76153,
-      "outBytes": 76153,
-      "sha256": "93d2ba084a7d46a1509f5608b5c6eb246fd73353c7082f55fbf578d175e07601"
+      "srcBytes": 78337,
+      "outBytes": 78337,
+      "sha256": "c3a51c5e3d1d7c685d7e33b2bf49254f97a77df8b2a84ca30c7a380f41d56b5a"
     },
     {
       "path": "demo/pose.html",
@@ -71,9 +71,9 @@
       "path": "demo/state.js",
       "src": "demo/state.js",
       "mode": "minify",
-      "srcBytes": 87598,
-      "outBytes": 37099,
-      "sha256": "50db4e3cf83bcc96d7837789e0166e23860cfa05146876add78e999713bae6e6"
+      "srcBytes": 88246,
+      "outBytes": 37202,
+      "sha256": "7f342dc9d8b93b0b85a405193753815b4deb2cf7a524d846ce75d2a48dcde18f"
     },
     {
       "path": "src/aim.js",
@@ -270,8 +270,8 @@
   ],
   "totals": {
     "files": 33,
-    "srcBytes": 21569860,
-    "outBytes": 21188642
+    "srcBytes": 21582306,
+    "outBytes": 21194514
   },
   "firstScreen": {
     "files": [
@@ -296,7 +296,7 @@
       "src/tolerance.js"
     ],
     "count": 19,
-    "srcBytes": 619283,
-    "outBytes": 285702
+    "srcBytes": 629545,
+    "outBytes": 289390
   }
 }

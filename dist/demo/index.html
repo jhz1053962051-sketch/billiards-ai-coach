@@ -296,6 +296,26 @@
     background: linear-gradient(155deg, rgba(16, 185, 129, 0.15) 0%, rgba(28, 41, 56, 0.9) 60%);
     box-shadow: 0 6px 22px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(16, 185, 129, 0.3);
   }
+  /* 轮到对手时这张卡装的是「对手会怎么打你」：换成琥珀色 + 标题角标，别让人
+     把对手的防守方案当成给自己的建议。颜色只换这一张卡，不是全局改主题。 */
+  .card.hero.opponent {
+    border-left-color: #f59e0b;
+    background: linear-gradient(155deg, rgba(245, 158, 11, 0.16) 0%, rgba(28, 41, 56, 0.9) 60%);
+    box-shadow: 0 6px 22px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(245, 158, 11, 0.3);
+  }
+  .card.hero.opponent h2 { color: #fcd34d; }
+  .adv-tag {
+    display: inline-block; margin-left: 8px; padding: 1px 8px; border-radius: 999px;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.02em;
+    color: #1a0f00; background: var(--grad-amber); vertical-align: 2px;
+  }
+  /* 演示一杆之后的结论徽章：进了用默认绿色，没进用红色，别让「✗ 没进」还挂着
+     一片绿色。 */
+  #verdict.miss {
+    color: #fca5a5;
+    background: linear-gradient(135deg, rgba(239, 68, 68, 0.28) 0%, rgba(185, 28, 28, 0.16) 100%);
+    border-color: rgba(248, 113, 113, 0.5);
+  }
   /* 备选方案卡：晴空蓝主题 */
   .card.alts-card {
     border-left: 3px solid #0ea5e9;
@@ -1227,9 +1247,12 @@
     <div id="practicePanel">
       <div class="row" style="margin-bottom:12px">
         <button type="button" id="solve" class="primary" style="flex:1">求解最佳方案</button>
-        <button type="button" id="shoot" style="background:var(--grad-blue);border-color:#38bdf8;color:#fff;font-weight:600">演示这一杆</button>
+        <button type="button" id="shoot" title="按 AI 建议的力度与杆法跑一遍仿真（跟左边手打滑条无关）" style="background:var(--grad-blue);border-color:#38bdf8;color:#fff;font-weight:600">演示这一杆</button>
         <button type="button" id="reset">重置</button>
       </div>
+      <!-- 求解之后才出现：这一杆到底按什么力度演示。不写这句，用户看着滑条停在
+           别处，会以为按钮坏了或者球会被打飞。 -->
+      <div id="shootNote" class="hint hidden" style="margin:-4px 0 10px"></div>
 
       <div class="card hero">
         <h2>AI 击球战术</h2>
@@ -1241,7 +1264,7 @@
       <!-- 备选路线紧跟在「AI 击球战术」下面，不排在专项训练之后：这是教练给出的
            第二层价值（换一条路线怎么打），原来要往下滚才看得到，1440×900 首屏外。
            顺序调整纯属排版，卡片内容与 id 都没动。 -->
-      <div class="card alts-card">
+      <div class="card alts-card hidden" id="altsCard">
         <h2>备选进球路线</h2>
         <!-- 鼠标悬停有变色，触屏没有；不写一句话，手机上看着就是一列文字 -->
         <div class="hint" style="margin-bottom:6px">点某一条就换成那个方案（球杆会跟着转过去）。</div>
@@ -1346,7 +1369,10 @@
 
         <div class="ctrl">
           <label for="power">力度 <b id="powerVal">2.20 m/s</b></label>
-          <input type="range" id="power" min="0.55" max="6.6" step="0.05" value="2.20">
+          <!-- step 0.01 而不是 0.05：求解给出的建议力度是任意浮点（seedSpeed × 系数），
+               0.05 的格子永远对不齐，滑条就只能停在「附近」的另一个数上，看上去像是
+               没同步。0.01 时保留两位小数的建议值一定能落进格子。 -->
+          <input type="range" id="power" min="0.55" max="6.6" step="0.01" value="2.20">
           <div class="power-chips-row">
             <button type="button" class="power-chip" data-speed="2.05" title="轻力 25% (2.05 m/s)">轻 25%</button>
             <button type="button" class="power-chip" data-speed="3.55" title="中力 50% (3.55 m/s)">中 50%</button>
@@ -1468,8 +1494,11 @@
         <div id="report" class="empty">点「新的一局」开始。</div>
       </div>
 
-      <div class="card hero">
-        <h2>AI 击球战术建议</h2>
+      <!-- 卡片的配色归卡片自己（.opponent 换成琥珀色），标题里的角标写明这份方案
+           是给谁算的：轮到对手时「求解」给出的是防你用的方案，混在自己的建议里
+           会被当成「让我这么打」。角标默认隐藏，只有真的给对手算过才亮。 -->
+      <div class="card hero" id="gAdviceCard">
+        <h2>AI 击球战术建议<span id="gAdviceTag" class="adv-tag hidden">对手方案</span></h2>
         <div id="gAdvice" class="empty">—</div>
         <div id="gVerdict"></div>
       </div>

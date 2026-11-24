@@ -377,9 +377,11 @@ test('practiceHint：练习模式但还没解，先让人去求解', () => {
 
 test('practiceHint：记完一杆之后换成「可以接着记」', () => {
   const solved = { found: true, best: { pocketId: 'top-left' } };
+  // 文案必须和按钮上的字一模一样：面板写「进了 / 没进」而按钮叫「实战打进 /
+  // 实战没进」时，用户会去找两个不存在的按钮（真机走查报的）。
   assert.equal(
     practiceHint({ mode: 'practice', solution: solved, practiceRecorded: false }),
-    '按实际结果点「进了」或「没进」——记下来才看得出进步。'
+    '按实际结果点「实战打进」或「实战没进」——记下来才看得出进步。'
   );
   assert.equal(
     practiceHint({ mode: 'practice', solution: solved, practiceRecorded: true }),
@@ -996,9 +998,15 @@ test('autoPauseHint：暂停时给可点的恢复入口，关掉开关时说清�
   assert.equal(off.canResume, false);
   assert.match(off.text, /对手自动出杆已关闭/);
 
-  // 暂停提示不按回合隐藏：读档时轮到玩家也要说「已暂停」，否则用户下次看到
-  // 对手不动时就没有线索去查开关；这条提示会在用户出手或点继续后自己消失。
-  assert.equal(autoPauseHint({ game: { ...opponentTurn, turn: 0 }, autoOpponent: true, autoPaused: true }).level, 'paused');
+  // 暂停提示不按回合隐藏：读档时轮到玩家也要说一句「局面停住了」，否则用户下次
+  // 看到对手不动时就没有线索去查开关；这条提示会在用户出手或点继续后自己消失。
+  const mine = autoPauseHint({ game: { ...opponentTurn, turn: 0 }, autoOpponent: true, autoPaused: true });
+  assert.equal(mine.level, 'paused');
+  // 轮到玩家时没有「对手的自动出杆」可以暂停，说成「已暂停对手自动出杆」会让人
+  // 以为对手正等他。这一档要说的是「局面停住了，继续之后自己求解」。
+  assert.doesNotMatch(mine.text, /已暂停对手自动出杆/);
+  assert.match(mine.text, /点此继续/);
+  assert.match(mine.text, /求解/);
   // 但「开关关掉」那条只在轮到对手时才有意义
   assert.equal(autoPauseHint({ game: { ...opponentTurn, turn: 0 }, autoOpponent: false, autoPaused: false }), null);
   // 一局结束 / 没开局：不要在台面上压一条常驻提示
